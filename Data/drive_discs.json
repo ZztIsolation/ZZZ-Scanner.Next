@@ -1,0 +1,49 @@
+{
+  "version": "2026-05-19",
+  "source": {
+    "primaryPages": [
+      "https://wiki.biligame.com/zzz/%E9%A9%B1%E5%8A%A8%E7%9B%98%E5%9B%BE%E9%89%B4",
+      "https://wiki.biligame.com/zzz/%E9%A9%B1%E5%8A%A8%E7%9B%98"
+    ],
+    "notes": "The scanner uses this catalog as the OCR correction dictionary. The set list was organized from the requested BiliGame wiki pages; extraNameCandidates is deliberately separate so newer names can be added without changing scan code."
+  },
+  "sets": [
+    { "name": "自由蓝调", "wikiListOrder": 1, "sourcePage": "https://wiki.biligame.com/zzz/%E8%87%AA%E7%94%B1%E8%93%9D%E8%B0%83", "minRarity": "B", "maxRarity": "S" },
+    { "name": "震星迪斯科", "wikiListOrder": 2, "sourcePage": "https://wiki.biligame.com/zzz/%E9%9C%87%E6%98%9F%E8%BF%AA%E6%96%AF%E7%A7%91", "minRarity": "B", "maxRarity": "S" },
+    { "name": "极地重金属", "wikiListOrder": 3, "sourcePage": "https://wiki.biligame.com/zzz/%E6%9E%81%E5%9C%B0%E9%87%8D%E9%87%91%E5%B1%9E", "minRarity": "B", "maxRarity": "S" },
+    { "name": "獠牙重金属", "wikiListOrder": 4, "sourcePage": "https://wiki.biligame.com/zzz/%E7%8D%A0%E7%89%99%E9%87%8D%E9%87%91%E5%B1%9E", "minRarity": "B", "maxRarity": "S" },
+    { "name": "激素朋克", "wikiListOrder": 5, "sourcePage": "https://wiki.biligame.com/zzz/%E6%BF%80%E7%B4%A0%E6%9C%8B%E5%85%8B", "minRarity": "B", "maxRarity": "S" },
+    { "name": "混沌重金属", "wikiListOrder": 6, "sourcePage": "https://wiki.biligame.com/zzz/%E6%B7%B7%E6%B2%8C%E9%87%8D%E9%87%91%E5%B1%9E", "minRarity": "B", "maxRarity": "S" },
+    { "name": "啄木鸟电音", "wikiListOrder": 7, "sourcePage": "https://wiki.biligame.com/zzz/%E5%95%84%E6%9C%A8%E9%B8%9F%E7%94%B5%E9%9F%B3", "minRarity": "B", "maxRarity": "S" },
+    { "name": "摇摆爵士", "wikiListOrder": 8, "sourcePage": "https://wiki.biligame.com/zzz/%E6%91%87%E6%91%86%E7%88%B5%E5%A3%AB", "minRarity": "B", "maxRarity": "S" },
+    { "name": "雷暴重金属", "wikiListOrder": 9, "sourcePage": "https://wiki.biligame.com/zzz/%E9%9B%B7%E6%9A%B4%E9%87%8D%E9%87%91%E5%B1%9E", "minRarity": "B", "maxRarity": "S" },
+    { "name": "河豚电音", "wikiListOrder": 10, "sourcePage": "https://wiki.biligame.com/zzz/%E6%B2%B3%E8%B1%9A%E7%94%B5%E9%9F%B3", "minRarity": "B", "maxRarity": "S" },
+    { "name": "炎狱重金属", "wikiListOrder": 11, "sourcePage": "https://wiki.biligame.com/zzz/%E7%82%8E%E7%8B%B1%E9%87%8D%E9%87%91%E5%B1%9E", "minRarity": "B", "maxRarity": "S" },
+    { "name": "灵魂摇滚", "wikiListOrder": 12, "sourcePage": "https://wiki.biligame.com/zzz/%E7%81%B5%E9%AD%82%E6%91%87%E6%BB%9A", "minRarity": "B", "maxRarity": "S" },
+    { "name": "原始朋克", "wikiListOrder": 13, "sourcePage": "https://wiki.biligame.com/zzz/%E5%8E%9F%E5%A7%8B%E6%9C%8B%E5%85%8B", "minRarity": "B", "maxRarity": "S" },
+    { "name": "混沌爵士", "wikiListOrder": 14, "sourcePage": "https://wiki.biligame.com/zzz/%E6%B7%B7%E6%B2%8C%E7%88%B5%E5%A3%AB", "minRarity": "B", "maxRarity": "S" },
+    { "name": "折枝剑歌", "wikiListOrder": 15, "sourcePage": "https://wiki.biligame.com/zzz/%E6%8A%98%E6%9E%9D%E5%89%91%E6%AD%8C", "minRarity": "B", "maxRarity": "S" },
+    { "name": "静听嘉音", "wikiListOrder": 16, "sourcePage": "https://wiki.biligame.com/zzz/%E9%9D%99%E5%90%AC%E5%98%89%E9%9F%B3", "minRarity": "B", "maxRarity": "S" },
+    { "name": "如影相随", "wikiListOrder": 17, "sourcePage": "https://wiki.biligame.com/zzz/%E5%A6%82%E5%BD%B1%E7%9B%B8%E9%9A%8F", "minRarity": "B", "maxRarity": "S" },
+    { "name": "法厄同之歌", "wikiListOrder": 18, "sourcePage": "https://wiki.biligame.com/zzz/%E6%B3%95%E5%8E%84%E5%90%8C%E4%B9%8B%E6%AD%8C", "minRarity": "B", "maxRarity": "S" },
+    { "name": "云岿如我", "wikiListOrder": 19, "sourcePage": "https://wiki.biligame.com/zzz/%E4%BA%91%E5%B2%BF%E5%A6%82%E6%88%91", "minRarity": "B", "maxRarity": "S" },
+    { "name": "山大王", "wikiListOrder": 20, "sourcePage": "https://wiki.biligame.com/zzz/%E5%B1%B1%E5%A4%A7%E7%8E%8B", "minRarity": "B", "maxRarity": "S" },
+    { "name": "月光骑士颂", "wikiListOrder": 21, "sourcePage": "https://wiki.biligame.com/zzz/%E6%9C%88%E5%85%89%E9%AA%91%E5%A3%AB%E9%A2%82", "minRarity": "B", "maxRarity": "S" },
+    { "name": "拂晓生花", "wikiListOrder": 22, "sourcePage": "https://wiki.biligame.com/zzz/%E6%8B%82%E6%99%93%E7%94%9F%E8%8A%B1", "minRarity": "B", "maxRarity": "S" }
+  ],
+  "extraNameCandidates": [
+    "沧浪行歌",
+    "流光咏叹",
+    "雪兔梦游仙境",
+    "囚徒手记",
+    "独角兽电音",
+    "季风放克",
+    "狂欢朋克",
+    "流浪民谣",
+    "猛犸电音",
+    "末日碾核",
+    "杀手民谣",
+    "歪曲碾核",
+    "喧闹波普"
+  ]
+}

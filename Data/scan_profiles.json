@@ -1,0 +1,67 @@
+{
+  "version": "2026-05-19",
+  "profiles": [
+    {
+      "name": "ZZZ背包驱动盘-16比9",
+      "traversalMode": "SafeBandViewport",
+      "standardScreen": [1920, 1080],
+      "visibleRows": 4,
+      "visibleColumns": 9,
+      "waitForBackpackSeconds": 10,
+      "clickDelayMs": 60,
+      "loadTimeoutMs": 1200,
+      "loadPollMs": 25,
+      "panelSettleDelayMs": 70,
+      "panelUnchangedFallbackMs": 110,
+      "listStableConfirmFrames": 1,
+      "wheelDelayMs": 500,
+      "scrollWheelDelta": -120,
+      "scrollTickDelta": -120,
+      "scrollTickDelayMs": 50,
+      "scrollMaxTicksPerRow": 25,
+      "calibrationRows": 5,
+      "duplicateRowThreshold": 9,
+      "resetToTopWheelTicks": 180,
+      "resetToTopWheelDelayMs": 50,
+      "colorTolerance": 26,
+      "points": {
+        "driveDiscTab": [1530, 170],
+        "listWheelArea": [690, 520],
+        "scrollBarTop": [1366, 242],
+        "scrollBarBottom": [1366, 862],
+        "driveDiscOffset": [80, 145],
+        "driveDiscStep": [135, 175],
+        "dismantleButton": [222, 930],
+        "statBackgroundOffset": [10, 20]
+      },
+      "colors": {
+        "scrollBar": [255, 128, 128, 128],
+        "dismantleButton": [255, 0, 186, 255],
+        "rarityS": [255, 255, 181, 0],
+        "rarityA": [255, 233, 0, 255],
+        "rarityB": [255, 0, 169, 255],
+        "detailPanelBackground": [255, 0, 0, 0],
+        "statRowBackground": [255, 22, 22, 22]
+      },
+      "rectangles": {
+        "inventoryCount": [70, 120, 335, 160],
+        "listGridRect": [96, 208, 1312, 892],
+        "rowAlignProbeRect": [100, 300, 1298, 860],
+        "detailPanel": [1400, 258, 1850, 775],
+        "panelChangeProbeRect": [1410, 270, 1830, 760],
+        "name": [1410, 270, 1635, 310],
+        "level": [1465, 405, 1600, 435],
+        "mainStat": [1418, 489, 1720, 530],
+        "mainStatValue": [1730, 489, 1830, 530],
+        "subStat1": [1418, 567, 1720, 608],
+        "subStatValue1": [1730, 567, 1830, 608],
+        "subStat2": [1418, 618, 1720, 659],
+        "subStatValue2": [1730, 618, 1830, 659],
+        "subStat3": [1418, 670, 1720, 711],
+        "subStatValue3": [1730, 670, 1830, 711],
+        "subStat4": [1418, 722, 1720, 763],
+        "subStatValue4": [1730, 722, 1830, 763]
+      }
+    }
+  ]
+}
