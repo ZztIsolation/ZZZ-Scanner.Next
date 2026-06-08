@@ -1,0 +1,37 @@
+# Build output
+bin/
+obj/
+publish/
+publish-*/
+dist/
+artifacts/
+
+# Runtime scan output
+Scans/
+**/Scans/
+*.log
+*.csv
+*.error.txt
+*.panel.png
+preview-detail-panel.png
+
+# User and IDE files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Local caches
+TestResults/
+*.nupkg
+*.snupkg
+
+# Large OCR model is bundled in release archives.
+Resources/models/*.onnx
