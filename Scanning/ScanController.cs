@@ -20,8 +20,27 @@ public sealed class ScanController
     private const int PanelStableTolerance = 4;
     private const int ListMovementTolerance = 6;
     private const int ListStableTolerance = 4;
+    private const int FastPanelAverageChangeScore = 9;
+    private const int FastPanelTextChangeScore = 14;
+    private const int FastPanelChangedTextProbeCount = 1;
     private const int RowShiftMatchTolerance = 36;
     private const int RowShiftClearMargin = 8;
+    private const int SafeBandScrollDefaultDelayMs = 80;
+    private const int AdaptiveScrollFastDelayMs = 65;
+    private const int AdaptiveScrollSuccessWindow = 10;
+    private const int AdaptiveScrollMovedDistanceThreshold = 19;
+    private const int ScrollGraceMovedDistanceThreshold = 15;
+    private const int ScrollGraceWaitMs = 120;
+    private const int SafeBandScrollRetryInitialDelayMs = 160;
+    private const int SafeBandScrollRetrySecondDelayMs = 280;
+    private const int CancelDrainMaxWaitMs = 2000;
+    private const int OcrBacklogThrottleThreshold = 32;
+    private const int OcrBacklogThrottleTarget = 24;
+    private const int OcrBacklogThrottleMaxWaitMs = 800;
+    private const int OcrBacklogThrottlePollMs = 40;
+    private const int PanelCaptureMaxAttempts = 3;
+    private const int PanelCaptureRetryDelayMs = 90;
+    private const int MaxConsecutivePanelCaptureFailures = 3;
     private const int SignatureColumns = 8;
     private const int SignatureRows = 4;
 
@@ -95,18 +114,21 @@ public sealed class ScanController
             var ocrWorkers = StartOcrWorkers(queue, ocrResults, outputDir, options, scanLog, ocrWorkerCount, ocrIntraOpThreads, counters, ocrDiagnostics, sampleCollector);
             var resultConsumer = Task.Run(() => ConsumeOcrResults(ocrResults, results, counters, outputDir, progress, scanLog, duplicateGuard, options, linked));
             var captureCompleted = false;
+            var canceledDuringCapture = false;
+            var drainAfterCancellation = false;
 
             try
             {
                 await PrepareBackpackAsync(window, profile, progress, counters, scanLog, linked.Token);
                 monitor = Task.Run(() => MonitorBackpackAsync(window, profile, linked, progress, counters, scanLog), cancellationToken);
                 var inventoryCount = TryReadInventoryCount(window, profile, inventoryRecognizer, scanLog);
-                await ProduceCapturesAsync(window, profile, queue, options, counters, progress, scanLog, inventoryCount, traversalMode, linked.Token);
+                await ProduceCapturesAsync(window, profile, queue, ocrResults, options, counters, progress, scanLog, outputDir, inventoryCount, traversalMode, linked.Token);
                 captureCompleted = true;
                 Report(progress, counters, "截图采集完成，后台 OCR 正在收尾。");
             }
             catch (OperationCanceledException)
             {
+                canceledDuringCapture = true;
                 scanLog.Write("Scan canceled.");
                 Report(progress, counters, "扫描已停止。");
             }
@@ -122,11 +144,19 @@ public sealed class ScanController
                 queue.CompleteAdding();
                 if (!captureCompleted)
                 {
-                    Interlocked.CompareExchange(ref counters.StopAfterIndex, Math.Max(1, Volatile.Read(ref counters.Queued)), 0);
-                    var discarded = DisposeQueuedCaptures(queue);
-                    if (discarded > 0)
+                    drainAfterCancellation = canceledDuringCapture && Volatile.Read(ref counters.StopAfterIndex) == 0;
+                    if (drainAfterCancellation)
                     {
-                        scanLog.Write($"Discarded {discarded} queued captures after early stop.");
+                        scanLog.Write($"Cancel drain started. queued={Volatile.Read(ref counters.Queued)}, completed={Volatile.Read(ref counters.Completed)}, failed={Volatile.Read(ref counters.Failed)}, backlog={CurrentOcrBacklog(counters)}, maxWaitMs={CancelDrainMaxWaitMs}.");
+                    }
+                    else
+                    {
+                        Interlocked.CompareExchange(ref counters.StopAfterIndex, Math.Max(1, Volatile.Read(ref counters.Queued)), 0);
+                        var discarded = DisposeQueuedCaptures(queue);
+                        if (discarded > 0)
+                        {
+                            scanLog.Write($"Discarded {discarded} queued captures after early stop.");
+                        }
                     }
                 }
 
@@ -135,7 +165,23 @@ public sealed class ScanController
 
             try
             {
-                await Task.WhenAll(ocrWorkers);
+                var ocrWorkersTask = Task.WhenAll(ocrWorkers);
+                if (drainAfterCancellation)
+                {
+                    var drainSw = Stopwatch.StartNew();
+                    if (await Task.WhenAny(ocrWorkersTask, Task.Delay(CancelDrainMaxWaitMs)) != ocrWorkersTask)
+                    {
+                        Interlocked.CompareExchange(ref counters.StopAfterIndex, Math.Max(1, Volatile.Read(ref counters.Queued)), 0);
+                        var discarded = DisposeQueuedCaptures(queue);
+                        scanLog.Write($"Cancel drain timed out after {drainSw.ElapsedMilliseconds}ms. Discarded {discarded} queued captures. queued={Volatile.Read(ref counters.Queued)}, completed={Volatile.Read(ref counters.Completed)}, failed={Volatile.Read(ref counters.Failed)}, backlog={CurrentOcrBacklog(counters)}.");
+                    }
+                    else
+                    {
+                        scanLog.Write($"Cancel drain completed in {drainSw.ElapsedMilliseconds}ms. queued={Volatile.Read(ref counters.Queued)}, completed={Volatile.Read(ref counters.Completed)}, failed={Volatile.Read(ref counters.Failed)}, backlog={CurrentOcrBacklog(counters)}.");
+                    }
+                }
+
+                await ocrWorkersTask;
             }
             catch (Exception ex)
             {
@@ -168,7 +214,7 @@ public sealed class ScanController
 
         var ordered = results.OrderBy(x => x.Index).ToList();
         var exportFile = Path.Combine(outputDir, "export.json");
-        await File.WriteAllTextAsync(exportFile, JsonSerializer.Serialize(ordered, JsonDefaults.Write), cancellationToken);
+        await File.WriteAllTextAsync(exportFile, JsonSerializer.Serialize(ordered, JsonDefaults.Write), CancellationToken.None);
 
         Report(progress, counters, $"完成：输出 {ordered.Count} 条，失败 {counters.Failed} 条。");
         return new ScanSessionResult
@@ -263,17 +309,19 @@ public sealed class ScanController
         GameWindow window,
         ScanProfile profile,
         BlockingCollection<DiscCapture> queue,
+        BlockingCollection<OcrWorkResult> ocrResults,
         ScanOptions options,
         Counters counters,
         IProgress<ScanProgress> progress,
         ScanLog scanLog,
+        string outputDir,
         int? inventoryCount,
         ScanTraversalMode traversalMode,
         CancellationToken token)
     {
         if (traversalMode == ScanTraversalMode.SafeBandViewport && inventoryCount is > 0)
         {
-            await ProduceCapturesSafeBandViewportAsync(window, profile, queue, options, counters, progress, scanLog, inventoryCount.Value, token);
+            await ProduceCapturesSafeBandViewportAsync(window, profile, queue, ocrResults, options, counters, progress, scanLog, outputDir, inventoryCount.Value, token);
             return;
         }
 
@@ -286,7 +334,7 @@ public sealed class ScanController
 
         if (traversalMode == ScanTraversalMode.CalibratedPage && inventoryCount is > 0)
         {
-            await ProduceCapturesCalibratedPageAsync(window, profile, queue, options, counters, progress, scanLog, inventoryCount.Value, token);
+            await ProduceCapturesCalibratedPageAsync(window, profile, queue, ocrResults, options, counters, progress, scanLog, outputDir, inventoryCount.Value, token);
             return;
         }
 
@@ -297,17 +345,19 @@ public sealed class ScanController
             throw new InvalidOperationException("仓库数量 OCR 失败，校准翻页无法计算总行数。请确认数量区域可见后重试，或手动选择旧版第3行兼容模式。");
         }
 
-        await ProduceCapturesLegacyThirdRowAsync(window, profile, queue, options, counters, progress, scanLog, inventoryCount, token);
+        await ProduceCapturesLegacyThirdRowAsync(window, profile, queue, ocrResults, options, counters, progress, scanLog, outputDir, inventoryCount, token);
     }
 
     private static async Task ProduceCapturesSafeBandViewportAsync(
         GameWindow window,
         ScanProfile profile,
         BlockingCollection<DiscCapture> queue,
+        BlockingCollection<OcrWorkResult> ocrResults,
         ScanOptions options,
         Counters counters,
         IProgress<ScanProgress> progress,
         ScanLog scanLog,
+        string outputDir,
         int inventoryCount,
         CancellationToken token)
     {
@@ -329,10 +379,13 @@ public sealed class ScanController
         scanLog.Write($"Traversal: safe-band viewport. inventoryCount={inventoryCount}, totalRows={totalRows}, visibleRows={visibleRows}, columns={columns}, lastRowColumns={lastRowColumns}, maxVisibleTop={maxVisibleTop}, listGrid={listGridRect}, panelProbe={panelChangeProbeRect}, scrollTickDelta={profile.ScrollTickDelta}.");
         await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
 
+        var scrollPacing = new SafeBandScrollPacingState();
+        var panelState = new PanelReadinessState();
         var visibleTopLogicalRow = 1;
         for (var logicalRow = 1; logicalRow <= totalRows; logicalRow++)
         {
             token.ThrowIfCancellationRequested();
+            var previousVisibleTopLogicalRow = visibleTopLogicalRow;
             visibleTopLogicalRow = await MoveLogicalRowIntoSafeBandAsync(
                 window,
                 profile,
@@ -342,10 +395,13 @@ public sealed class ScanController
                 maxVisibleTop,
                 totalRows,
                 logicalRow,
+                counters,
+                scrollPacing,
                 scanLog,
                 token);
 
             var visualRow = logicalRow - visibleTopLogicalRow + 1;
+            var afterScrollRow = visibleTopLogicalRow != previousVisibleTopLogicalRow;
             var viewportState = ViewportStateLabel(visibleTopLogicalRow, maxVisibleTop);
             var maxColumns = logicalRow == totalRows ? lastRowColumns : columns;
             scanLog.WriteEvent("VIEWPORT_STATE", $"targetLogicalRow={logicalRow}, visualRow={visualRow}, visibleTopLogicalRow={visibleTopLogicalRow}, maxVisibleTop={maxVisibleTop}, state={viewportState}, columns={maxColumns}, visited={counters.Visited}, queued={counters.Queued}");
@@ -355,10 +411,12 @@ public sealed class ScanController
                 window,
                 profile,
                 queue,
+                ocrResults,
                 options,
                 counters,
                 progress,
                 scanLog,
+                outputDir,
                 offset,
                 step,
                 panelRect,
@@ -375,7 +433,9 @@ public sealed class ScanController
                 token,
                 enforceSafeBand: true,
                 visibleTopLogicalRow: visibleTopLogicalRow,
-                maxVisibleTop: maxVisibleTop
+                maxVisibleTop: maxVisibleTop,
+                afterScrollRow: afterScrollRow,
+                panelState: panelState
                 );
             if (rowResult == RowScanResult.Stop)
             {
@@ -391,10 +451,12 @@ public sealed class ScanController
         GameWindow window,
         ScanProfile profile,
         BlockingCollection<DiscCapture> queue,
+        BlockingCollection<OcrWorkResult> ocrResults,
         ScanOptions options,
         Counters counters,
         IProgress<ScanProgress> progress,
         ScanLog scanLog,
+        string outputDir,
         int inventoryCount,
         CancellationToken token)
     {
@@ -439,10 +501,12 @@ public sealed class ScanController
                     window,
                     profile,
                     queue,
+                    ocrResults,
                     options,
                     counters,
                     progress,
                     scanLog,
+                    outputDir,
                     offset,
                     step,
                     panelRect,
@@ -494,10 +558,12 @@ public sealed class ScanController
         GameWindow window,
         ScanProfile profile,
         BlockingCollection<DiscCapture> queue,
+        BlockingCollection<OcrWorkResult> ocrResults,
         ScanOptions options,
         Counters counters,
         IProgress<ScanProgress> progress,
         ScanLog scanLog,
+        string outputDir,
         int? inventoryCount,
         CancellationToken token)
     {
@@ -527,10 +593,12 @@ public sealed class ScanController
                 window,
                 profile,
                 queue,
+                ocrResults,
                 options,
                 counters,
                 progress,
                 scanLog,
+                outputDir,
                 offset,
                 step,
                 panelRect,
@@ -577,10 +645,12 @@ public sealed class ScanController
         GameWindow window,
         ScanProfile profile,
         BlockingCollection<DiscCapture> queue,
+        BlockingCollection<OcrWorkResult> ocrResults,
         ScanOptions options,
         Counters counters,
         IProgress<ScanProgress> progress,
         ScanLog scanLog,
+        string outputDir,
         PointF offset,
         PointF step,
         Rectangle panelRect,
@@ -597,10 +667,13 @@ public sealed class ScanController
         CancellationToken token,
         bool enforceSafeBand = false,
         int visibleTopLogicalRow = 1,
-        int maxVisibleTop = 1)
+        int maxVisibleTop = 1,
+        bool afterScrollRow = false,
+        PanelReadinessState? panelState = null)
     {
         var currentY = offset.Y + step.Y * row;
-        ImageSignature[]? previousPanelSignatures = null;
+        ImageSignature[]? localPanelSignatures = null;
+        var consecutivePanelCaptureFailures = 0;
         for (var col = 1; col <= maxColumns; col++)
         {
             token.ThrowIfCancellationRequested();
@@ -650,45 +723,124 @@ public sealed class ScanController
             counters.Visited++;
             if (!options.Rarities.Contains(rarity))
             {
+                if (panelState is null)
+                {
+                    consecutivePanelCaptureFailures = 0;
+                }
+                else
+                {
+                    panelState.ClearFailures();
+                }
+
                 Report(progress, counters, $"跳过 {rarity} 级驱动盘。");
                 continue;
             }
 
-            scanLog.WriteEvent("CELL_CLICK", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={(enforceSafeBand ? visibleTopLogicalRow.ToString() : "unknown")}, state={(enforceSafeBand ? ViewportStateLabel(visibleTopLogicalRow, maxVisibleTop) : "unknown")}, point={clickPoint}");
-            window.LeftClickCurrent();
-
-            using var panelCapture = await CaptureStablePanelAsync(window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect, previousPanelSignatures, scanLog, token);
-            var panelImage = panelCapture.TakeImage();
-            var captureRois = rois.Take(panelCapture.VisibleRoiCount).ToArray();
-            var debugImage = options.ShowDebugImages ? (Bitmap)panelImage.Clone() : null;
-            previousPanelSignatures = panelCapture.ProbeSignatures;
-            var itemIndex = Interlocked.Increment(ref counters.Queued);
-            var enqueueWait = Stopwatch.StartNew();
-            var enqueued = false;
-            try
+            var previousPanelSignatures = panelState?.Signatures ?? localPanelSignatures;
+            var panelCapture = await TryCaptureCellPanelAsync(
+                window,
+                profile,
+                rois,
+                statOffset,
+                statRowBackground,
+                panelRect,
+                panelChangeProbeRect,
+                previousPanelSignatures,
+                scanLog,
+                progress,
+                counters,
+                pass,
+                logicalRow,
+                row,
+                col,
+                maxColumns,
+                enforceSafeBand,
+                visibleTopLogicalRow,
+                maxVisibleTop,
+                clickPoint,
+                token);
+            if (panelCapture is null)
             {
-                queue.Add(new DiscCapture(itemIndex, rarity, panelImage, captureRois), token);
-                enqueued = true;
-            }
-            finally
-            {
-                enqueueWait.Stop();
-                if (!enqueued)
+                var itemIndex = Interlocked.Increment(ref counters.Queued);
+                var detail = BuildPanelCaptureFailureDetail(itemIndex, rarity, pass, logicalRow, row, col, maxColumns, clickPoint);
+                TrySavePanelFailureImage(window, panelRect, outputDir, itemIndex, scanLog);
+                ocrResults.Add(OcrWorkResult.Failure(itemIndex, detail, "详情面板截图等待超时"));
+                scanLog.WriteEvent("CELL_CAPTURE_FAILED", $"index={itemIndex}, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, point={clickPoint}, queued={counters.Queued}");
+                Report(progress, counters, $"详情面板超时，已记录失败 #{itemIndex} 并继续。");
+                int failureCount;
+                if (panelState is null)
                 {
-                    panelImage.Dispose();
+                    localPanelSignatures = null;
+                    consecutivePanelCaptureFailures++;
+                    failureCount = consecutivePanelCaptureFailures;
                 }
+                else
+                {
+                    panelState.ResetSignatures();
+                    failureCount = panelState.RecordFailure();
+                }
+
+                if (failureCount >= MaxConsecutivePanelCaptureFailures)
+                {
+                    throw new TimeoutException($"连续 {failureCount} 个格子详情面板截图等待超时，请确认游戏窗口未卡住、详情区未被遮挡。");
+                }
+
+                continue;
             }
 
-            if (enqueueWait.ElapsedMilliseconds >= 120)
+            using (panelCapture)
             {
-                scanLog.Write($"OCR queue backpressure: waited {enqueueWait.ElapsedMilliseconds}ms to enqueue #{itemIndex}, queueCount={queue.Count}.");
-            }
+                var panelImage = panelCapture.TakeImage();
+                var captureRois = rois.Take(panelCapture.VisibleRoiCount).ToArray();
+                var debugImage = options.ShowDebugImages ? (Bitmap)panelImage.Clone() : null;
+                if (panelState is null)
+                {
+                    consecutivePanelCaptureFailures = 0;
+                    localPanelSignatures = panelCapture.VisibleRoiCount == rois.Length
+                        ? panelCapture.ProbeSignatures
+                        : null;
+                }
+                else
+                {
+                    panelState.ClearFailures();
+                    if (panelCapture.VisibleRoiCount == rois.Length)
+                    {
+                        panelState.Update(panelCapture.ProbeSignatures);
+                    }
+                    else
+                    {
+                        panelState.ResetSignatures();
+                    }
+                }
 
-            scanLog.WriteEvent("CELL_TIMING", $"index={itemIndex}, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, panelWaitMs={panelCapture.WaitMilliseconds:F1}, enqueueWaitMs={enqueueWait.Elapsed.TotalMilliseconds:F1}, fallback={panelCapture.UsedFallback}, visibleRois={panelCapture.VisibleRoiCount}/{rois.Length}, totalMs={sw.ElapsedMilliseconds}");
-            var queueMessage = options.ShowDebugImages || itemIndex % 25 == 0
-                ? $"入队 #{itemIndex}：{rarity}，{captureRois.Length} 个文本区域，用时 {sw.ElapsedMilliseconds}ms。"
-                : "";
-            Report(progress, counters, queueMessage, debugImage: debugImage);
+                var itemIndex = Interlocked.Increment(ref counters.Queued);
+                var enqueueWait = Stopwatch.StartNew();
+                var enqueued = false;
+                try
+                {
+                    queue.Add(new DiscCapture(itemIndex, rarity, panelImage, captureRois), token);
+                    enqueued = true;
+                }
+                finally
+                {
+                    enqueueWait.Stop();
+                    if (!enqueued)
+                    {
+                        panelImage.Dispose();
+                    }
+                }
+
+                if (enqueueWait.ElapsedMilliseconds >= 120)
+                {
+                    scanLog.Write($"OCR queue backpressure: waited {enqueueWait.ElapsedMilliseconds}ms to enqueue #{itemIndex}, queueCount={queue.Count}.");
+                }
+
+                scanLog.WriteEvent("CELL_TIMING", $"index={itemIndex}, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, afterScrollRow={afterScrollRow}, panelWaitMs={panelCapture.WaitMilliseconds:F1}, enqueueWaitMs={enqueueWait.Elapsed.TotalMilliseconds:F1}, fallback={panelCapture.UsedFallback}, visibleRois={panelCapture.VisibleRoiCount}/{rois.Length}, totalMs={sw.ElapsedMilliseconds}, fastAccept={panelCapture.FastAccepted}, probeChangeScore={panelCapture.ProbeChangeScore}, stableFrames={panelCapture.StableProbeFrames}");
+                var queueMessage = options.ShowDebugImages || itemIndex % 25 == 0
+                    ? $"入队 #{itemIndex}：{rarity}，{captureRois.Length} 个文本区域，用时 {sw.ElapsedMilliseconds}ms。"
+                    : "";
+                Report(progress, counters, queueMessage, debugImage: debugImage);
+            }
         }
 
         return RowScanResult.Completed;
@@ -730,18 +882,77 @@ public sealed class ScanController
             return Math.Clamp(options.OcrWorkerCount, 1, 4);
         }
 
-        return options.HighSpeedOcr ? Math.Min(3, Math.Max(2, Environment.ProcessorCount / 4)) : 1;
+        // Single session avoids L2/L3 cache thrashing between ONNX sessions.
+        // ORT parallelizes internally via IntraOpThreads.
+        return 1;
     }
 
     private static int ResolveOcrIntraOpThreads(ScanOptions options, int workerCount)
     {
         var requested = Math.Clamp(options.OcrIntraOpThreads, 1, 8);
-        if (!options.HighSpeedOcr || workerCount <= 1)
+        if (workerCount > 1)
+        {
+            return Math.Max(1, Math.Min(requested, Math.Max(2, Environment.ProcessorCount / Math.Max(1, workerCount * 2))));
+        }
+
+        if (!options.HighSpeedOcr)
         {
             return requested;
         }
 
-        return Math.Max(1, Math.Min(requested, Math.Max(2, Environment.ProcessorCount / Math.Max(1, workerCount * 2))));
+        // Single worker high-speed: use half the cores (leave room for game + capture).
+        return Math.Clamp(Math.Max(requested, Environment.ProcessorCount / 2), 2, 8);
+    }
+
+    private static async Task<PanelCapture?> TryCaptureCellPanelAsync(
+        GameWindow window,
+        ScanProfile profile,
+        IReadOnlyList<CvRect> rois,
+        System.Drawing.Point statOffset,
+        Color statRowBackground,
+        Rectangle panelRect,
+        Rectangle panelChangeProbeRect,
+        ImageSignature[]? previousPanelSignatures,
+        ScanLog scanLog,
+        IProgress<ScanProgress> progress,
+        Counters counters,
+        int pass,
+        int? logicalRow,
+        int visualRow,
+        int col,
+        int maxColumns,
+        bool enforceSafeBand,
+        int visibleTopLogicalRow,
+        int maxVisibleTop,
+        System.Drawing.Point clickPoint,
+        CancellationToken token)
+    {
+        TimeoutException? lastTimeout = null;
+        for (var attempt = 1; attempt <= PanelCaptureMaxAttempts; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            scanLog.WriteEvent("CELL_CLICK", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={visualRow}, col={col}/{maxColumns}, attempt={attempt}/{PanelCaptureMaxAttempts}, visibleTopLogicalRow={(enforceSafeBand ? visibleTopLogicalRow.ToString() : "unknown")}, state={(enforceSafeBand ? ViewportStateLabel(visibleTopLogicalRow, maxVisibleTop) : "unknown")}, point={clickPoint}");
+            window.LeftClick(clickPoint);
+
+            try
+            {
+                return await CaptureStablePanelAsync(window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect, previousPanelSignatures, scanLog, token);
+            }
+            catch (TimeoutException ex) when (attempt < PanelCaptureMaxAttempts)
+            {
+                lastTimeout = ex;
+                scanLog.WriteEvent("CELL_CAPTURE_RETRY", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={visualRow}, col={col}/{maxColumns}, attempt={attempt}/{PanelCaptureMaxAttempts}, point={clickPoint}, reason={ex.Message}");
+                Report(progress, counters, $"详情面板等待超时，重试第 {attempt + 1}/{PanelCaptureMaxAttempts} 次。");
+                await Task.Delay(PanelCaptureRetryDelayMs, token);
+            }
+            catch (TimeoutException ex)
+            {
+                lastTimeout = ex;
+            }
+        }
+
+        scanLog.Write($"Cell panel capture failed after {PanelCaptureMaxAttempts} attempts: pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={visualRow}, col={col}/{maxColumns}, point={clickPoint}, lastError={lastTimeout?.Message}");
+        return null;
     }
 
     private static Rectangle ProfileRectangleOrFallback(GameWindow window, ScanProfile profile, string key, Rectangle fallback)
@@ -769,12 +980,15 @@ public sealed class ScanController
         int maxVisibleTop,
         int totalRows,
         int logicalRow,
+        Counters counters,
+        SafeBandScrollPacingState scrollPacing,
         ScanLog scanLog,
         CancellationToken token)
     {
         var desiredTop = ChooseSafeVisibleTop(logicalRow, totalRows, maxVisibleTop);
         while (visibleTopLogicalRow < desiredTop)
         {
+            await WaitForOcrBacklogBeforeScrollAsync(counters, scanLog, token);
             var result = await ScrollSafeBandOneRowWithRetryAsync(
                 window,
                 profile,
@@ -782,6 +996,7 @@ public sealed class ScanController
                 rowSignatureRects,
                 visibleTopLogicalRow,
                 maxVisibleTop,
+                scrollPacing,
                 scanLog,
                 token);
             if (!result.Success)
@@ -807,6 +1022,35 @@ public sealed class ScanController
         }
 
         return visibleTopLogicalRow;
+    }
+
+    private static async Task WaitForOcrBacklogBeforeScrollAsync(Counters counters, ScanLog scanLog, CancellationToken token)
+    {
+        var beforeBacklog = CurrentOcrBacklog(counters);
+        if (beforeBacklog < OcrBacklogThrottleThreshold)
+        {
+            return;
+        }
+
+        var sw = Stopwatch.StartNew();
+        var currentBacklog = beforeBacklog;
+        while (currentBacklog >= OcrBacklogThrottleTarget
+            && sw.ElapsedMilliseconds < OcrBacklogThrottleMaxWaitMs)
+        {
+            await Task.Delay(OcrBacklogThrottlePollMs, token);
+            currentBacklog = CurrentOcrBacklog(counters);
+        }
+
+        sw.Stop();
+        scanLog.WriteEvent("OCR_BACKLOG_THROTTLE", $"beforeBacklog={beforeBacklog}, afterBacklog={currentBacklog}, waitedMs={sw.ElapsedMilliseconds}, target={OcrBacklogThrottleTarget}, threshold={OcrBacklogThrottleThreshold}, timedOut={currentBacklog >= OcrBacklogThrottleTarget}");
+    }
+
+    private static int CurrentOcrBacklog(Counters counters)
+    {
+        return Math.Max(0,
+            Volatile.Read(ref counters.Queued)
+            - Volatile.Read(ref counters.Completed)
+            - Volatile.Read(ref counters.Failed));
     }
 
     private static int ChooseSafeVisibleTop(int logicalRow, int totalRows, int maxVisibleTop)
@@ -858,14 +1102,20 @@ public sealed class ScanController
         IReadOnlyList<Rectangle> rowSignatureRects,
         int visibleTopLogicalRow,
         int maxVisibleTop,
+        SafeBandScrollPacingState scrollPacing,
         ScanLog scanLog,
         CancellationToken token)
     {
-        var delay = Math.Max(120, profile.ScrollTickDelayMs * 2);
+        var delay = SafeBandScrollRetryInitialDelayMs;
         ScrollRowsResult last = default;
         for (var attempt = 1; attempt <= 3; attempt++)
         {
-            last = await ScrollSafeBandOneRowAsync(window, profile, listGridRect, rowSignatureRects, visibleTopLogicalRow, maxVisibleTop, scanLog, token);
+            var scrollDelayMs = attempt == 1
+                ? scrollPacing.DelayMilliseconds(profile)
+                : Math.Max(SafeBandScrollDefaultDelayMs, profile.ScrollTickDelayMs);
+            last = await ScrollSafeBandOneRowAsync(window, profile, listGridRect, rowSignatureRects, visibleTopLogicalRow, maxVisibleTop, scrollDelayMs, scanLog, token);
+            last = last with { Attempts = attempt };
+            scrollPacing.Record(last);
             if (last.Success)
             {
                 return last;
@@ -875,7 +1125,7 @@ public sealed class ScanController
             {
                 scanLog.Write($"Safe-band scroll retry {attempt + 1}/3: visibleTopLogicalRow={visibleTopLogicalRow}, failure={last.Message}");
                 await Task.Delay(delay, token);
-                delay = Math.Min(360, delay + 120);
+                delay = SafeBandScrollRetrySecondDelayMs;
             }
         }
 
@@ -890,6 +1140,7 @@ public sealed class ScanController
         IReadOnlyList<Rectangle> rowSignatureRects,
         int visibleTopLogicalRow,
         int maxVisibleTop,
+        int scrollDelayMs,
         ScanLog scanLog,
         CancellationToken token)
     {
@@ -899,35 +1150,92 @@ public sealed class ScanController
         }
 
         window.MoveCursor(window.ToScreenPoint(profile.Point("listWheelArea")));
-        var beforeGrid = CaptureSignature(window, listGridRect);
-        var beforeRows = CaptureRowSignatures(window, rowSignatureRects);
-        scanLog.WriteEvent("ROW_SCROLL_START", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, maxVisibleTop={maxVisibleTop}, delta={profile.ScrollTickDelta}");
+        var before = CaptureListGridSnapshot(window, listGridRect, rowSignatureRects);
+        scanLog.WriteEvent("ROW_SCROLL_START", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, maxVisibleTop={maxVisibleTop}, delta={profile.ScrollTickDelta}, delayMs={scrollDelayMs}");
         scanLog.WriteEvent("ROW_SCROLL_TICK", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, delta={profile.ScrollTickDelta}");
         window.MouseWheel(profile.ScrollTickDelta);
-        await Task.Delay(Math.Max(80, profile.ScrollTickDelayMs), token);
-        await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
+        await Task.Delay(scrollDelayMs, token);
 
-        var afterGrid = CaptureSignature(window, listGridRect);
-        var afterRows = CaptureRowSignatures(window, rowSignatureRects);
+        var after = CaptureListGridSnapshot(window, listGridRect, rowSignatureRects);
+        var check = EvaluateSafeBandScroll(before.Grid, before.Rows, after.Grid, after.Rows);
+        var usedGrace = false;
+        WriteSafeBandScrollVerify(scanLog, "ROW_SCROLL_VERIFY", visibleTopLogicalRow, check);
+
+        if (IsStrongOneRowScroll(check))
+        {
+            scanLog.WriteEvent("ROW_SCROLL_FAST_ACCEPT", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, movedDistance={check.MovedDistance}, oneRowScore={check.Verification.OneRowScore}, noMoveScore={check.Verification.NoMoveScore}, twoRowScore={check.Verification.TwoRowScore}");
+        }
+        else
+        {
+            after = await WaitForListSnapshotStableAsync(window, profile, listGridRect, rowSignatureRects, scanLog, token);
+            check = EvaluateSafeBandScroll(before.Grid, before.Rows, after.Grid, after.Rows);
+            WriteSafeBandScrollVerify(scanLog, "ROW_SCROLL_STABLE_VERIFY", visibleTopLogicalRow, check);
+        }
+
+        if (!check.Success && check.MovedDistance >= ScrollGraceMovedDistanceThreshold)
+        {
+            usedGrace = true;
+            await Task.Delay(ScrollGraceWaitMs, token);
+            var graceAfter = CaptureListGridSnapshot(window, listGridRect, rowSignatureRects);
+            check = EvaluateSafeBandScroll(before.Grid, before.Rows, graceAfter.Grid, graceAfter.Rows);
+            WriteSafeBandScrollVerify(scanLog, "ROW_SCROLL_GRACE_VERIFY", visibleTopLogicalRow, check, ScrollGraceWaitMs);
+        }
+
+        if (check.Success)
+        {
+            var eventName = check.EstimatedRows == 1 ? "ROW_SCROLL_DONE" : "ROW_SCROLL_OVERSHOT";
+            scanLog.WriteEvent(eventName, $"fromTop={visibleTopLogicalRow}, estimatedToTop={Math.Min(maxVisibleTop, visibleTopLogicalRow + check.EstimatedRows)}, requestedToTop={visibleTopLogicalRow + 1}, rowsAdvanced={check.EstimatedRows}, movedDistance={check.MovedDistance}, oneRowScore={check.Verification.OneRowScore}, twoRowScore={check.Verification.TwoRowScore}");
+            return ScrollRowsResult.Ok($"safe-band advanced {check.EstimatedRows} row(s) from {visibleTopLogicalRow}", check.EstimatedRows, check.MovedDistance, usedGrace);
+        }
+
+        scanLog.WriteEvent("ROW_SCROLL_FAIL", $"fromTop={visibleTopLogicalRow}, expectedToTop={visibleTopLogicalRow + 1}, movedDistance={check.MovedDistance}, oneRowScore={check.Verification.OneRowScore}, noMoveScore={check.Verification.NoMoveScore}, twoRowScore={check.Verification.TwoRowScore}");
+        return ScrollRowsResult.Fail($"one-row verification failed, movedDistance={check.MovedDistance}, oneRowScore={check.Verification.OneRowScore}, twoRowScore={check.Verification.TwoRowScore}", check.MovedDistance, usedGrace);
+    }
+
+    private static RowScrollCheck EvaluateSafeBandScroll(
+        ImageSignature beforeGrid,
+        IReadOnlyList<ImageSignature> beforeRows,
+        ImageSignature afterGrid,
+        IReadOnlyList<ImageSignature> afterRows)
+    {
         var movedDistance = SignatureDistance(beforeGrid, afterGrid);
         var verification = VerifyOneRowDown(beforeRows, afterRows);
         var estimatedRows = EstimateRowsAdvanced(verification, movedDistance);
-        var twoRowsClearlyBetter = estimatedRows == 2;
         var oneRowMatched = verification.OneRowScore <= RowShiftMatchTolerance
             || verification.OneRowScore <= verification.NoMoveScore + RowShiftClearMargin
             || verification.OneRowScore <= verification.TwoRowScore + RowShiftClearMargin;
-        var success = estimatedRows > 0;
-        scanLog.WriteEvent("ROW_SCROLL_VERIFY", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, noMoveScore={verification.NoMoveScore}, twoRowScore={verification.TwoRowScore}, oneRowMatched={oneRowMatched}, twoRowsClearlyBetter={twoRowsClearlyBetter}, estimatedRows={estimatedRows}, success={success}");
 
-        if (success)
+        return new RowScrollCheck(
+            movedDistance,
+            verification,
+            estimatedRows,
+            oneRowMatched,
+            estimatedRows == 2);
+    }
+
+    private static bool IsStrongOneRowScroll(RowScrollCheck check)
+    {
+        return check.Success
+            && check.EstimatedRows == 1
+            && check.MovedDistance >= AdaptiveScrollMovedDistanceThreshold
+            && check.Verification.OneRowScore <= RowShiftMatchTolerance
+            && check.Verification.TwoRowScore + RowShiftClearMargin >= check.Verification.OneRowScore;
+    }
+
+    private static void WriteSafeBandScrollVerify(
+        ScanLog scanLog,
+        string eventName,
+        int visibleTopLogicalRow,
+        RowScrollCheck check,
+        int? waitedMs = null)
+    {
+        var detail = $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, movedDistance={check.MovedDistance}, oneRowScore={check.Verification.OneRowScore}, noMoveScore={check.Verification.NoMoveScore}, twoRowScore={check.Verification.TwoRowScore}, oneRowMatched={check.OneRowMatched}, twoRowsClearlyBetter={check.TwoRowsClearlyBetter}, estimatedRows={check.EstimatedRows}, success={check.Success}";
+        if (waitedMs is not null)
         {
-            var eventName = estimatedRows == 1 ? "ROW_SCROLL_DONE" : "ROW_SCROLL_OVERSHOT";
-            scanLog.WriteEvent(eventName, $"fromTop={visibleTopLogicalRow}, estimatedToTop={Math.Min(maxVisibleTop, visibleTopLogicalRow + estimatedRows)}, requestedToTop={visibleTopLogicalRow + 1}, rowsAdvanced={estimatedRows}, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, twoRowScore={verification.TwoRowScore}");
-            return ScrollRowsResult.Ok($"safe-band advanced {estimatedRows} row(s) from {visibleTopLogicalRow}", estimatedRows);
+            detail += $", waitedMs={waitedMs.Value}";
         }
 
-        scanLog.WriteEvent("ROW_SCROLL_FAIL", $"fromTop={visibleTopLogicalRow}, expectedToTop={visibleTopLogicalRow + 1}, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, noMoveScore={verification.NoMoveScore}, twoRowScore={verification.TwoRowScore}");
-        return ScrollRowsResult.Fail($"one-row verification failed, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, twoRowScore={verification.TwoRowScore}");
+        scanLog.WriteEvent(eventName, detail);
     }
 
     private static Rectangle[] BuildVisualRowSignatureRects(Rectangle listGridRect, int visibleRows)
@@ -948,15 +1256,18 @@ public sealed class ScanController
         return rects;
     }
 
-    private static ImageSignature[] CaptureRowSignatures(GameWindow window, IReadOnlyList<Rectangle> rowSignatureRects)
+    private static ListGridSnapshot CaptureListGridSnapshot(GameWindow window, Rectangle listGridRect, IReadOnlyList<Rectangle> rowSignatureRects)
     {
+        using var image = window.Capture(listGridRect);
+        var grid = CreateSignature(image, new Rectangle(System.Drawing.Point.Empty, image.Size));
         var signatures = new ImageSignature[rowSignatureRects.Count];
         for (var i = 0; i < signatures.Length; i++)
         {
-            signatures[i] = CaptureSignature(window, rowSignatureRects[i]);
+            var rect = RelativeIntersection(rowSignatureRects[i], listGridRect, image.Size);
+            signatures[i] = CreateSignature(image, rect);
         }
 
-        return signatures;
+        return new ListGridSnapshot(grid, signatures);
     }
 
     private static RowScrollVerification VerifyOneRowDown(IReadOnlyList<ImageSignature> beforeRows, IReadOnlyList<ImageSignature> afterRows)
@@ -1157,6 +1468,46 @@ public sealed class ScanController
         scanLog.Write($"List stable wait timed out after {timeout.TotalMilliseconds:F0}ms; continuing with best effort.");
     }
 
+    private static async Task<ListGridSnapshot> WaitForListSnapshotStableAsync(
+        GameWindow window,
+        ScanProfile profile,
+        Rectangle listGridRect,
+        IReadOnlyList<Rectangle> rowSignatureRects,
+        ScanLog scanLog,
+        CancellationToken token)
+    {
+        var timeout = TimeSpan.FromMilliseconds(Math.Max(120, Math.Min(profile.LoadTimeoutMs, 360)));
+        var interval = TimeSpan.FromMilliseconds(Math.Max(15, profile.LoadPollMs));
+        var start = DateTime.UtcNow;
+        var stableFrames = 0;
+        var requiredStableFrames = Math.Max(1, profile.ListStableConfirmFrames);
+        var previous = CaptureListGridSnapshot(window, listGridRect, rowSignatureRects);
+
+        while (DateTime.UtcNow - start < timeout)
+        {
+            token.ThrowIfCancellationRequested();
+            await Task.Delay(interval, token);
+            var current = CaptureListGridSnapshot(window, listGridRect, rowSignatureRects);
+            if (AreRowsStable(previous.Rows, current.Rows))
+            {
+                stableFrames++;
+                if (stableFrames >= requiredStableFrames)
+                {
+                    return current;
+                }
+            }
+            else
+            {
+                stableFrames = 0;
+            }
+
+            previous = current;
+        }
+
+        scanLog.Write($"Fast list snapshot stable wait timed out after {timeout.TotalMilliseconds:F0}ms; continuing with latest snapshot.");
+        return previous;
+    }
+
     private static int? TryReadInventoryCount(GameWindow window, ScanProfile profile, PaddleOcrRecognizer recognizer, ScanLog scanLog)
     {
         try
@@ -1314,13 +1665,8 @@ public sealed class ScanController
             panelProbeRect
         };
 
-        foreach (var index in new[] { 0, 1, 2, 3 })
+        for (var index = 0; index < rois.Count; index++)
         {
-            if (index >= rois.Count)
-            {
-                continue;
-            }
-
             var roi = rois[index];
             rects.Add(ClampRectangle(new Rectangle(roi.X, roi.Y, roi.Width, roi.Height), imageSize));
         }
@@ -1353,6 +1699,25 @@ public sealed class ScanController
         return count > 0;
     }
 
+    private static bool AreRowsStable(IReadOnlyList<ImageSignature> previousSignatures, IReadOnlyList<ImageSignature> currentSignatures)
+    {
+        var count = Math.Min(previousSignatures.Count, currentSignatures.Count);
+        if (count == 0)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < count; i++)
+        {
+            if (SignatureDistance(previousSignatures[i], currentSignatures[i]) > ListStableTolerance)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static bool HasProbeChange(IReadOnlyList<ImageSignature> previousSignatures, IReadOnlyList<ImageSignature> currentSignatures, int tolerance)
     {
         var count = Math.Min(previousSignatures.Count, currentSignatures.Count);
@@ -1370,6 +1735,60 @@ public sealed class ScanController
         }
 
         return false;
+    }
+
+    private static ProbeChangeSummary SummarizeProbeChange(IReadOnlyList<ImageSignature>? previousSignatures, IReadOnlyList<ImageSignature> currentSignatures)
+    {
+        if (previousSignatures is null)
+        {
+            return new ProbeChangeSummary(0, 0, 0, 0, 0);
+        }
+
+        var count = Math.Min(previousSignatures.Count, currentSignatures.Count);
+        if (count == 0)
+        {
+            return new ProbeChangeSummary(0, 0, 0, 0, 0);
+        }
+
+        var total = 0;
+        var max = 0;
+        var changed = 0;
+        var textChanged = 0;
+        var maxText = 0;
+        for (var i = 0; i < count; i++)
+        {
+            var distance = SignatureDistance(previousSignatures[i], currentSignatures[i]);
+            total += distance;
+            max = Math.Max(max, distance);
+            if (distance > PanelChangeTolerance)
+            {
+                changed++;
+            }
+
+            if (i > 0)
+            {
+                maxText = Math.Max(maxText, distance);
+                if (distance > PanelChangeTolerance)
+                {
+                    textChanged++;
+                }
+            }
+        }
+
+        return new ProbeChangeSummary(total / count, max, changed, textChanged, maxText);
+    }
+
+    private static bool IsFastPanelAcceptable(
+        ImageSignature[]? previousPanelSignatures,
+        ProbeChangeSummary change,
+        int visibleCount,
+        int roiCount)
+    {
+        return previousPanelSignatures is not null
+            && visibleCount == roiCount
+            && change.AverageScore >= FastPanelAverageChangeScore
+            && change.MaxTextScore >= FastPanelTextChangeScore
+            && change.TextChangedProbeCount >= FastPanelChangedTextProbeCount;
     }
 
     private static ImageSignature CreateSignature(Bitmap image, Rectangle rect)
@@ -1477,6 +1896,7 @@ public sealed class ScanController
             token.ThrowIfCancellationRequested();
             var image = window.Capture(panelRect);
             var probeSignatures = CreateSignatures(image, stableProbeRects);
+            var probeChange = SummarizeProbeChange(previousPanelSignatures, probeSignatures);
             if (previousPanelSignatures is not null
                 && HasProbeChange(previousPanelSignatures, probeSignatures, PanelChangeTolerance))
             {
@@ -1494,17 +1914,25 @@ public sealed class ScanController
             {
                 stableCount = visibleCount == previousCount ? stableCount + 1 : 1;
                 var readable = visibleCount == rois.Count || stableCount >= 2;
+                if (readable
+                    && stableProbeFrames == 0
+                    && IsFastPanelAcceptable(previousPanelSignatures, probeChange, visibleCount, rois.Count))
+                {
+                    previous?.Dispose();
+                    return new PanelCapture(image, visibleCount, (DateTime.UtcNow - start).TotalMilliseconds, usedFallback: false, probeSignatures, fastAccepted: true, probeChange.AverageScore, stableProbeFrames);
+                }
+
                 if (readable && sawPanelChange && stableProbeFrames >= 1)
                 {
                     previous?.Dispose();
-                    return new PanelCapture(image, visibleCount, (DateTime.UtcNow - start).TotalMilliseconds, usedFallback: false, probeSignatures);
+                    return new PanelCapture(image, visibleCount, (DateTime.UtcNow - start).TotalMilliseconds, usedFallback: false, probeSignatures, fastAccepted: false, probeChange.AverageScore, stableProbeFrames);
                 }
 
                 if (readable && !sawPanelChange && stableProbeFrames >= 1 && DateTime.UtcNow - start >= unchangedFallbackDelay)
                 {
                     scanLog.Write("Panel probes stayed unchanged but readable and stable; accepting fast fallback.");
                     previous?.Dispose();
-                    return new PanelCapture(image, visibleCount, (DateTime.UtcNow - start).TotalMilliseconds, usedFallback: true, probeSignatures);
+                    return new PanelCapture(image, visibleCount, (DateTime.UtcNow - start).TotalMilliseconds, usedFallback: true, probeSignatures, fastAccepted: false, probeChange.AverageScore, stableProbeFrames);
                 }
             }
             else
@@ -1850,6 +2278,43 @@ public sealed class ScanController
         ]);
     }
 
+    private static string BuildPanelCaptureFailureDetail(
+        int index,
+        string rarity,
+        int pass,
+        int? logicalRow,
+        int visualRow,
+        int col,
+        int maxColumns,
+        System.Drawing.Point clickPoint)
+    {
+        return string.Join(Environment.NewLine, [
+            $"Index: {index}",
+            $"Rarity: {rarity}",
+            $"Pass: {pass}",
+            $"LogicalRow: {logicalRow?.ToString() ?? "unknown"}",
+            $"VisualRow: {visualRow}",
+            $"Column: {col}/{maxColumns}",
+            $"ClickPoint: {clickPoint}",
+            "Exception:",
+            "详情面板截图等待超时。已重试同一格，仍无法确认详情面板可读。"
+        ]);
+    }
+
+    private static void TrySavePanelFailureImage(GameWindow window, Rectangle panelRect, string outputDir, int index, ScanLog scanLog)
+    {
+        try
+        {
+            using var image = window.Capture(panelRect);
+            var file = Path.Combine(outputDir, $"{index:0000}.panel-timeout.png");
+            image.Save(file);
+        }
+        catch (Exception ex)
+        {
+            scanLog.Write($"Failed to save panel timeout image for #{index}: {ex.Message}");
+        }
+    }
+
     private static async Task MonitorBackpackAsync(
         GameWindow window,
         ScanProfile profile,
@@ -1955,13 +2420,24 @@ public sealed class ScanController
     {
         private bool _imageTaken;
 
-        public PanelCapture(Bitmap image, int visibleRoiCount, double waitMilliseconds, bool usedFallback, ImageSignature[] probeSignatures)
+        public PanelCapture(
+            Bitmap image,
+            int visibleRoiCount,
+            double waitMilliseconds,
+            bool usedFallback,
+            ImageSignature[] probeSignatures,
+            bool fastAccepted,
+            int probeChangeScore,
+            int stableProbeFrames)
         {
             Image = image;
             VisibleRoiCount = visibleRoiCount;
             WaitMilliseconds = waitMilliseconds;
             UsedFallback = usedFallback;
             ProbeSignatures = probeSignatures;
+            FastAccepted = fastAccepted;
+            ProbeChangeScore = probeChangeScore;
+            StableProbeFrames = stableProbeFrames;
         }
 
         public Bitmap Image { get; }
@@ -1969,6 +2445,9 @@ public sealed class ScanController
         public double WaitMilliseconds { get; }
         public bool UsedFallback { get; }
         public ImageSignature[] ProbeSignatures { get; }
+        public bool FastAccepted { get; }
+        public int ProbeChangeScore { get; }
+        public int StableProbeFrames { get; }
 
         public Bitmap TakeImage()
         {
@@ -2018,6 +2497,13 @@ public sealed class ScanController
     private readonly record struct RarityProbe(string? Rarity, Color BestColor, string BestCandidate, int BestDelta);
 
     private readonly record struct HsvColor(float Hue, float Saturation, float Value);
+
+    private readonly record struct ProbeChangeSummary(
+        int AverageScore,
+        int MaxScore,
+        int ChangedProbeCount,
+        int TextChangedProbeCount,
+        int MaxTextScore);
 
     private sealed class ScanLog : IDisposable
     {
@@ -2147,14 +2633,92 @@ public sealed class ScanController
         }
     }
 
+    private sealed class SafeBandScrollPacingState
+    {
+        private readonly Queue<bool> _recentGoodScrolls = new();
+
+        public int DelayMilliseconds(ScanProfile profile)
+        {
+            return CanUseFastDelay
+                ? AdaptiveScrollFastDelayMs
+                : Math.Max(SafeBandScrollDefaultDelayMs, profile.ScrollTickDelayMs);
+        }
+
+        public void Record(ScrollRowsResult result)
+        {
+            var good = result.Success
+                && !result.UsedGrace
+                && result.Attempts <= 1
+                && result.MovedDistance >= AdaptiveScrollMovedDistanceThreshold;
+            if (!good)
+            {
+                _recentGoodScrolls.Clear();
+                return;
+            }
+
+            _recentGoodScrolls.Enqueue(true);
+            while (_recentGoodScrolls.Count > AdaptiveScrollSuccessWindow)
+            {
+                _recentGoodScrolls.Dequeue();
+            }
+        }
+
+        private bool CanUseFastDelay => _recentGoodScrolls.Count >= AdaptiveScrollSuccessWindow;
+    }
+
+    private sealed class PanelReadinessState
+    {
+        public ImageSignature[]? Signatures { get; private set; }
+        public int ConsecutiveFailures { get; private set; }
+
+        public void Update(ImageSignature[] signatures)
+        {
+            Signatures = signatures;
+        }
+
+        public void ResetSignatures()
+        {
+            Signatures = null;
+        }
+
+        public int RecordFailure()
+        {
+            ConsecutiveFailures++;
+            return ConsecutiveFailures;
+        }
+
+        public void ClearFailures()
+        {
+            ConsecutiveFailures = 0;
+        }
+    }
+
     private readonly record struct ImageSignature(ulong Hash, int[] Samples);
+
+    private readonly record struct ListGridSnapshot(ImageSignature Grid, ImageSignature[] Rows);
 
     private readonly record struct RowScrollVerification(int OneRowScore, int NoMoveScore, int TwoRowScore);
 
-    private readonly record struct ScrollRowsResult(bool Success, string Message, int RowsAdvanced = 0)
+    private readonly record struct RowScrollCheck(
+        int MovedDistance,
+        RowScrollVerification Verification,
+        int EstimatedRows,
+        bool OneRowMatched,
+        bool TwoRowsClearlyBetter)
     {
-        public static ScrollRowsResult Ok(string message, int rowsAdvanced = 0) => new(true, message, rowsAdvanced);
-        public static ScrollRowsResult Fail(string message) => new(false, message);
+        public bool Success => EstimatedRows > 0;
+    }
+
+    private readonly record struct ScrollRowsResult(
+        bool Success,
+        string Message,
+        int RowsAdvanced = 0,
+        int MovedDistance = 0,
+        bool UsedGrace = false,
+        int Attempts = 1)
+    {
+        public static ScrollRowsResult Ok(string message, int rowsAdvanced = 0, int movedDistance = 0, bool usedGrace = false, int attempts = 1) => new(true, message, rowsAdvanced, movedDistance, usedGrace, attempts);
+        public static ScrollRowsResult Fail(string message, int movedDistance = 0, bool usedGrace = false, int attempts = 1) => new(false, message, 0, movedDistance, usedGrace, attempts);
     }
 
 }

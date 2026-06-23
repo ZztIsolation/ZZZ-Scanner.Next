@@ -27,7 +27,7 @@ public sealed class ScanOptions
     public bool StopAtNonLevel15 { get; set; } = true;
     public OcrEngineMode OcrEngine { get; set; } = OcrEngineMode.Auto;
     public bool HighSpeedOcr { get; set; } = true;
-    public int OcrBatchSize { get; set; } = 8;
+    public int OcrBatchSize { get; set; } = 1;
     public int OcrWorkerCount { get; set; } = 0;
     public int OcrQueueCapacity { get; set; } = 16;
     public int OcrIntraOpThreads { get; set; } = 4;
