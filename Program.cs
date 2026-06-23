@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Principal;
+using ZZZScannerNext.Cleaning;
 using ZZZScannerNext.Interop;
 using ZZZScannerNext.Ocr;
 using ZZZScannerNext.Scanning;
@@ -50,6 +51,15 @@ static class Program
             return true;
         }
 
+        if (string.Equals(args[0], "--collect-ocr-samples", StringComparison.OrdinalIgnoreCase))
+        {
+            var sampleLimit = args.Length > 1 && int.TryParse(args[1], out var parsedLimit) ? parsedLimit : 1000;
+            var maxItems = args.Length > 2 && int.TryParse(args[2], out var parsedMaxItems) ? parsedMaxItems : 0;
+            var rarities = args.Length > 3 ? args[3] : "S,A,B";
+            exitCode = CollectOcrSamples(sampleLimit, maxItems, rarities);
+            return true;
+        }
+
         if (!string.Equals(args[0], "--ocr-benchmark", StringComparison.OrdinalIgnoreCase))
         {
             return false;
@@ -67,6 +77,68 @@ static class Program
         var intraOpThreads = args.Length > 4 && int.TryParse(args[4], out var parsedThreads) ? parsedThreads : 4;
         exitCode = OcrBenchmark.Run(args[1], workers, batchSize, intraOpThreads);
         return true;
+    }
+
+    private static int CollectOcrSamples(int sampleLimit, int maxItems, string raritiesCsv)
+    {
+        if (!IsAdministrator())
+        {
+            Console.Error.WriteLine("OCR sample collection must run as administrator so mouse input can reach the game window.");
+            return 5;
+        }
+
+        NativeMethods.TryEnablePerMonitorDpiAwareness();
+        var profiles = ScanProfileFile.Load();
+        var controller = new ScanController(profiles, WikiData.Load());
+        var options = new ScanOptions
+        {
+            ProcessName = "ZenlessZoneZero",
+            ProfileName = profiles.Profiles.FirstOrDefault()?.Name ?? "",
+            TraversalMode = ScanTraversalMode.FromProfile,
+            MaxItems = Math.Max(0, maxItems),
+            BringToFront = true,
+            ShowDebugImages = false,
+            StopAtNonLevel15 = false,
+            OcrEngine = OcrEngineMode.Auto,
+            HighSpeedOcr = true,
+            OcrWorkerCount = 0,
+            OcrSampleLimit = Math.Max(1, sampleLimit)
+        };
+
+        options.Rarities.Clear();
+        foreach (var rarity in raritiesCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            options.Rarities.Add(rarity);
+        }
+
+        if (options.Rarities.Count == 0)
+        {
+            Console.Error.WriteLine("At least one rarity must be provided, for example S,A,B.");
+            return 2;
+        }
+
+        var progress = new Progress<ScanProgress>(p =>
+        {
+            if (p.Queued > 0 && p.Queued % 25 == 0)
+            {
+                Console.WriteLine($"progress visited={p.Visited} queued={p.Queued} completed={p.Completed} failed={p.Failed}");
+            }
+        });
+
+        try
+        {
+            Console.WriteLine($"collect_ocr_samples limit={options.OcrSampleLimit} max_items={options.MaxItems} rarities={string.Join(",", options.Rarities)} stop_at_non15={options.StopAtNonLevel15}");
+            var result = controller.ScanAsync(options, progress, CancellationToken.None).GetAwaiter().GetResult();
+            Console.WriteLine($"output_dir={result.OutputDirectory}");
+            Console.WriteLine($"export_file={result.ExportFile}");
+            Console.WriteLine($"visited={result.Visited} items={result.Items.Count} failed={result.Failed}");
+            return result.Failed == 0 ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(ex);
+            return 1;
+        }
     }
 
     private static bool IsAdministrator()

@@ -14,6 +14,7 @@
 ## Phase 1 数据准备
 
 - 使用高级设置中的 `OCR样本保存上限` 采集 `ocr-samples`，目标至少 3,000-5,000 个驱动盘。
+- 也可以使用命令行 `ZZZ-Scanner.Next.exe --collect-ocr-samples [sampleLimit] [maxItems] [raritiesCsv]` 采集；该模式默认关闭“遇到非15级时停止”。
 - 样本需要覆盖套装名、等级、主属性、副属性、百分比、整数、小数和空副词条。
 - 从 `Data/drive_discs.json` 和 `Data/stat_rules.json` 生成 ZZZ 字段候选集和训练词表。
 - 保留 PP-OCRv5 识别结果、清洗后字段和人工抽查结论，作为训练/验证标签来源。

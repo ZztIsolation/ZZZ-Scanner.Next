@@ -37,9 +37,12 @@ dotnet publish -c Release -r win-x64 --self-contained false -o publish
 ```powershell
 ZZZ-Scanner.Next.exe --ocr-benchmark <ocr-samples-dir> [workers] [batchSize] [intraOpThreads]
 ZZZ-Scanner.Next.exe --scan-benchmark <scan-dir> [baseline-scan-dir]
+ZZZ-Scanner.Next.exe --collect-ocr-samples [sampleLimit] [maxItems] [raritiesCsv]
 ```
 
 `--ocr-benchmark` 用于比较 OCR worker、batch 和 intra-op 线程参数；`--scan-benchmark` 只读取扫描输出目录，不启动 GUI、不申请管理员权限、不操作游戏窗口。当前 OCR 默认采用单 worker / 单 ONNX session，后续优先推进 ZZZ 专用小模型。
+
+`--collect-ocr-samples` 用于训练数据采集，会真实前置游戏窗口并扫描驱动盘仓库；默认 `sampleLimit=1000`、`maxItems=0`、`raritiesCsv=S,A,B`，且不会在遇到非 15 级驱动盘时停止。
 
 ## 文档
 
