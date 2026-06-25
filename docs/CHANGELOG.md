@@ -20,7 +20,9 @@
 - 启动时调用 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`，失败时回退到 `SetProcessDPIAware`。
 - 新增 DWM 物理窗口边界校准：当 Win32 客户区被 DPI 虚拟化时，按 DWM 实际边界恢复物理像素坐标。
 - GUI 日志现在会输出游戏客户区尺寸和 DPI，便于确认坐标是否仍被虚拟化。
-- 发布输出统一使用 `publish` 目录，启动日志会显示运行目录，避免误跑旧版本。
+- 由于旧 `publish` 目录中的 EXE 正在运行，修正版已发布到 `publish-dpi-fix`。
+- 确认 `publish` 与 `publish-dpi-fix` 现均已覆盖为同一份 DPI 修正版。
+- GUI 标题更新为 `ZZZ Scanner Next - DPI Fix`，启动日志会显示运行目录，避免误跑旧版本。
 
 ## 2026-05-19 副属性检测修正
 
@@ -131,32 +133,3 @@
 - 新增命令行 `--scan-benchmark <scan-dir> [baseline-scan-dir]`，可直接汇总扫描目录中的点击、滚动、面板等待、OCR、资源和错误指标。
 - 支持旧扫描日志；缺少 `CELL_TIMING` 或 `bitmap_to_mat_ms` 时输出 `N/A`，仍可计算点击间隔和 OCR 总耗时。
 - 传入 baseline 目录时输出关键指标百分比差异，便于比较每轮调参是否真的变快。
-
-## 2026-06-09 Guarded Fast 面板读取
-
-- 面板截图新增高置信首帧放行：仅在文本 ROI 探针变化足够明显且 `visibleRois=12/12` 时跳过第二个稳定帧。
-- `CELL_TIMING` 新增 `fastAccept`、`probeChangeScore`、`stableFrames`，用于验证快读命中率和风险。
-- `panelSettleDelayMs`、`loadPollMs`、`panelUnchangedFallbackMs` 下调为 `35/16/80`，安全带滚动固定等待下限从 80ms 降为 50ms；一行位移验证仍保留。
-- `--scan-benchmark` 新增快读比例、快读面板等待、探针变化分数和稳定帧统计。
-
-## 2026-06-09 平衡稳速回收
-
-- 保留 Guarded Fast 面板快读，但将安全带滚动固定等待下限和 `scrollTickDelayMs` 恢复到 80ms，降低逐行滚动校验失败概率。
-- 安全带滚动首次校验失败且列表确实有位移时，会额外等待 120ms 并写入 `ROW_SCROLL_GRACE_VERIFY` 后再决定是否重试。
-- 实时扫描默认 OCR batch 从 8 调整为 1，减少大批量 OCR 导致的 backlog 堆积；`--ocr-benchmark` 默认 batch 保持 8。
-- 换行滚动前新增 OCR backlog gate，并在触发时写入 `OCR_BACKLOG_THROTTLE`；`--scan-benchmark` 会输出对应次数和等待统计。
-
-## 2026-06-09 稳态提速
-
-- FastPanel 高置信阈值小幅放宽为平均变化 9、文本变化 14，仍要求 `visibleRois=12/12` 和文本探针变化。
-- 安全带滚动新增自适应等待：最近 10 次滚动均成功且位移不低于 19 时临时使用 65ms；任意 grace 或重试会恢复 80ms。
-- 人工取消后给 OCR worker 最多 2 秒收尾，减少已入队样本在导出前被丢弃。
-- `--scan-benchmark` 新增完成率、非快读面板等待和滚动校验位移统计。
-
-## 2026-06-23 OCR 单 session 稳态提速
-
-- 默认 OCR worker 自动值从多 session 调整为 1，避免多个 PP-OCRv5 ONNX session 同时争抢 CPU cache；并用单 session 的 `IntraOpThreads` 做内部并行。
-- `PaddleOcrRecognizer` 重新启用 ONNX Runtime memory pattern 和 CPU memory arena，减少重复分配开销。
-- 最新实测日志 `2026-06-23-23-12-07` 显示平均 OCR inference 约 229ms/盘，P90 约 273ms/盘；此前多 worker 日志约 730-818ms/盘。
-- 现阶段 `OCR_BACKLOG_THROTTLE` 未触发，扫描总耗时的下一步瓶颈更可能转向详情面板等待、滚动确认和截图节奏。
-- 后续 OCR 主路线改为 ZZZ 专用小模型；DirectML、跨盘 batch 和 intra-op 线程数仅作为短期 A/B 基线。

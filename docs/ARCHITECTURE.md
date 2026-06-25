@@ -9,8 +9,8 @@
 5. 扫描线程按 profile 中的相对坐标逐格点击。
 6. 点击后用小区域色相/RGB 混合判断格子品质，按用户选择过滤 S/A/B。
 7. 截取右侧详情面板，按 profile 中的 ROI 裁剪名称、等级、主副词条。
-8. 截图任务进入有界 `BlockingCollection`，扫描线程可继续向后采集，但会在 backlog 过高时节流。
-9. 默认 1 个 OCR worker 持有 1 个 ONNX Runtime session，PP-OCRv5 通过 `IntraOpThreads` 在 session 内并行。
+8. 截图任务进入较大的 `BlockingCollection`，扫描线程可继续向后采集。
+9. 多个 OCR worker 各自持有 ONNX Runtime session，并行执行 PP-OCRv5 识别。
 10. OCR 结果按序号归并后进入 `DriveDiscCleaner`/导出流程，避免多线程乱序影响重复保护。
 11. `DriveDiscCleaner` 用 wiki 数据做编辑距离纠错和数值合法化。
 12. 重复保护器对去序号结果做 fingerprint，连续重复达到一行时取消扫描并写入日志。
@@ -37,14 +37,10 @@
 
 ## OCR Strategy
 
-详情面板文字位置是已知的，所以本系统不跑文字检测模型，只跑识别模型。每个 ROI 会按高度缩放到 48px，并合成 batch tensor 送入 `PP-OCRv5_mobile_rec_infer.onnx`。
+详情面板文字位置是已知的，所以本系统不跑文字检测模型，只跑识别模型。每个 ROI 会按高度缩放到 48px，并合成 batch tensor，一次送入 `PP-OCRv5_mobile_rec_infer.onnx`。
 
 这比全屏 OCR 快很多，也避免扫描游戏内无关文字。
 
 点击新驱动盘前会记录详情多探针签名；截图前必须看到面板/文本探针变化、连续稳定，以及现有 ROI 可见性稳定，避免把上一张详情面板重复入队。
 
-实时扫描默认 `OcrBatchSize=1`，也就是按盘入队，减少大 batch 造成的延迟和 backlog。单盘内部仍会把 12 个详情 ROI 按宽度 bucket 合批；当前典型日志中每盘 `roi_count=12`、`run_count=2`。
-
-默认 OCR worker 数为自动：当前自动值为 1。这个选择避免多个相同 ONNX session 争抢缓存；ONNX Runtime 会在单 session 内用 `IntraOpThreads` 并行。GUI 中的 `OCR线程（0=自动）` 保留为诊断开关，手动设为 1-4 时会创建对应 worker/session，主要用于 A/B 排查，不建议作为默认提速路线。
-
-`OcrEngineMode.ZzzFastFieldAware` 是后续专用模型接入口。目前该选项仍会回退到 PP-OCRv5；专用模型计划见 `docs/OCR_MODEL_ROADMAP.md`。
+默认 OCR worker 数为自动：6 核以上使用 2 个，12 核以上使用 3 个；GUI 中可改为 1-4。多 worker 只影响截图后的识别，不改变点击、等待、滚动逻辑。

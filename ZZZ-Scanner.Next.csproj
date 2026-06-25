@@ -12,6 +12,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Launcher\**\*.cs" />
+    <None Remove="Launcher\**\*" />
     <None Include="Data\**\*.*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Resources\models\**\*.*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

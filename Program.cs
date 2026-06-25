@@ -2,9 +2,9 @@ using System.Diagnostics;
 using System.Security.Principal;
 using ZZZScannerNext.Cleaning;
 using ZZZScannerNext.Interop;
-using ZZZScannerNext.Ocr;
 using ZZZScannerNext.Scanning;
 using ZZZScannerNext.Ui;
+using ZZZScannerNext.WebSocket;
 
 static class Program
 {
@@ -51,94 +51,79 @@ static class Program
             return true;
         }
 
-        if (string.Equals(args[0], "--collect-ocr-samples", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(args[0], "--ws", StringComparison.OrdinalIgnoreCase))
         {
-            var sampleLimit = args.Length > 1 && int.TryParse(args[1], out var parsedLimit) ? parsedLimit : 1000;
-            var maxItems = args.Length > 2 && int.TryParse(args[2], out var parsedMaxItems) ? parsedMaxItems : 0;
-            var rarities = args.Length > 3 ? args[3] : "S,A,B";
-            exitCode = CollectOcrSamples(sampleLimit, maxItems, rarities);
+            var port = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? parsedPort : 22350;
+            var openBrowser = !args.Any(arg => string.Equals(arg, "--no-browser", StringComparison.OrdinalIgnoreCase));
+            exitCode = RunWebSocketHost(port, connectionToken: null, openBrowser);
             return true;
         }
 
-        if (!string.Equals(args[0], "--ocr-benchmark", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(args[0], "--ws-child", StringComparison.OrdinalIgnoreCase))
         {
-            return false;
-        }
+            var port = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? parsedPort : 0;
+            var token = ReadOption(args, "--child-token");
+            if (port <= 0 || string.IsNullOrWhiteSpace(token))
+            {
+                Console.Error.WriteLine("Usage: ZZZ-Scanner.Next.exe --ws-child <port> --child-token <token> [--no-browser]");
+                exitCode = 2;
+                return true;
+            }
 
-        if (args.Length < 2)
-        {
-            Console.Error.WriteLine("Usage: ZZZ-Scanner.Next.exe --ocr-benchmark <ocr-samples-dir> [workers] [batchSize] [intraOpThreads]");
-            exitCode = 2;
+            var openBrowser = !args.Any(arg => string.Equals(arg, "--no-browser", StringComparison.OrdinalIgnoreCase));
+            exitCode = RunWebSocketHost(port, token, openBrowser);
             return true;
         }
 
-        var workers = args.Length > 2 && int.TryParse(args[2], out var parsedWorkers) ? parsedWorkers : 1;
-        var batchSize = args.Length > 3 && int.TryParse(args[3], out var parsedBatchSize) ? parsedBatchSize : 8;
-        var intraOpThreads = args.Length > 4 && int.TryParse(args[4], out var parsedThreads) ? parsedThreads : 4;
-        exitCode = OcrBenchmark.Run(args[1], workers, batchSize, intraOpThreads);
-        return true;
+        return false;
     }
 
-    private static int CollectOcrSamples(int sampleLimit, int maxItems, string raritiesCsv)
+    private static int RunWebSocketHost(int port, string? connectionToken, bool openBrowser)
     {
         if (!IsAdministrator())
         {
-            Console.Error.WriteLine("OCR sample collection must run as administrator so mouse input can reach the game window.");
+            Console.Error.WriteLine("WebSocket scanner host must run as administrator so mouse input can reach the game window.");
             return 5;
         }
 
         NativeMethods.TryEnablePerMonitorDpiAwareness();
         var profiles = ScanProfileFile.Load();
-        var controller = new ScanController(profiles, WikiData.Load());
-        var options = new ScanOptions
+        var wikiData = WikiData.Load();
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) =>
         {
-            ProcessName = "ZenlessZoneZero",
-            ProfileName = profiles.Profiles.FirstOrDefault()?.Name ?? "",
-            TraversalMode = ScanTraversalMode.FromProfile,
-            MaxItems = Math.Max(0, maxItems),
-            BringToFront = true,
-            ShowDebugImages = false,
-            StopAtNonLevel15 = false,
-            OcrEngine = OcrEngineMode.Auto,
-            HighSpeedOcr = true,
-            OcrWorkerCount = 0,
-            OcrSampleLimit = Math.Max(1, sampleLimit)
+            e.Cancel = true;
+            cts.Cancel();
         };
 
-        options.Rarities.Clear();
-        foreach (var rarity in raritiesCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        using var host = new WebSocketHost(profiles, wikiData, port, connectionToken);
+        if (openBrowser)
         {
-            options.Rarities.Add(rarity);
+            host.BrowserUrl = "http://localhost:8787/drive-discs.html";
         }
-
-        if (options.Rarities.Count == 0)
-        {
-            Console.Error.WriteLine("At least one rarity must be provided, for example S,A,B.");
-            return 2;
-        }
-
-        var progress = new Progress<ScanProgress>(p =>
-        {
-            if (p.Queued > 0 && p.Queued % 25 == 0)
-            {
-                Console.WriteLine($"progress visited={p.Visited} queued={p.Queued} completed={p.Completed} failed={p.Failed}");
-            }
-        });
 
         try
         {
-            Console.WriteLine($"collect_ocr_samples limit={options.OcrSampleLimit} max_items={options.MaxItems} rarities={string.Join(",", options.Rarities)} stop_at_non15={options.StopAtNonLevel15}");
-            var result = controller.ScanAsync(options, progress, CancellationToken.None).GetAwaiter().GetResult();
-            Console.WriteLine($"output_dir={result.OutputDirectory}");
-            Console.WriteLine($"export_file={result.ExportFile}");
-            Console.WriteLine($"visited={result.Visited} items={result.Items.Count} failed={result.Failed}");
-            return result.Failed == 0 ? 0 : 1;
+            host.RunAsync(cts.Token).GetAwaiter().GetResult();
         }
-        catch (Exception ex)
+        catch (OperationCanceledException)
         {
-            Console.Error.WriteLine(ex);
-            return 1;
         }
+
+        return 0;
+    }
+
+    private static string? ReadOption(string[] args, string optionName)
+    {
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (string.Equals(args[i], optionName, StringComparison.OrdinalIgnoreCase))
+            {
+                return i + 1 < args.Length ? args[i + 1] : null;
+            }
+        }
+
+        return null;
     }
 
     private static bool IsAdministrator()

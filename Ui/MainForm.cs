@@ -16,6 +16,7 @@ public sealed class MainForm : Form
     private readonly ScanController _controller;
 
     private readonly ComboBox _profileCombo = new();
+    private readonly ComboBox _traversalModeCombo = new();
     private readonly TextBox _processBox = new();
     private readonly NumericUpDown _maxItems = new();
     private readonly CheckBox _rarityS = new();
@@ -23,31 +24,25 @@ public sealed class MainForm : Form
     private readonly CheckBox _onlyLevel15 = new();
     private readonly CheckBox _bringToFront = new();
     private readonly CheckBox _showDebugImages = new();
-    private readonly ComboBox _ocrEngineCombo = new();
     private readonly CheckBox _highSpeedOcr = new();
     private readonly NumericUpDown _ocrWorkers = new();
-    private readonly NumericUpDown _ocrSampleLimit = new();
     private readonly Button _startButton = new();
     private readonly Button _stopButton = new();
     private readonly Button _detectButton = new();
     private readonly Button _previewButton = new();
     private readonly Button _openOutputButton = new();
-    private readonly Button _advancedButton = new();
-    private readonly Panel _advancedPanel = new();
     private readonly TextBox _log = new();
     private readonly DataGridView _grid = new();
     private readonly PictureBox _debugPreview = new();
     private readonly Label _counterLabel = new();
     private readonly ProgressBar _progress = new();
-    private readonly RowStyle _previewRowStyle = new(SizeType.Absolute, 0);
 
     private CancellationTokenSource? _scanCancellation;
     private string? _lastOutputDirectory;
-    private bool _advancedExpanded;
 
     public MainForm()
     {
-        Text = "ZZZ Scanner Next";
+        Text = "ZZZ Scanner Next - DPI Fix";
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
         MinimumSize = new Size(840, 560);
@@ -71,7 +66,7 @@ public sealed class MainForm : Form
             RowCount = 1,
             Padding = new Padding(8)
         };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 270));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         Controls.Add(root);
 
@@ -87,13 +82,31 @@ public sealed class MainForm : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Dock = DockStyle.Top,
+            RowCount = 24,
             ColumnCount = 1,
             Padding = new Padding(0, 0, 6, 0)
         };
-        settings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        settings.RowStyles.Clear();
+        for (var i = 0; i < 24; i++)
+        {
+            settings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
+
         settingsScroll.Controls.Add(settings);
 
-        AddSectionHeader(settings, "扫描");
+        AddLabel(settings, "进程名");
+        _processBox.Dock = DockStyle.Top;
+        settings.Controls.Add(_processBox);
+
+        AddLabel(settings, "扫描配置");
+        _profileCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+        _profileCombo.Dock = DockStyle.Top;
+        settings.Controls.Add(_profileCombo);
+
+        AddLabel(settings, "遍历模式");
+        _traversalModeCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+        _traversalModeCombo.Dock = DockStyle.Top;
+        settings.Controls.Add(_traversalModeCombo);
 
         AddLabel(settings, "读取上限（0=不限制）");
         _maxItems.Minimum = 0;
@@ -108,33 +121,41 @@ public sealed class MainForm : Form
         rarityPanel.Controls.AddRange([_rarityS, _rarityA]);
         settings.Controls.Add(rarityPanel);
 
-        _onlyLevel15.Text = "遇到非15级时停止";
+        _onlyLevel15.Text = "只读取15级驱动盘";
         _onlyLevel15.AutoSize = true;
         settings.Controls.Add(_onlyLevel15);
 
-        var utilityButtons = new TableLayoutPanel
-        {
-            AutoSize = true,
-            ColumnCount = 2,
-            Dock = DockStyle.Top,
-            Margin = new Padding(0, 8, 0, 0)
-        };
-        utilityButtons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        utilityButtons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        _bringToFront.Text = "前置游戏窗口";
+        _bringToFront.AutoSize = true;
+        settings.Controls.Add(_bringToFront);
+
+        _showDebugImages.Text = "临时显示调试截图";
+        _showDebugImages.AutoSize = true;
+        settings.Controls.Add(_showDebugImages);
+
+        _highSpeedOcr.Text = "高速 OCR（自动多线程）";
+        _highSpeedOcr.AutoSize = true;
+        settings.Controls.Add(_highSpeedOcr);
+
+        AddLabel(settings, "OCR线程（0=自动）");
+        _ocrWorkers.Minimum = 0;
+        _ocrWorkers.Maximum = 4;
+        _ocrWorkers.Dock = DockStyle.Top;
+        settings.Controls.Add(_ocrWorkers);
+
         _detectButton.Text = "检测窗口";
-        _detectButton.Dock = DockStyle.Fill;
+        _detectButton.Dock = DockStyle.Top;
         _detectButton.Click += (_, _) => DetectWindow();
+        settings.Controls.Add(_detectButton);
+
         _previewButton.Text = "预览详情区";
-        _previewButton.Dock = DockStyle.Fill;
+        _previewButton.Dock = DockStyle.Top;
         _previewButton.Click += (_, _) => PreviewPanel();
-        utilityButtons.Controls.Add(_detectButton, 0, 0);
-        utilityButtons.Controls.Add(_previewButton, 1, 0);
-        settings.Controls.Add(utilityButtons);
+        settings.Controls.Add(_previewButton);
 
         _startButton.Text = "开始扫描";
         _startButton.Dock = DockStyle.Top;
-        _startButton.Height = 40;
-        _startButton.Margin = new Padding(0, 10, 0, 3);
+        _startButton.Height = 36;
         _startButton.Click += async (_, _) => await StartScanAsync();
         settings.Controls.Add(_startButton);
 
@@ -151,72 +172,12 @@ public sealed class MainForm : Form
         settings.Controls.Add(_openOutputButton);
 
         _counterLabel.AutoSize = true;
-        _counterLabel.Padding = new Padding(0, 14, 0, 6);
+        _counterLabel.Padding = new Padding(0, 12, 0, 6);
         settings.Controls.Add(_counterLabel);
 
         _progress.Dock = DockStyle.Top;
         _progress.Style = ProgressBarStyle.Blocks;
         settings.Controls.Add(_progress);
-
-        _advancedButton.Text = "高级设置";
-        _advancedButton.Dock = DockStyle.Top;
-        _advancedButton.Margin = new Padding(0, 14, 0, 0);
-        _advancedButton.Click += (_, _) => ToggleAdvancedSettings();
-        settings.Controls.Add(_advancedButton);
-
-        _advancedPanel.Dock = DockStyle.Top;
-        _advancedPanel.AutoSize = true;
-        _advancedPanel.Visible = false;
-        _advancedPanel.Padding = new Padding(0, 6, 0, 0);
-        var advancedSettings = new TableLayoutPanel
-        {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Dock = DockStyle.Top,
-            ColumnCount = 1
-        };
-        advancedSettings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        _advancedPanel.Controls.Add(advancedSettings);
-        settings.Controls.Add(_advancedPanel);
-
-        AddLabel(advancedSettings, "进程名");
-        _processBox.Dock = DockStyle.Top;
-        advancedSettings.Controls.Add(_processBox);
-
-        AddLabel(advancedSettings, "配置文件");
-        _profileCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-        _profileCombo.Dock = DockStyle.Top;
-        advancedSettings.Controls.Add(_profileCombo);
-
-        _bringToFront.Text = "前置游戏窗口";
-        _bringToFront.AutoSize = true;
-        advancedSettings.Controls.Add(_bringToFront);
-
-        _showDebugImages.Text = "临时显示调试截图";
-        _showDebugImages.AutoSize = true;
-        advancedSettings.Controls.Add(_showDebugImages);
-
-        AddLabel(advancedSettings, "OCR引擎");
-        _ocrEngineCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-        _ocrEngineCombo.Dock = DockStyle.Top;
-        advancedSettings.Controls.Add(_ocrEngineCombo);
-
-        _highSpeedOcr.Text = "高速 OCR（自动多线程）";
-        _highSpeedOcr.AutoSize = true;
-        advancedSettings.Controls.Add(_highSpeedOcr);
-
-        AddLabel(advancedSettings, "OCR线程（0=自动）");
-        _ocrWorkers.Minimum = 0;
-        _ocrWorkers.Maximum = 4;
-        _ocrWorkers.Dock = DockStyle.Top;
-        advancedSettings.Controls.Add(_ocrWorkers);
-
-        AddLabel(advancedSettings, "OCR样本保存上限（0=关闭）");
-        _ocrSampleLimit.Minimum = 0;
-        _ocrSampleLimit.Maximum = 2000;
-        _ocrSampleLimit.Increment = 10;
-        _ocrSampleLimit.Dock = DockStyle.Top;
-        advancedSettings.Controls.Add(_ocrSampleLimit);
 
         var right = new TableLayoutPanel
         {
@@ -224,9 +185,9 @@ public sealed class MainForm : Form
             RowCount = 3,
             ColumnCount = 1
         };
-        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        right.RowStyles.Add(_previewRowStyle);
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
+        right.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
+        right.RowStyles.Add(new RowStyle(SizeType.Percent, 22));
+        right.RowStyles.Add(new RowStyle(SizeType.Percent, 20));
         root.Controls.Add(right, 1, 0);
 
         _grid.Dock = DockStyle.Fill;
@@ -234,27 +195,21 @@ public sealed class MainForm : Form
         _grid.AllowUserToDeleteRows = false;
         _grid.ReadOnly = true;
         _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-        _grid.BackgroundColor = SystemColors.Window;
-        _grid.BorderStyle = BorderStyle.FixedSingle;
-        _grid.GridColor = SystemColors.ControlLight;
+        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
         _grid.RowHeadersVisible = false;
         _grid.ScrollBars = ScrollBars.Both;
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Index", HeaderText = "序号", FillWeight = 55, MinimumWidth = 55 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "名称", FillWeight = 110, MinimumWidth = 100 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Slot", HeaderText = "槽位", FillWeight = 55, MinimumWidth = 55 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Rarity", HeaderText = "品质", FillWeight = 55, MinimumWidth = 55 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Level", HeaderText = "等级", FillWeight = 70, MinimumWidth = 70 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Main", HeaderText = "主属性", FillWeight = 170, MinimumWidth = 140 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Sub", HeaderText = "副属性", FillWeight = 300, MinimumWidth = 180 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Index", HeaderText = "序号", Width = 70, MinimumWidth = 60 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "名称", Width = 120, MinimumWidth = 100 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Slot", HeaderText = "槽位", Width = 60, MinimumWidth = 55 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Rarity", HeaderText = "品质", Width = 60, MinimumWidth = 55 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Level", HeaderText = "等级", Width = 75, MinimumWidth = 70 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Main", HeaderText = "主属性", Width = 180, MinimumWidth = 140 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Sub", HeaderText = "副属性", Width = 320, MinimumWidth = 180 });
         right.Controls.Add(_grid, 0, 0);
 
         _debugPreview.Dock = DockStyle.Fill;
         _debugPreview.BackColor = Color.Black;
-        _debugPreview.BorderStyle = BorderStyle.FixedSingle;
-        _debugPreview.Margin = new Padding(0, 6, 0, 6);
         _debugPreview.SizeMode = PictureBoxSizeMode.Zoom;
-        _debugPreview.Visible = false;
         right.Controls.Add(_debugPreview, 0, 1);
 
         _log.Dock = DockStyle.Fill;
@@ -275,14 +230,14 @@ public sealed class MainForm : Form
         _bringToFront.Checked = true;
         _highSpeedOcr.Checked = true;
         _ocrWorkers.Value = 0;
-        _ocrSampleLimit.Value = 0;
 
-        _ocrEngineCombo.Items.AddRange([
-            "自动",
-            "PP-OCRv5 通用",
-            "ZZZ 高速字段感知"
+        _traversalModeCombo.Items.AddRange([
+            "按配置（默认安全带）",
+            "安全带扫描",
+            "校准翻页",
+            "旧版第3行"
         ]);
-        _ocrEngineCombo.SelectedIndex = 0;
+        _traversalModeCombo.SelectedIndex = 0;
 
         foreach (var profile in _profiles.Profiles)
         {
@@ -296,7 +251,7 @@ public sealed class MainForm : Form
 
         UpdateCounters(new ScanProgress());
         AppendLog($"运行目录：{AppContext.BaseDirectory}");
-        AppendLog($"已载入：{_wikiData.DiscCatalog.Sets.Count} 个 wiki 套装名，{_wikiData.DiscCatalog.ExtraNameCandidates.Count} 个扩展候选名。");
+        AppendLog($"DPI 修正版已载入：{_wikiData.DiscCatalog.Sets.Count} 个 wiki 套装名，{_wikiData.DiscCatalog.ExtraNameCandidates.Count} 个扩展候选名。");
         AppendLog("扫描时可按 Ctrl+Shift+C 全局停止。");
     }
 
@@ -311,9 +266,6 @@ public sealed class MainForm : Form
 
         _grid.Rows.Clear();
         _log.Clear();
-        HideDebugImage();
-        _lastOutputDirectory = null;
-        _openOutputButton.Enabled = false;
         _scanCancellation = new CancellationTokenSource();
         SetScanningState(true);
 
@@ -344,15 +296,13 @@ public sealed class MainForm : Form
         {
             ProcessName = _processBox.Text.Trim(),
             ProfileName = _profileCombo.SelectedItem?.ToString() ?? "",
-            TraversalMode = ScanTraversalMode.FromProfile,
+            TraversalMode = SelectedTraversalMode(),
             MaxItems = (int)_maxItems.Value,
             BringToFront = _bringToFront.Checked,
             ShowDebugImages = _showDebugImages.Checked,
             StopAtNonLevel15 = _onlyLevel15.Checked,
-            OcrEngine = SelectedOcrEngineMode(),
             HighSpeedOcr = _highSpeedOcr.Checked,
-            OcrWorkerCount = (int)_ocrWorkers.Value,
-            OcrSampleLimit = (int)_ocrSampleLimit.Value
+            OcrWorkerCount = (int)_ocrWorkers.Value
         };
         options.Rarities.Clear();
         if (_rarityS.Checked) options.Rarities.Add("S");
@@ -360,13 +310,14 @@ public sealed class MainForm : Form
         return options;
     }
 
-    private OcrEngineMode SelectedOcrEngineMode()
+    private ScanTraversalMode SelectedTraversalMode()
     {
-        return _ocrEngineCombo.SelectedIndex switch
+        return _traversalModeCombo.SelectedIndex switch
         {
-            1 => OcrEngineMode.PpOcrV5General,
-            2 => OcrEngineMode.ZzzFastFieldAware,
-            _ => OcrEngineMode.Auto
+            1 => ScanTraversalMode.SafeBandViewport,
+            2 => ScanTraversalMode.CalibratedPage,
+            3 => ScanTraversalMode.LegacyThirdRow,
+            _ => ScanTraversalMode.FromProfile
         };
     }
 
@@ -480,7 +431,7 @@ public sealed class MainForm : Form
 
     private void UpdateCounters(ScanProgress progress)
     {
-        _counterLabel.Text = $"访问 {progress.Visited} / 入队 {progress.Queued} / 完成 {progress.Completed} / 失败 {progress.Failed}";
+        _counterLabel.Text = $"已访问 {progress.Visited}   入队 {progress.Queued}   完成 {progress.Completed}   失败 {progress.Failed}";
     }
 
     private void SetScanningState(bool scanning)
@@ -489,13 +440,6 @@ public sealed class MainForm : Form
         _stopButton.Enabled = scanning;
         _detectButton.Enabled = !scanning;
         _previewButton.Enabled = !scanning;
-        _maxItems.Enabled = !scanning;
-        _rarityS.Enabled = !scanning;
-        _rarityA.Enabled = !scanning;
-        _onlyLevel15.Enabled = !scanning;
-        _advancedButton.Enabled = !scanning;
-        _advancedPanel.Enabled = !scanning;
-        _openOutputButton.Enabled = !scanning && !string.IsNullOrWhiteSpace(_lastOutputDirectory) && Directory.Exists(_lastOutputDirectory);
         _progress.Style = scanning ? ProgressBarStyle.Marquee : ProgressBarStyle.Blocks;
     }
 
@@ -535,34 +479,11 @@ public sealed class MainForm : Form
         _log.AppendText(message + Environment.NewLine);
     }
 
-    private void ToggleAdvancedSettings()
-    {
-        _advancedExpanded = !_advancedExpanded;
-        _advancedPanel.Visible = _advancedExpanded;
-        _advancedButton.Text = _advancedExpanded ? "收起高级设置" : "高级设置";
-    }
-
     private void ShowDebugImage(Image image)
     {
         var previous = _debugPreview.Image;
         _debugPreview.Image = image;
-        SetDebugPreviewVisible(true);
         previous?.Dispose();
-    }
-
-    private void HideDebugImage()
-    {
-        var previous = _debugPreview.Image;
-        _debugPreview.Image = null;
-        SetDebugPreviewVisible(false);
-        previous?.Dispose();
-    }
-
-    private void SetDebugPreviewVisible(bool visible)
-    {
-        _debugPreview.Visible = visible;
-        _previewRowStyle.Height = visible ? 180 : 0;
-        _debugPreview.Parent?.PerformLayout();
     }
 
     protected override void Dispose(bool disposing)
@@ -582,17 +503,6 @@ public sealed class MainForm : Form
             Text = text,
             AutoSize = true,
             Padding = new Padding(0, 10, 0, 2)
-        });
-    }
-
-    private static void AddSectionHeader(Control parent, string text)
-    {
-        parent.Controls.Add(new Label
-        {
-            Text = text,
-            AutoSize = true,
-            Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold, GraphicsUnit.Point),
-            Padding = new Padding(0, 0, 0, 8)
         });
     }
 

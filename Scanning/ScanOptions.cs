@@ -8,13 +8,6 @@ public enum ScanTraversalMode
     LegacyThirdRow
 }
 
-public enum OcrEngineMode
-{
-    Auto,
-    PpOcrV5General,
-    ZzzFastFieldAware
-}
-
 public sealed class ScanOptions
 {
     public string ProcessName { get; set; } = "ZenlessZoneZero";
@@ -25,13 +18,11 @@ public sealed class ScanOptions
     public bool BringToFront { get; set; } = true;
     public bool ShowDebugImages { get; set; }
     public bool StopAtNonLevel15 { get; set; } = true;
-    public OcrEngineMode OcrEngine { get; set; } = OcrEngineMode.Auto;
     public bool HighSpeedOcr { get; set; } = true;
-    public int OcrBatchSize { get; set; } = 1;
+    public int OcrBatchSize { get; set; } = 8;
     public int OcrWorkerCount { get; set; } = 0;
     public int OcrQueueCapacity { get; set; } = 16;
     public int OcrIntraOpThreads { get; set; } = 4;
-    public int OcrSampleLimit { get; set; } = 0;
 }
 
 public sealed class ScanProgress

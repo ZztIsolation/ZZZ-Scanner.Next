@@ -26,8 +26,8 @@ public sealed class PaddleOcrRecognizer : IDisposable
             IntraOpNumThreads = Math.Max(1, intraOpThreads),
             InterOpNumThreads = 1,
             ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
-            EnableMemoryPattern = true,
-            EnableCpuMemArena = true
+            EnableMemoryPattern = false,
+            EnableCpuMemArena = false
         };
         _session = new InferenceSession(modelFile, sessionOptions);
     }

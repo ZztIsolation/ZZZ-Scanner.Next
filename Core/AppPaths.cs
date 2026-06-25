@@ -10,10 +10,6 @@ public static class AppPaths
 
     public static string CharacterDictFile => Path.Combine(BaseDirectory, "Resources", "models", "characterDict.txt");
 
-    public static string ZzzFastModelFile => Path.Combine(BaseDirectory, "Resources", "models", "ZZZ_fast_rec.onnx");
-
-    public static string ZzzFastCharacterDictFile => Path.Combine(BaseDirectory, "Resources", "models", "ZZZ_fast_dict.txt");
-
     public static string CreateScanDirectory()
     {
         var dir = Path.Combine(BaseDirectory, "Scans", DateTime.Now.ToString("yyyy-MM-dd-HH-mm-ss"));
