@@ -293,9 +293,9 @@ internal static class Program
         private Uri ResolveManifestUrl()
         {
             var baseUrl = Environment.GetEnvironmentVariable("ZZZ_SCANNER_DOWNLOAD_BASE");
-            if (string.IsNullOrWhiteSpace(baseUrl) && IsAllowedOrigin(_launchOrigin))
+            if (string.IsNullOrWhiteSpace(baseUrl))
             {
-                baseUrl = _launchOrigin;
+                baseUrl = ResolveDownloadBaseFromLaunchOrigin();
             }
 
             if (string.IsNullOrWhiteSpace(baseUrl))
@@ -304,6 +304,26 @@ internal static class Program
             }
 
             return new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), ManifestPath.TrimStart('/'));
+        }
+
+        private string? ResolveDownloadBaseFromLaunchOrigin()
+        {
+            if (!IsAllowedOrigin(_launchOrigin))
+            {
+                return null;
+            }
+
+            if (Uri.TryCreate(_launchOrigin, UriKind.Absolute, out var origin)
+                && origin.Port == 8443
+                && (origin.Host.Equals("zzzcaculator.top", StringComparison.OrdinalIgnoreCase)
+                    || origin.Host.Equals("www.zzzcaculator.top", StringComparison.OrdinalIgnoreCase)))
+            {
+                // Temporary pre-ICP fallback: the HTTPS page is valid for browser-local
+                // access, while the hashed OCR package is fetched from the IP endpoint.
+                return "http://121.199.21.10";
+            }
+
+            return _launchOrigin;
         }
 
         private async Task<T?> DownloadJsonAsync<T>(Uri url, CancellationToken token)
