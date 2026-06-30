@@ -668,6 +668,10 @@ internal static class Program
 
         return origin.Equals("http://localhost:8787", StringComparison.OrdinalIgnoreCase)
             || origin.Equals("http://127.0.0.1:8787", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://zzzcaculator.top", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://zzzcaculator.top:8443", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://www.zzzcaculator.top", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://www.zzzcaculator.top:8443", StringComparison.OrdinalIgnoreCase)
             || origin.Equals("https://jahooyoung.github.io", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -680,6 +684,7 @@ internal static class Program
 
         response.Headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS";
         response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
+        response.Headers["Access-Control-Allow-Private-Network"] = "true";
     }
 
     private static async Task SendJsonAsync(HttpListenerResponse response, int statusCode, object payload, CancellationToken token)
