@@ -247,13 +247,13 @@ internal static class Program
                 }
 
                 Directory.CreateDirectory(installDir);
-                var packageUrl = new Uri(manifestUrl, manifest.PackageUrl);
                 var packagePath = Path.Combine(PackageCacheDirectory(), $"scanner-{manifest.ScannerVersion}.zip");
 
                 yield return new { stage = "download", message = "正在下载 OCR 扫描器...", version = manifest.ScannerVersion };
-                await DownloadFileAsync(packageUrl, packagePath, token);
+                await DownloadAndVerifyPackageAsync(manifestUrl, manifest, packagePath, token);
 
                 yield return new { stage = "checksum", message = "正在校验扫描器文件...", version = manifest.ScannerVersion };
+                await VerifyPackageSizeAsync(packagePath, manifest.Size);
                 await VerifySha256Async(packagePath, manifest.Sha256, token);
 
                 var tempDir = installDir + ".tmp";
@@ -357,6 +357,90 @@ internal static class Program
             }
 
             File.Move(temp, destination);
+        }
+
+        private async Task DownloadAndVerifyPackageAsync(Uri manifestUrl, ScannerManifest manifest, string packagePath, CancellationToken token)
+        {
+            var urls = ResolvePackageUrls(manifestUrl, manifest).ToList();
+            if (urls.Count == 0)
+            {
+                throw new InvalidOperationException("Scanner package URL is missing.");
+            }
+
+            var errors = new List<string>();
+            foreach (var packageUrl in urls)
+            {
+                try
+                {
+                    await DownloadFileAsync(packageUrl, packagePath, token);
+                    await VerifyPackageSizeAsync(packagePath, manifest.Size);
+                    await VerifySha256Async(packagePath, manifest.Sha256, token);
+                    return;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    errors.Add($"{packageUrl}: {ex.Message}");
+                    SafeDelete(packagePath);
+                    SafeDelete(packagePath + ".download");
+                }
+            }
+
+            throw new InvalidOperationException($"Scanner package download failed. {string.Join(" | ", errors)}");
+        }
+
+        private static IEnumerable<Uri> ResolvePackageUrls(Uri manifestUrl, ScannerManifest manifest)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var rawUrl in manifest.PackageUrls ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(rawUrl))
+                {
+                    continue;
+                }
+
+                var url = new Uri(manifestUrl, rawUrl.Trim());
+                if (seen.Add(url.AbsoluteUri))
+                {
+                    yield return url;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(manifest.PackageUrl))
+            {
+                var url = new Uri(manifestUrl, manifest.PackageUrl);
+                if (seen.Add(url.AbsoluteUri))
+                {
+                    yield return url;
+                }
+            }
+        }
+
+        private static Task VerifyPackageSizeAsync(string packagePath, long expectedSize)
+        {
+            if (expectedSize > 0)
+            {
+                var actualSize = new FileInfo(packagePath).Length;
+                if (actualSize != expectedSize)
+                {
+                    throw new InvalidOperationException($"Scanner package size mismatch. Expected {expectedSize}, got {actualSize}.");
+                }
+            }
+
+            return Task.CompletedTask;
+        }
+
+        private static void SafeDelete(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch
+            {
+            }
         }
 
         private static async Task VerifySha256Async(string path, string expectedHex, CancellationToken token)
@@ -692,6 +776,7 @@ internal static class Program
             || origin.Equals("https://zzzcaculator.top:8443", StringComparison.OrdinalIgnoreCase)
             || origin.Equals("https://www.zzzcaculator.top", StringComparison.OrdinalIgnoreCase)
             || origin.Equals("https://www.zzzcaculator.top:8443", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://zztisolation.github.io", StringComparison.OrdinalIgnoreCase)
             || origin.Equals("https://jahooyoung.github.io", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -774,6 +859,7 @@ internal static class Program
         public string LauncherMinVersion { get; set; } = "";
         public string ScannerVersion { get; set; } = "";
         public string PackageUrl { get; set; } = "";
+        public List<string> PackageUrls { get; set; } = [];
         public string Sha256 { get; set; } = "";
         public long Size { get; set; }
         public string Entry { get; set; } = "ZZZ-Scanner.Next.exe";
