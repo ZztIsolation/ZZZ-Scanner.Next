@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
@@ -15,11 +16,13 @@ namespace ZZZScannerHelper;
 internal static partial class Program
 {
     private const string ServiceName = "zzz-scanner-helper";
-    private const string HelperVersion = "1.0.0";
+    private const string HelperVersion = "1.0.1";
     private const int ProtocolVersion = 1;
     private const int HelperPort = 22355;
     private const string ProtocolName = "zzz-scanner";
     private const string ManifestPath = "/downloads/zzz-scanner/manifest.json";
+    private const int PackageDownloadMaxAttempts = 5;
+    private const int DownloadProgressIntervalMs = 300;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true,
@@ -228,12 +231,12 @@ internal static partial class Program
             };
         }
 
-        public async IAsyncEnumerable<LauncherProgress> EnsureScannerAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+        public async Task EnsureScannerAsync(Func<LauncherProgress, CancellationToken, Task> report, CancellationToken token)
         {
             await _ensureGate.WaitAsync(token);
             try
             {
-                yield return new LauncherProgress { Stage = "manifest", Message = "正在获取扫描器版本清单..." };
+                await report(new LauncherProgress { Stage = "manifest", Message = "正在获取扫描器版本清单..." }, token);
                 var manifestUrl = ResolveManifestUrl();
                 var manifest = await DownloadManifestAsync(manifestUrl, token)
                     ?? throw new InvalidOperationException("Scanner manifest is empty.");
@@ -244,17 +247,23 @@ internal static partial class Program
                 if (File.Exists(entryPath))
                 {
                     _entryPath = entryPath;
-                    yield return new LauncherProgress { Stage = "ready", Message = "扫描器已是最新版本。", Version = manifest.ScannerVersion };
-                    yield break;
+                    await report(new LauncherProgress { Stage = "ready", Message = "扫描器已是最新版本。", Version = manifest.ScannerVersion }, token);
+                    return;
                 }
 
                 Directory.CreateDirectory(installDir);
                 var packagePath = Path.Combine(PackageCacheDirectory(), $"scanner-{manifest.ScannerVersion}.zip");
 
-                yield return new LauncherProgress { Stage = "download", Message = "正在下载 OCR 扫描器...", Version = manifest.ScannerVersion };
-                await DownloadAndVerifyPackageAsync(manifestUrl, manifest, packagePath, token);
+                await report(new LauncherProgress
+                {
+                    Stage = "download",
+                    Message = "正在下载 OCR 扫描器...",
+                    Version = manifest.ScannerVersion,
+                    TotalBytes = manifest.Size
+                }, token);
+                await DownloadAndVerifyPackageAsync(manifestUrl, manifest, packagePath, report, token);
 
-                yield return new LauncherProgress { Stage = "checksum", Message = "正在校验扫描器文件...", Version = manifest.ScannerVersion };
+                await report(new LauncherProgress { Stage = "checksum", Message = "正在校验扫描器文件...", Version = manifest.ScannerVersion }, token);
                 await VerifyPackageSizeAsync(packagePath, manifest.Size);
                 await VerifySha256Async(packagePath, manifest.Sha256, token);
 
@@ -265,7 +274,7 @@ internal static partial class Program
                 }
 
                 Directory.CreateDirectory(tempDir);
-                yield return new LauncherProgress { Stage = "extract", Message = "正在安装扫描器...", Version = manifest.ScannerVersion };
+                await report(new LauncherProgress { Stage = "extract", Message = "正在安装扫描器...", Version = manifest.ScannerVersion }, token);
                 ExtractZipSafe(packagePath, tempDir);
                 if (Directory.Exists(installDir))
                 {
@@ -274,7 +283,7 @@ internal static partial class Program
 
                 Directory.Move(tempDir, installDir);
                 _entryPath = entryPath;
-                yield return new LauncherProgress { Stage = "ready", Message = "扫描器准备完成。", Version = manifest.ScannerVersion };
+                await report(new LauncherProgress { Stage = "ready", Message = "扫描器准备完成。", Version = manifest.ScannerVersion }, token);
             }
             finally
             {
@@ -336,7 +345,13 @@ internal static partial class Program
             return await JsonSerializer.DeserializeAsync(stream, HelperJsonContext.Default.ScannerManifest, token);
         }
 
-        private async Task DownloadFileAsync(Uri url, string destination, CancellationToken token)
+        private async Task DownloadFileAsync(
+            Uri url,
+            string destination,
+            long expectedSize,
+            string version,
+            Func<LauncherProgress, CancellationToken, Task> report,
+            CancellationToken token)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
             var temp = destination + ".download";
@@ -345,23 +360,128 @@ internal static partial class Program
                 File.Delete(temp);
             }
 
-            using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token);
-            response.EnsureSuccessStatusCode();
-            await using var input = await response.Content.ReadAsStreamAsync(token);
-            await using (var output = File.Create(temp))
+            var stopwatch = Stopwatch.StartNew();
+            Exception? lastError = null;
+            for (var attempt = 1; attempt <= PackageDownloadMaxAttempts; attempt++)
             {
-                await input.CopyToAsync(output, token);
+                var existingBytes = File.Exists(temp) ? new FileInfo(temp).Length : 0L;
+                try
+                {
+                    using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                    if (existingBytes > 0)
+                    {
+                        request.Headers.Range = new RangeHeaderValue(existingBytes, null);
+                    }
+
+                    using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+                    if (existingBytes > 0 && response.StatusCode == HttpStatusCode.OK)
+                    {
+                        SafeDelete(temp);
+                        existingBytes = 0;
+                    }
+
+                    response.EnsureSuccessStatusCode();
+                    var responseLength = response.Content.Headers.ContentLength ?? 0;
+                    var totalBytes = expectedSize > 0 ? expectedSize : existingBytes + responseLength;
+                    await report(DownloadProgress(version, url, existingBytes, totalBytes, stopwatch, attempt, "正在下载 OCR 扫描器..."), token);
+
+                    await using var input = await response.Content.ReadAsStreamAsync(token);
+                    await using var output = new FileStream(
+                        temp,
+                        existingBytes > 0 ? FileMode.Append : FileMode.Create,
+                        FileAccess.Write,
+                        FileShare.None,
+                        bufferSize: 128 * 1024,
+                        useAsync: true);
+
+                    var buffer = new byte[128 * 1024];
+                    var downloaded = existingBytes;
+                    var lastReport = Stopwatch.StartNew();
+                    while (true)
+                    {
+                        var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), token);
+                        if (read <= 0)
+                        {
+                            break;
+                        }
+
+                        await output.WriteAsync(buffer.AsMemory(0, read), token);
+                        downloaded += read;
+                        if (lastReport.ElapsedMilliseconds >= DownloadProgressIntervalMs
+                            || (totalBytes > 0 && downloaded >= totalBytes))
+                        {
+                            await report(DownloadProgress(version, url, downloaded, totalBytes, stopwatch, attempt, "正在下载 OCR 扫描器..."), token);
+                            lastReport.Restart();
+                        }
+                    }
+
+                    await output.FlushAsync(token);
+                    await report(DownloadProgress(version, url, downloaded, totalBytes, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
+                    if (File.Exists(destination))
+                    {
+                        File.Delete(destination);
+                    }
+
+                    File.Move(temp, destination);
+                    return;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lastError = ex;
+                    if (attempt >= PackageDownloadMaxAttempts)
+                    {
+                        break;
+                    }
+
+                    var downloaded = File.Exists(temp) ? new FileInfo(temp).Length : 0L;
+                    await report(DownloadProgress(
+                        version,
+                        url,
+                        downloaded,
+                        expectedSize,
+                        stopwatch,
+                        attempt + 1,
+                        $"下载连接中断，正在第 {attempt + 1}/{PackageDownloadMaxAttempts} 次重试..."), token);
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Min(8, attempt * 2)), token);
+                }
             }
 
-            if (File.Exists(destination))
-            {
-                File.Delete(destination);
-            }
-
-            File.Move(temp, destination);
+            SafeDelete(temp);
+            throw new IOException($"Scanner package download failed after {PackageDownloadMaxAttempts} attempts: {lastError?.Message}", lastError);
         }
 
-        private async Task DownloadAndVerifyPackageAsync(Uri manifestUrl, ScannerManifest manifest, string packagePath, CancellationToken token)
+        private static LauncherProgress DownloadProgress(
+            string version,
+            Uri url,
+            long downloaded,
+            long total,
+            Stopwatch stopwatch,
+            int attempt,
+            string message)
+        {
+            var seconds = Math.Max(stopwatch.Elapsed.TotalSeconds, 0.001);
+            double? percent = total > 0 ? Math.Clamp(downloaded * 100d / total, 0d, 100d) : null;
+            return new LauncherProgress
+            {
+                Stage = "download",
+                Message = message,
+                Version = version,
+                Url = url.ToString(),
+                BytesDownloaded = Math.Max(0, downloaded),
+                TotalBytes = total > 0 ? total : null,
+                Percent = percent,
+                BytesPerSecond = Math.Max(0, downloaded / seconds),
+                Attempt = attempt,
+                MaxAttempts = PackageDownloadMaxAttempts
+            };
+        }
+
+        private async Task DownloadAndVerifyPackageAsync(
+            Uri manifestUrl,
+            ScannerManifest manifest,
+            string packagePath,
+            Func<LauncherProgress, CancellationToken, Task> report,
+            CancellationToken token)
         {
             var urls = ResolvePackageUrls(manifestUrl, manifest).ToList();
             if (urls.Count == 0)
@@ -374,7 +494,7 @@ internal static partial class Program
             {
                 try
                 {
-                    await DownloadFileAsync(packageUrl, packagePath, token);
+                    await DownloadFileAsync(packageUrl, packagePath, manifest.Size, manifest.ScannerVersion, report, token);
                     await VerifyPackageSizeAsync(packagePath, manifest.Size);
                     await VerifySha256Async(packagePath, manifest.Sha256, token);
                     return;
@@ -609,10 +729,7 @@ internal static partial class Program
             }
 
             await SendAsync("launcher_progress", new LauncherProgress { Stage = "queue", Message = "正在准备扫描器任务..." }, token);
-            await foreach (var progress in _server.EnsureScannerAsync(token))
-            {
-                await SendAsync("launcher_progress", progress, token);
-            }
+            await _server.EnsureScannerAsync((progress, ct) => SendAsync("launcher_progress", progress, ct), token);
 
             var childToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
             _scanner = await ManagedScannerProcess.StartAsync(_server.CurrentEntryPath(), childToken, ForwardScannerMessageAsync, token);
@@ -900,6 +1017,13 @@ internal static partial class Program
         public string Stage { get; set; } = "";
         public string Message { get; set; } = "";
         public string? Version { get; set; }
+        public string? Url { get; set; }
+        public long? BytesDownloaded { get; set; }
+        public long? TotalBytes { get; set; }
+        public double? Percent { get; set; }
+        public double? BytesPerSecond { get; set; }
+        public int? Attempt { get; set; }
+        public int? MaxAttempts { get; set; }
     }
 
     private sealed class ErrorMessage
