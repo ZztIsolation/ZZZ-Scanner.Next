@@ -60,7 +60,8 @@ public sealed class WebSocketHost : IDisposable
                 await SendJsonAsync(context.Response, 200, new
                 {
                     service = "zzz-scanner",
-                    version = "1.0.0"
+                    version = AppInfo.Version,
+                    scanner = AppInfo.DiagnosticPayload()
                 }, token);
                 return;
             }
@@ -107,7 +108,7 @@ public sealed class WebSocketHost : IDisposable
         CancellationTokenSource? scanCts = null;
         Task? scanTask = null;
 
-        await SendAsync(socket, sendGate, "hello", new { service = "zzz-scanner", version = "1.0.0" }, socketCts.Token);
+        await SendAsync(socket, sendGate, "hello", new { service = "zzz-scanner", version = AppInfo.Version, scanner = AppInfo.DiagnosticPayload() }, socketCts.Token);
 
         while (socket.State == WebSocketState.Open && !socketCts.IsCancellationRequested)
         {
@@ -135,7 +136,7 @@ public sealed class WebSocketHost : IDisposable
             switch (envelope.Cmd)
             {
                 case "ping":
-                    await SendAsync(socket, sendGate, "pong", new { time = DateTimeOffset.Now }, socketCts.Token);
+                    await SendAsync(socket, sendGate, "pong", new { time = DateTimeOffset.Now, scanner = AppInfo.DiagnosticPayload() }, socketCts.Token);
                     break;
 
                 case "scan_req":
@@ -183,16 +184,17 @@ public sealed class WebSocketHost : IDisposable
                 visited = result.Visited,
                 failed = result.Failed,
                 outputDirectory = result.OutputDirectory,
-                exportFile = result.ExportFile
+                exportFile = result.ExportFile,
+                scanner = AppInfo.DiagnosticPayload()
             }, token);
         }
         catch (OperationCanceledException)
         {
-            await SendAsync(socket, sendGate, "scan_error", new { message = "扫描已停止。" }, CancellationToken.None);
+            await SendAsync(socket, sendGate, "scan_error", new { message = "扫描已停止。", scanner = AppInfo.DiagnosticPayload() }, CancellationToken.None);
         }
         catch (Exception ex)
         {
-            await SendAsync(socket, sendGate, "scan_error", new { message = ex.Message }, CancellationToken.None);
+            await SendAsync(socket, sendGate, "scan_error", new { message = ex.Message, error = ex.ToString(), scanner = AppInfo.DiagnosticPayload() }, CancellationToken.None);
         }
     }
 
@@ -202,11 +204,65 @@ public sealed class WebSocketHost : IDisposable
         {
             MaxItems = Math.Max(0, payload.MaxItems),
             StopAtNonLevel15 = payload.StopAtNonLevel15,
+            OcrShadowDataset = payload.OcrShadowDataset,
+            FastOcrShadow = payload.FastOcrShadow,
+            FastOcrAssist = payload.FastMode || payload.FastOcrAssist,
+            FastMode = payload.FastMode,
+            AdaptiveTiming = payload.AdaptiveTiming,
+            FastOcrTemplateIndexFile = payload.FastOcrTemplateIndexFile,
+            CaptureMode = ParseCaptureMode(payload.CaptureMode),
+            PanelStabilityMode = ParsePanelStabilityMode(payload.PanelStabilityMode, payload.FastMode),
+            ScrollAcceptMode = string.IsNullOrWhiteSpace(payload.ScrollAcceptMode) && payload.FastMode
+                ? ScrollAcceptMode.EarlyOneRow
+                : ParseScrollAcceptMode(payload.ScrollAcceptMode),
+            PanelAcceptMode = string.IsNullOrWhiteSpace(payload.PanelAcceptMode) && payload.FastMode
+                ? PanelAcceptMode.AdaptiveEarlyFullRoi
+                : ParsePanelAcceptMode(payload.PanelAcceptMode),
+            PostScrollPanelAcceptMode = ParsePostScrollPanelAcceptMode(payload.PostScrollPanelAcceptMode),
+            PanelFloorMode = ParsePanelFloorMode(payload.PanelFloorMode),
+            PanelMinAcceptFloorMs = Math.Clamp(payload.PanelMinAcceptFloorMs <= 0 ? 120 : payload.PanelMinAcceptFloorMs, 90, 120),
+            SameRowPanelMinAcceptFloorMs = Math.Clamp(payload.SameRowPanelMinAcceptFloorMs <= 0 ? 105 : payload.SameRowPanelMinAcceptFloorMs, 100, 120),
+            PostScrollPanelMinAcceptFloorMs = Math.Clamp(payload.PostScrollPanelMinAcceptFloorMs <= 0 ? 110 : payload.PostScrollPanelMinAcceptFloorMs, 100, 120),
+            ScrollTickDelayOverrideMs = payload.ScrollTickDelayMs <= 0 ? 0 : Math.Clamp(payload.ScrollTickDelayMs, 50, 80),
+            OverlapConflictMode = string.IsNullOrWhiteSpace(payload.OverlapConflictMode) && payload.FastMode
+                ? OverlapConflictMode.Recover
+                : ParseOverlapConflictMode(payload.OverlapConflictMode),
+            VisualProfileId = string.IsNullOrWhiteSpace(payload.VisualProfileId) ? "auto" : payload.VisualProfileId,
+            VisualQualityLabel = string.IsNullOrWhiteSpace(payload.VisualProfileQuality) ? "current" : payload.VisualProfileQuality,
+            VisualProfileClient = ParseVisualProfileClient(payload.VisualProfileClient),
+            ProfileRouting = ParseProfileRouting(payload.ProfileRouting),
+            CollectVisualProfile = !string.IsNullOrWhiteSpace(payload.CollectVisualProfile)
         };
+
+        if (!string.IsNullOrWhiteSpace(payload.CollectVisualProfile))
+        {
+            options.VisualProfileId = payload.CollectVisualProfile;
+            if (string.IsNullOrWhiteSpace(payload.ProfileName))
+            {
+                options.ProfileName = ScanOptions.FastProfileName;
+            }
+
+            options.OcrShadowDataset = true;
+            options.FastMode = false;
+            options.FastOcrAssist = false;
+            options.FastOcrShadow = false;
+            options.AdaptiveTiming = false;
+            options.PanelAcceptMode = PanelAcceptMode.Safe;
+            options.PostScrollPanelAcceptMode = PostScrollPanelAcceptMode.Safe;
+            options.ScrollAcceptMode = ScrollAcceptMode.Safe;
+            options.PanelStabilityMode = PanelStabilityMode.Panel;
+            options.PanelFloorMode = PanelFloorMode.Static;
+            options.PanelMinAcceptFloorMs = 120;
+            options.OverlapConflictMode = OverlapConflictMode.Recover;
+        }
 
         if (!string.IsNullOrWhiteSpace(payload.ProfileName))
         {
             options.ProfileName = payload.ProfileName;
+        }
+        else if (payload.FastMode)
+        {
+            options.ProfileName = ScanOptions.FastProfileName;
         }
 
         options.Rarities.Clear();
@@ -221,6 +277,117 @@ public sealed class WebSocketHost : IDisposable
         }
 
         return options;
+    }
+
+    private static CaptureMode ParseCaptureMode(string? value)
+    {
+        return Enum.TryParse<CaptureMode>(value, ignoreCase: true, out var parsed)
+            ? parsed
+            : CaptureMode.Gdi;
+    }
+
+    private static PanelStabilityMode ParsePanelStabilityMode(string? value, bool fastMode)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return PanelStabilityMode.Panel;
+        }
+
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        return Enum.TryParse<PanelStabilityMode>(normalized, ignoreCase: true, out var mode)
+            ? mode
+            : PanelStabilityMode.Panel;
+    }
+
+    private static ScrollAcceptMode ParseScrollAcceptMode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return ScrollAcceptMode.Safe;
+        }
+
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        return Enum.TryParse<ScrollAcceptMode>(normalized, ignoreCase: true, out var mode)
+            ? mode
+            : ScrollAcceptMode.Safe;
+    }
+
+    private static PanelAcceptMode ParsePanelAcceptMode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return PanelAcceptMode.Safe;
+        }
+
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        return Enum.TryParse<PanelAcceptMode>(normalized, ignoreCase: true, out var mode)
+            ? mode
+            : PanelAcceptMode.Safe;
+    }
+
+    private static PostScrollPanelAcceptMode ParsePostScrollPanelAcceptMode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return PostScrollPanelAcceptMode.Safe;
+        }
+
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        return Enum.TryParse<PostScrollPanelAcceptMode>(normalized, ignoreCase: true, out var mode)
+            ? mode
+            : PostScrollPanelAcceptMode.Safe;
+    }
+
+    private static PanelFloorMode ParsePanelFloorMode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return PanelFloorMode.Static;
+        }
+
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        return Enum.TryParse<PanelFloorMode>(normalized, ignoreCase: true, out var mode)
+            ? mode
+            : PanelFloorMode.Static;
+    }
+
+    private static OverlapConflictMode ParseOverlapConflictMode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return OverlapConflictMode.Recheck;
+        }
+
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        return Enum.TryParse<OverlapConflictMode>(normalized, ignoreCase: true, out var mode)
+            ? mode
+            : OverlapConflictMode.Recheck;
+    }
+
+    private static VisualProfileClientKind ParseVisualProfileClient(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return VisualProfileClientKind.Auto;
+        }
+
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        return Enum.TryParse<VisualProfileClientKind>(normalized, ignoreCase: true, out var mode)
+            ? mode
+            : VisualProfileClientKind.Auto;
+    }
+
+    private static ProfileRoutingMode ParseProfileRouting(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return ProfileRoutingMode.Auto;
+        }
+
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        return Enum.TryParse<ProfileRoutingMode>(normalized, ignoreCase: true, out var mode)
+            ? mode
+            : ProfileRoutingMode.Auto;
     }
 
     private static async Task SendProgressAsync(System.Net.WebSockets.WebSocket socket, SemaphoreSlim sendGate, ScanProgress progress, CancellationToken token)
@@ -352,6 +519,28 @@ public sealed class WebSocketHost : IDisposable
         public int MaxItems { get; set; }
         public string[] Rarities { get; set; } = ["S"];
         public bool StopAtNonLevel15 { get; set; } = true;
+        public bool OcrShadowDataset { get; set; }
+        public bool FastOcrShadow { get; set; }
+        public bool FastOcrAssist { get; set; }
+        public bool FastMode { get; set; }
+        public bool? AdaptiveTiming { get; set; }
+        public string FastOcrTemplateIndexFile { get; set; } = "";
         public string ProfileName { get; set; } = "";
+        public string CaptureMode { get; set; } = "gdi";
+        public string PanelStabilityMode { get; set; } = "";
+        public string ScrollAcceptMode { get; set; } = "";
+        public string PanelAcceptMode { get; set; } = "";
+        public string PostScrollPanelAcceptMode { get; set; } = "";
+        public string PanelFloorMode { get; set; } = "";
+        public int PanelMinAcceptFloorMs { get; set; } = 120;
+        public int SameRowPanelMinAcceptFloorMs { get; set; } = 105;
+        public int PostScrollPanelMinAcceptFloorMs { get; set; } = 110;
+        public int ScrollTickDelayMs { get; set; }
+        public string OverlapConflictMode { get; set; } = "";
+        public string VisualProfileId { get; set; } = "";
+        public string VisualProfileQuality { get; set; } = "";
+        public string VisualProfileClient { get; set; } = "";
+        public string ProfileRouting { get; set; } = "";
+        public string CollectVisualProfile { get; set; } = "";
     }
 }

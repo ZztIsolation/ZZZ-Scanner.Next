@@ -9,6 +9,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <Version>1.0.30</Version>
+    <AssemblyVersion>1.0.30.0</AssemblyVersion>
+    <FileVersion>1.0.30.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -23,6 +26,26 @@
     <PackageReference Include="Microsoft.VisualBasic" Version="10.3.0" />
     <PackageReference Include="OpenCvSharp4.Extensions" Version="4.11.0.20250507" />
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.11.0.20250507" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
   </ItemGroup>
+
+  <Target Name="PruneScannerPublishPayload" AfterTargets="Publish">
+    <ItemGroup>
+      <_ScannerPublishFilesToRemove Include="$(PublishDir)opencv_videoio_ffmpeg4110_64.dll" />
+      <_ScannerPublishFilesToRemove Include="$(PublishDir)createdump.exe" />
+      <_ScannerPublishFilesToRemove Include="$(PublishDir)mscordbi.dll" />
+      <_ScannerPublishFilesToRemove Include="$(PublishDir)mscordaccore.dll" />
+      <_ScannerPublishFilesToRemove Include="$(PublishDir)mscordaccore_*.dll" />
+      <_ScannerPublishFilesToRemove Include="$(PublishDir)Microsoft.DiaSymReader.Native.amd64.dll" />
+      <_ScannerPublishFilesToRemove Include="$(PublishDir)onnxruntime.lib" />
+      <_ScannerPublishFilesToRemove Include="$(PublishDir)onnxruntime_providers_shared.lib" />
+      <_ScannerPublishFilesToRemove Include="$(PublishDir)*.pdb" />
+      <_ScannerPublishDirsToRemove Include="$(PublishDir)Scans" />
+      <_ScannerPublishDirsToRemove Include="$(PublishDir)StabilitySuites" />
+    </ItemGroup>
+    <Delete Files="@(_ScannerPublishFilesToRemove)" TreatErrorsAsWarnings="true" />
+    <RemoveDir Directories="@(_ScannerPublishDirsToRemove)" ContinueOnError="WarnAndContinue" />
+  </Target>
 
 </Project>

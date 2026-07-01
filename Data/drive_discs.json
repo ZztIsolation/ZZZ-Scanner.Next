@@ -1,11 +1,12 @@
 {
-  "version": "2026-05-19",
+  "version": "2026-06-24",
   "source": {
     "primaryPages": [
       "https://wiki.biligame.com/zzz/%E9%A9%B1%E5%8A%A8%E7%9B%98%E5%9B%BE%E9%89%B4",
-      "https://wiki.biligame.com/zzz/%E9%A9%B1%E5%8A%A8%E7%9B%98"
+      "https://wiki.biligame.com/zzz/%E9%A9%B1%E5%8A%A8%E7%9B%98",
+      "https://baike.mihoyo.com/zzz/wiki/channel/map/2/46"
     ],
-    "notes": "The scanner uses this catalog as the OCR correction dictionary. The set list was organized from the requested BiliGame wiki pages; extraNameCandidates is deliberately separate so newer names can be added without changing scan code."
+    "notes": "The scanner uses this catalog as the OCR correction dictionary. The set list was organized from the requested BiliGame wiki pages and the HoYoWiki drive disc channel; extraNameCandidates is deliberately separate so newer names can be added without changing scan code."
   },
   "sets": [
     { "name": "自由蓝调", "wikiListOrder": 1, "sourcePage": "https://wiki.biligame.com/zzz/%E8%87%AA%E7%94%B1%E8%93%9D%E8%B0%83", "minRarity": "B", "maxRarity": "S" },
@@ -29,7 +30,9 @@
     { "name": "云岿如我", "wikiListOrder": 19, "sourcePage": "https://wiki.biligame.com/zzz/%E4%BA%91%E5%B2%BF%E5%A6%82%E6%88%91", "minRarity": "B", "maxRarity": "S" },
     { "name": "山大王", "wikiListOrder": 20, "sourcePage": "https://wiki.biligame.com/zzz/%E5%B1%B1%E5%A4%A7%E7%8E%8B", "minRarity": "B", "maxRarity": "S" },
     { "name": "月光骑士颂", "wikiListOrder": 21, "sourcePage": "https://wiki.biligame.com/zzz/%E6%9C%88%E5%85%89%E9%AA%91%E5%A3%AB%E9%A2%82", "minRarity": "B", "maxRarity": "S" },
-    { "name": "拂晓生花", "wikiListOrder": 22, "sourcePage": "https://wiki.biligame.com/zzz/%E6%8B%82%E6%99%93%E7%94%9F%E8%8A%B1", "minRarity": "B", "maxRarity": "S" }
+    { "name": "拂晓生花", "wikiListOrder": 22, "sourcePage": "https://wiki.biligame.com/zzz/%E6%8B%82%E6%99%93%E7%94%9F%E8%8A%B1", "minRarity": "B", "maxRarity": "S" },
+    { "name": "呼啸沙龙", "wikiListOrder": 23, "sourcePage": "https://baike.mihoyo.com/zzz/wiki/channel/map/2/46", "minRarity": "B", "maxRarity": "S" },
+    { "name": "拂晓行纪", "wikiListOrder": 24, "sourcePage": "https://baike.mihoyo.com/zzz/wiki/channel/map/2/46", "minRarity": "B", "maxRarity": "S" }
   ],
   "extraNameCandidates": [
     "沧浪行歌",

@@ -4,11 +4,14 @@ using ZZZScannerNext.Interop;
 
 namespace ZZZScannerNext.Scanning;
 
-public sealed class GameWindow
+public sealed class GameWindow : IDisposable
 {
     private readonly IntPtr _handle;
+    private IWindowCaptureSource _captureSource = new GdiCaptureSource();
+    private Action<string>? _captureLog;
     private Rectangle _clientScreenRect;
     private float _coordinateScale = 1f;
+    private bool _disposed;
 
     private GameWindow(IntPtr handle, ClientMetrics metrics)
     {
@@ -21,6 +24,8 @@ public sealed class GameWindow
     public Rectangle ClientScreenRect => _clientScreenRect;
     public int Dpi { get; }
     public float CoordinateScale => _coordinateScale;
+    public string ActiveCaptureMode => _captureSource.Name;
+    public string ActiveFrameBackend => _captureSource.FrameBackendName;
 
     public static GameWindow Find(string processName)
     {
@@ -58,6 +63,28 @@ public sealed class GameWindow
         var metrics = GetClientMetrics(_handle);
         _clientScreenRect = metrics.ScreenRect;
         _coordinateScale = metrics.Scale;
+    }
+
+    public void ConfigureCaptureMode(CaptureMode mode, Action<string>? log = null)
+    {
+        _captureLog = log;
+        if (mode == CaptureMode.Gdi)
+        {
+            SwitchCaptureSource(new GdiCaptureSource());
+            log?.Invoke($"Capture backend active: gdi. captureFrameBackend={_captureSource.FrameBackendName}");
+            return;
+        }
+
+        try
+        {
+            SwitchCaptureSource(DxgiDesktopCaptureSource.Create(_clientScreenRect));
+            log?.Invoke($"Capture backend active: dxgi. client={_clientScreenRect}, captureFrameBackend={_captureSource.FrameBackendName}");
+        }
+        catch (Exception ex)
+        {
+            SwitchCaptureSource(new GdiCaptureSource());
+            log?.Invoke($"Capture backend fallback: requested=dxgi, active=gdi, captureFrameBackend={_captureSource.FrameBackendName}, reason={ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     public void LeftClick(Point point, int durationMs = 0)
@@ -105,18 +132,44 @@ public sealed class GameWindow
 
     public Bitmap Capture(Rectangle screenRect)
     {
-        var image = new Bitmap(screenRect.Width, screenRect.Height);
-        using var graphics = Graphics.FromImage(image);
-        graphics.CopyFromScreen(screenRect.Location, Point.Empty, screenRect.Size);
-        return image;
+        try
+        {
+            return _captureSource.Capture(screenRect);
+        }
+        catch (Exception ex) when (_captureSource is not GdiCaptureSource)
+        {
+            _captureLog?.Invoke($"Capture backend fallback during Capture: active={_captureSource.Name}, fallback=gdi, reason={ex.GetType().Name}: {ex.Message}");
+            SwitchCaptureSource(new GdiCaptureSource());
+            return _captureSource.Capture(screenRect);
+        }
+    }
+
+    internal CapturedFrame CaptureFrame(Rectangle screenRect)
+    {
+        try
+        {
+            return _captureSource.CaptureFrame(screenRect);
+        }
+        catch (Exception ex) when (_captureSource is not GdiCaptureSource)
+        {
+            _captureLog?.Invoke($"Capture backend fallback during CaptureFrame: active={_captureSource.Name}, fallback=gdi, captureFrameBackend=bitmap-fallback, reason={ex.GetType().Name}: {ex.Message}");
+            SwitchCaptureSource(new GdiCaptureSource());
+            return _captureSource.CaptureFrame(screenRect);
+        }
     }
 
     public Color GetPixel(Point point)
     {
-        using var image = new Bitmap(1, 1);
-        using var graphics = Graphics.FromImage(image);
-        graphics.CopyFromScreen(point, Point.Empty, image.Size);
-        return image.GetPixel(0, 0);
+        try
+        {
+            return _captureSource.GetPixel(point);
+        }
+        catch (Exception ex) when (_captureSource is not GdiCaptureSource)
+        {
+            _captureLog?.Invoke($"Capture backend fallback during GetPixel: active={_captureSource.Name}, fallback=gdi, reason={ex.GetType().Name}: {ex.Message}");
+            SwitchCaptureSource(new GdiCaptureSource());
+            return _captureSource.GetPixel(point);
+        }
     }
 
     public Point ToScreenPoint(PointF normalized, bool clientToScreen = true)
@@ -161,6 +214,24 @@ public sealed class GameWindow
         // ClientToScreen returns for this process. Converting it again by DPI makes
         // high-DPI secondary monitors overshoot the lower rows.
         return new ClientMetrics(logicalClientScreen, 1f);
+    }
+
+    private void SwitchCaptureSource(IWindowCaptureSource captureSource)
+    {
+        var previous = _captureSource;
+        _captureSource = captureSource;
+        previous.Dispose();
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _captureSource.Dispose();
     }
 
     private readonly record struct ClientMetrics(Rectangle ScreenRect, float Scale);

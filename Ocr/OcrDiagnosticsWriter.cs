@@ -12,7 +12,7 @@ public sealed class OcrDiagnosticsWriter : IDisposable
     {
         Directory.CreateDirectory(Path.GetDirectoryName(file) ?? ".");
         _writer = new StreamWriter(file, append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-        _writer.WriteLine("timestamp,worker_id,batch_size,roi_count,max_width,run_count,bitmap_to_mat_ms,preprocess_ms,inference_ms,decode_ms,total_ms,clean_ms,fallback_count,queued_completed_backlog");
+        _writer.WriteLine("timestamp,worker_id,batch_size,roi_count,max_width,run_count,bitmap_to_mat_ms,preprocess_ms,inference_ms,decode_ms,total_ms,clean_ms,fallback_count,queued_completed_backlog,fast_match_ms,fast_accepted_count,fast_rejected_count,ppocr_roi_count");
         _writer.Flush();
     }
 
@@ -23,7 +23,11 @@ public sealed class OcrDiagnosticsWriter : IDisposable
         double bitmapToMatMs,
         double cleanMs,
         int fallbackCount,
-        int backlog)
+        int backlog,
+        double fastMatchMs = 0,
+        int fastAcceptedCount = 0,
+        int fastRejectedCount = 0,
+        int ppocrRoiCount = -1)
     {
         lock (_sync)
         {
@@ -41,7 +45,11 @@ public sealed class OcrDiagnosticsWriter : IDisposable
                 diagnostics.TotalMs.ToString("F3", CultureInfo.InvariantCulture),
                 cleanMs.ToString("F3", CultureInfo.InvariantCulture),
                 fallbackCount.ToString(CultureInfo.InvariantCulture),
-                backlog.ToString(CultureInfo.InvariantCulture)
+                backlog.ToString(CultureInfo.InvariantCulture),
+                fastMatchMs.ToString("F3", CultureInfo.InvariantCulture),
+                fastAcceptedCount.ToString(CultureInfo.InvariantCulture),
+                fastRejectedCount.ToString(CultureInfo.InvariantCulture),
+                (ppocrRoiCount < 0 ? diagnostics.RoiCount : ppocrRoiCount).ToString(CultureInfo.InvariantCulture)
             ]));
             _writer.Flush();
         }

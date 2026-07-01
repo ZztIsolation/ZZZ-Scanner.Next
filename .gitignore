@@ -2,9 +2,13 @@
 bin/
 obj/
 publish/
+publish */
 publish-*/
+publish-helper*/
 dist/
 artifacts/
+tmp-fast-*/
+ZZZ-Scanner.Next-win-x64*.zip
 
 # Runtime scan output
 Scans/
@@ -32,6 +36,11 @@ Desktop.ini
 TestResults/
 *.nupkg
 *.snupkg
+tmp-fast-*.json
+
+# Experimental Fast OCR templates are generated from local visual profiles.
+# Force-add a validated release template explicitly when it is ready.
+Data/ocr_fast_templates*.json
 
 # Large OCR model is bundled in release archives.
 Resources/models/*.onnx

@@ -9,4 +9,19 @@
     <RootNamespace>ZZZScannerHelper</RootNamespace>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PublishAot>true</PublishAot>
+    <StripSymbols>true</StripSymbols>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+  </PropertyGroup>
+
+  <Target Name="PruneHelperPublishSymbols" AfterTargets="Publish">
+    <ItemGroup>
+      <_HelperPublishSymbols Include="$(PublishDir)*.pdb" />
+    </ItemGroup>
+    <Delete Files="@(_HelperPublishSymbols)" TreatErrorsAsWarnings="true" />
+  </Target>
+
 </Project>

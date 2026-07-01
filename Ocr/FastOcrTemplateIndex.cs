@@ -1,0 +1,801 @@
+using System.Drawing.Imaging;
+using System.Globalization;
+using System.Numerics;
+using System.Text.Json;
+using OpenCvSharp;
+using ZZZScannerNext.Core;
+using ZZZScannerNext.Scanning;
+using CvRect = OpenCvSharp.Rect;
+
+namespace ZZZScannerNext.Ocr;
+
+public sealed class FastOcrTemplateIndex
+{
+    public const string CurrentVersion = "5";
+    public const string LegacyFeature = "ahash-16x16-grayscale-v1";
+    public const string CurrentFeature = "ahash-dhash-16x16-v3";
+    public const string ExperimentalFeature = "ahash-dhash-vhash-16x16-v4";
+    public const double DefaultMinScore = 0.90;
+    public const double DefaultMinMargin = 0.02;
+
+    public string Version { get; set; } = CurrentVersion;
+    public string CreatedAt { get; set; } = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture);
+    public string Feature { get; set; } = CurrentFeature;
+    public List<FastOcrTemplate> Templates { get; set; } = new();
+    public Dictionary<string, FastOcrFieldPolicy> FieldPolicies { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, FastOcrFieldPolicy> ProfileFieldPolicies { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    private Dictionary<string, List<FastOcrTemplate>>? _byField;
+    private Dictionary<string, List<FastOcrTemplate>>? _byFieldAndProfile;
+
+    public static IReadOnlySet<string> SupportedFields { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "name",
+        "level",
+        "mainStat",
+        "subStat1",
+        "subStat2",
+        "subStat3",
+        "subStat4"
+    };
+
+    public static string DefaultIndexFile => AppPaths.DataFile("ocr_fast_templates.json");
+
+    public static bool IsSupportedField(string fieldKey)
+    {
+        return SupportedFields.Contains(fieldKey);
+    }
+
+    public static bool IsDefaultAssistField(string fieldKey)
+    {
+        return IsSupportedField(fieldKey) && !fieldKey.Equals("name", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static FastOcrTemplateIndex Load(string file)
+    {
+        var index = JsonSerializer.Deserialize<FastOcrTemplateIndex>(File.ReadAllText(file), JsonDefaults.Read)
+            ?? throw new InvalidDataException($"Cannot load fast OCR template index: {file}");
+        index.NormalizeForUse();
+        return index;
+    }
+
+    public void Save(string file)
+    {
+        NormalizeForUse();
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(file)) ?? ".");
+        File.WriteAllText(file, JsonSerializer.Serialize(this, JsonDefaults.Write));
+    }
+
+    public static bool TryValidateFastModeIndex(string? file, out string resolvedFile, out string reason)
+    {
+        resolvedFile = string.IsNullOrWhiteSpace(file)
+            ? DefaultIndexFile
+            : Path.GetFullPath(file);
+        reason = "";
+
+        if (!File.Exists(resolvedFile))
+        {
+            reason = $"fast OCR index not found: {resolvedFile}";
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(resolvedFile));
+            var root = document.RootElement;
+            var versionText = root.TryGetProperty("Version", out var versionElement)
+                ? versionElement.ValueKind == JsonValueKind.Number
+                    ? versionElement.GetRawText()
+                    : versionElement.GetString()
+                : "";
+            if (!int.TryParse(versionText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var version)
+                || version < 3)
+            {
+                reason = $"fast OCR index must be v3 or newer; found Version={versionText}";
+                return false;
+            }
+
+            var index = Load(resolvedFile);
+            if (!string.Equals(index.Feature, CurrentFeature, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(index.Feature, ExperimentalFeature, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = $"unsupported fast OCR feature: {index.Feature}";
+                return false;
+            }
+
+            if (index.Templates.Count == 0)
+            {
+                reason = "fast OCR index has no templates";
+                return false;
+            }
+
+            var enabledFields = index.FieldPolicies
+                .Where(pair => pair.Value.AssistEnabled && pair.Value.TemplateCount > 0)
+                .Select(pair => pair.Key)
+                .OrderBy(field => field, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (enabledFields.Length == 0)
+            {
+                reason = "fast OCR index has no assist-enabled fields";
+                return false;
+            }
+
+            reason = $"enabled_fields={string.Join("|", enabledFields)}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            reason = $"cannot validate fast OCR index: {ex.Message}";
+            return false;
+        }
+    }
+
+    public static FastOcrTemplateIndex Build(IEnumerable<OcrShadowDatasetRow> rows, Action<string>? log = null, string featureName = CurrentFeature)
+    {
+        var index = new FastOcrTemplateIndex
+        {
+            Feature = string.IsNullOrWhiteSpace(featureName) ? CurrentFeature : featureName
+        };
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var row in rows)
+        {
+            if (!IsSupportedField(row.FieldKey) || string.IsNullOrWhiteSpace(row.CleanLabel))
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(row.ImageFile) || !File.Exists(row.ResolvedImageFile))
+            {
+                log?.Invoke($"skip_missing_image field={row.FieldKey} item={row.ItemIndex} image={row.ResolvedImageFile}");
+                continue;
+            }
+
+            try
+            {
+                using var bitmap = new Bitmap(row.ResolvedImageFile);
+                var feature = FastOcrImageFeature.FromBitmap(bitmap, index.Feature);
+                var visualProfileId = NormalizeProfileId(row.VisualProfileId);
+                var key = $"{visualProfileId}\0{row.FieldKey}\0{row.CleanLabel}\0{feature.ToKey()}";
+                if (!seen.Add(key))
+                {
+                    continue;
+                }
+
+                index.Templates.Add(new FastOcrTemplate
+                {
+                    FieldKey = row.FieldKey,
+                    Label = row.CleanLabel,
+                    VisualProfileId = visualProfileId,
+                    Bits = feature.ToHexWords(),
+                    SourceImage = Path.GetFullPath(row.ResolvedImageFile)
+                });
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke($"skip_bad_image field={row.FieldKey} item={row.ItemIndex} image={row.ResolvedImageFile} error={ex.Message}");
+            }
+        }
+
+        index.Templates = index.Templates
+            .OrderBy(template => template.FieldKey, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(template => template.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(template => template.VisualProfileId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(template => string.Join("", template.Bits), StringComparer.Ordinal)
+            .ToList();
+        index.NormalizeForUse();
+        return index;
+    }
+
+    public FastOcrMatch Match(string fieldKey, Bitmap source, CvRect roi)
+    {
+        return Match(fieldKey, source, roi, "");
+    }
+
+    public FastOcrMatch Match(string fieldKey, Bitmap source, CvRect roi, string visualProfileId)
+    {
+        return Match(fieldKey, source, roi, visualProfileId, ProfileRoutingMode.Auto);
+    }
+
+    public FastOcrMatch Match(string fieldKey, Bitmap source, CvRect roi, string visualProfileId, ProfileRoutingMode routingMode)
+    {
+        var normalizedProfileId = NormalizeProfileId(visualProfileId);
+        var route = ResolveTemplateRoute(fieldKey, normalizedProfileId, routingMode);
+        var candidates = route.Templates;
+        if (candidates.Count == 0)
+        {
+            return FastOcrMatch.Empty(fieldKey, route.Reason);
+        }
+
+        var sourceRect = new Rectangle(roi.X, roi.Y, roi.Width, roi.Height);
+        var feature = FastOcrImageFeature.FromBitmap(source, sourceRect, Feature);
+        FastOcrTemplate? best = null;
+        var bestDistance = int.MaxValue;
+        FastOcrTemplate? secondDifferentLabel = null;
+        var secondDifferentDistance = int.MaxValue;
+
+        foreach (var template in candidates)
+        {
+            var distance = feature.DistanceTo(FastOcrImageFeature.FromHexWords(template.Bits));
+            if (distance < bestDistance)
+            {
+                if (best is not null && !template.Label.Equals(best.Label, StringComparison.OrdinalIgnoreCase))
+                {
+                    secondDifferentLabel = best;
+                    secondDifferentDistance = bestDistance;
+                }
+
+                best = template;
+                bestDistance = distance;
+                continue;
+            }
+
+            if (best is not null
+                && !template.Label.Equals(best.Label, StringComparison.OrdinalIgnoreCase)
+                && distance < secondDifferentDistance)
+            {
+                secondDifferentLabel = template;
+                secondDifferentDistance = distance;
+            }
+        }
+
+        if (best is null)
+        {
+            return FastOcrMatch.Empty(fieldKey, "no_match");
+        }
+
+        if (secondDifferentLabel is null)
+        {
+            foreach (var template in candidates.Where(template => !template.Label.Equals(best.Label, StringComparison.OrdinalIgnoreCase)))
+            {
+                var distance = feature.DistanceTo(FastOcrImageFeature.FromHexWords(template.Bits));
+                if (distance < secondDifferentDistance)
+                {
+                    secondDifferentLabel = template;
+                    secondDifferentDistance = distance;
+                }
+            }
+        }
+
+        var score = ScoreFromDistance(bestDistance, feature.BitCount);
+        var top2Score = secondDifferentLabel is null ? 0 : ScoreFromDistance(secondDifferentDistance, feature.BitCount);
+        var margin = secondDifferentLabel is null ? 1 : score - top2Score;
+        var policy = PolicyForField(fieldKey, route.PolicyProfileId);
+        return new FastOcrMatch(
+            fieldKey,
+            best.Label,
+            score,
+            bestDistance,
+            candidates.Count,
+            best.SourceImage,
+            best.VisualProfileId,
+            secondDifferentLabel?.Label ?? "",
+            top2Score,
+            margin,
+            policy.AssistEnabled,
+            policy.MinScore,
+            policy.MinMargin,
+            route.Reason);
+    }
+
+    public bool IsMatchAccepted(FastOcrMatch match, bool requireAssistEnabled)
+    {
+        if (string.IsNullOrWhiteSpace(match.Label))
+        {
+            return false;
+        }
+
+        if (requireAssistEnabled && !match.AssistEnabled)
+        {
+            return false;
+        }
+
+        return match.Score >= match.MinScore && match.Margin >= match.MinMargin;
+    }
+
+    public FastOcrFieldPolicy PolicyForField(string fieldKey)
+    {
+        return PolicyForField(fieldKey, "");
+    }
+
+    public FastOcrFieldPolicy PolicyForField(string fieldKey, string visualProfileId)
+    {
+        if (FieldPolicies is null || FieldPolicies.Count == 0)
+        {
+            NormalizeForUse();
+        }
+
+        var normalizedProfileId = NormalizeProfileId(visualProfileId);
+        if (!string.IsNullOrWhiteSpace(normalizedProfileId)
+            && ProfileFieldPolicies.TryGetValue(ProfilePolicyKey(normalizedProfileId, fieldKey), out var profilePolicy))
+        {
+            return profilePolicy;
+        }
+
+        var policies = FieldPolicies ?? new Dictionary<string, FastOcrFieldPolicy>(StringComparer.OrdinalIgnoreCase);
+        return policies.TryGetValue(fieldKey, out var policy)
+            ? policy
+            : FastOcrFieldPolicy.Default(fieldKey);
+    }
+
+    private IReadOnlyList<FastOcrTemplate> TemplatesForField(string fieldKey)
+    {
+        _byField ??= Templates
+            .GroupBy(template => template.FieldKey, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+        return _byField.TryGetValue(fieldKey, out var templates) ? templates : [];
+    }
+
+    public FastOcrProfileRoute DescribeRoute(string fieldKey, string visualProfileId, ProfileRoutingMode routingMode)
+    {
+        var route = ResolveTemplateRoute(fieldKey, NormalizeProfileId(visualProfileId), routingMode);
+        return new FastOcrProfileRoute(
+            fieldKey,
+            NormalizeProfileId(visualProfileId),
+            route.PolicyProfileId,
+            route.RouteName,
+            route.Templates.Count,
+            route.Reason);
+    }
+
+    private TemplateRoute ResolveTemplateRoute(string fieldKey, string visualProfileId, ProfileRoutingMode routingMode)
+    {
+        var normalizedProfileId = NormalizeProfileId(visualProfileId);
+        var exactTemplates = TemplatesForFieldAndProfile(fieldKey, normalizedProfileId);
+        if (exactTemplates.Count > 0)
+        {
+            return new TemplateRoute(
+                exactTemplates,
+                normalizedProfileId,
+                "exact",
+                $"profile_exact:{normalizedProfileId}");
+        }
+
+        if (routingMode == ProfileRoutingMode.Strict)
+        {
+            return new TemplateRoute(
+                [],
+                normalizedProfileId,
+                "strict_missing",
+                $"profile_strict_missing:{normalizedProfileId}");
+        }
+
+        var compatibleProfile = FindCompatibleProfile(normalizedProfileId, fieldKey);
+        if (!string.IsNullOrWhiteSpace(compatibleProfile))
+        {
+            var compatibleTemplates = TemplatesForFieldAndProfile(fieldKey, compatibleProfile);
+            if (compatibleTemplates.Count > 0)
+            {
+                return new TemplateRoute(
+                    compatibleTemplates,
+                    compatibleProfile,
+                    "compatible",
+                    $"profile_compatible:{normalizedProfileId}->{compatibleProfile}");
+            }
+        }
+
+        if (routingMode == ProfileRoutingMode.Auto)
+        {
+            var allTemplates = TemplatesForField(fieldKey);
+            if (allTemplates.Count > 0)
+            {
+                return new TemplateRoute(
+                    allTemplates,
+                    "",
+                    "global",
+                    $"profile_global_fallback:{normalizedProfileId}");
+            }
+        }
+
+        return new TemplateRoute(
+            [],
+            normalizedProfileId,
+            "no_templates",
+            $"profile_no_templates:{normalizedProfileId}");
+    }
+
+    private IReadOnlyList<FastOcrTemplate> TemplatesForFieldAndProfile(string fieldKey, string visualProfileId)
+    {
+        _byFieldAndProfile ??= Templates
+            .GroupBy(template => ProfilePolicyKey(NormalizeProfileId(template.VisualProfileId), template.FieldKey), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+        return _byFieldAndProfile.TryGetValue(ProfilePolicyKey(visualProfileId, fieldKey), out var templates) ? templates : [];
+    }
+
+    private string FindCompatibleProfile(string visualProfileId, string fieldKey)
+    {
+        var requested = VisualProfileKey.Parse(visualProfileId);
+        if (!requested.IsUsable)
+        {
+            return "";
+        }
+
+        var candidates = Templates
+            .Where(template => template.FieldKey.Equals(fieldKey, StringComparison.OrdinalIgnoreCase))
+            .Select(template => NormalizeProfileId(template.VisualProfileId))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(profile => (profile, key: VisualProfileKey.Parse(profile)))
+            .Where(item => item.key.IsUsable
+                && item.key.ClientKind.Equals(requested.ClientKind, StringComparison.OrdinalIgnoreCase)
+                && item.key.QualityLabel.Equals(requested.QualityLabel, StringComparison.OrdinalIgnoreCase))
+            .Select(item => (item.profile, delta: Math.Abs(item.key.AspectRatio - requested.AspectRatio), pixels: Math.Abs(item.key.PixelCount - requested.PixelCount)))
+            .OrderBy(item => item.delta)
+            .ThenBy(item => item.pixels)
+            .FirstOrDefault();
+        return candidates.delta <= 0.03 ? candidates.profile : "";
+    }
+
+    private void NormalizeForUse()
+    {
+        Version = CurrentVersion;
+        Feature = string.IsNullOrWhiteSpace(Feature) ? LegacyFeature : Feature;
+        FieldPolicies = new Dictionary<string, FastOcrFieldPolicy>(FieldPolicies ?? new(), StringComparer.OrdinalIgnoreCase);
+        ProfileFieldPolicies = new Dictionary<string, FastOcrFieldPolicy>(ProfileFieldPolicies ?? new(), StringComparer.OrdinalIgnoreCase);
+        foreach (var template in Templates)
+        {
+            template.VisualProfileId = NormalizeProfileId(template.VisualProfileId);
+        }
+
+        foreach (var field in SupportedFields)
+        {
+            var templates = Templates
+                .Where(template => template.FieldKey.Equals(field, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            var policy = FieldPolicies.TryGetValue(field, out var existing)
+                ? existing
+                : FastOcrFieldPolicy.Default(field);
+            policy.TemplateCount = templates.Length;
+            policy.LabelCount = templates
+                .Select(template => template.Label)
+                .Where(label => !string.IsNullOrWhiteSpace(label))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+            FieldPolicies[field] = policy;
+        }
+
+        foreach (var profileId in Templates
+            .Select(template => NormalizeProfileId(template.VisualProfileId))
+            .Where(profile => !string.IsNullOrWhiteSpace(profile))
+            .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var field in SupportedFields)
+            {
+                var key = ProfilePolicyKey(profileId, field);
+                var templates = Templates
+                    .Where(template => template.FieldKey.Equals(field, StringComparison.OrdinalIgnoreCase)
+                        && NormalizeProfileId(template.VisualProfileId).Equals(profileId, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                if (!ProfileFieldPolicies.TryGetValue(key, out var policy))
+                {
+                    continue;
+                }
+
+                policy.TemplateCount = templates.Length;
+                policy.LabelCount = templates
+                    .Select(template => template.Label)
+                    .Where(label => !string.IsNullOrWhiteSpace(label))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Count();
+                ProfileFieldPolicies[key] = policy;
+            }
+        }
+
+        _byField = null;
+        _byFieldAndProfile = null;
+    }
+
+    public static string NormalizeProfileId(string? visualProfileId)
+    {
+        return string.IsNullOrWhiteSpace(visualProfileId)
+            ? "legacy"
+            : visualProfileId.Trim().ToLowerInvariant();
+    }
+
+    public static string ProfilePolicyKey(string visualProfileId, string fieldKey)
+    {
+        return $"{NormalizeProfileId(visualProfileId)}|{fieldKey}";
+    }
+
+    private static double ScoreFromDistance(int distance, int bitCount)
+    {
+        return bitCount <= 0 ? 0 : 1.0 - distance / (double)bitCount;
+    }
+}
+
+public sealed record FastOcrProfileRoute(
+    string FieldKey,
+    string RequestedProfileId,
+    string PolicyProfileId,
+    string RouteName,
+    int TemplateCount,
+    string Reason);
+
+internal sealed record TemplateRoute(
+    IReadOnlyList<FastOcrTemplate> Templates,
+    string PolicyProfileId,
+    string RouteName,
+    string Reason);
+
+internal readonly record struct VisualProfileKey(string ClientKind, int Width, int Height, string QualityLabel)
+{
+    public bool IsUsable => !string.IsNullOrWhiteSpace(ClientKind) && Width > 0 && Height > 0;
+
+    public double AspectRatio => Height <= 0 ? 0 : Width / (double)Height;
+
+    public int PixelCount => Math.Max(0, Width) * Math.Max(0, Height);
+
+    public static VisualProfileKey Parse(string profileId)
+    {
+        var parts = profileId.Split('-', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3)
+        {
+            return new VisualProfileKey("", 0, 0, "");
+        }
+
+        for (var i = 1; i < parts.Length; i++)
+        {
+            var sizeParts = parts[i].Split('x', StringSplitOptions.RemoveEmptyEntries);
+            if (sizeParts.Length != 2
+                || !int.TryParse(sizeParts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var width)
+                || !int.TryParse(sizeParts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var height))
+            {
+                continue;
+            }
+
+            var quality = i + 1 < parts.Length
+                ? string.Join("-", parts.Skip(i + 1))
+                : "current";
+            return new VisualProfileKey(parts[0], width, height, quality);
+        }
+
+        return new VisualProfileKey("", 0, 0, "");
+    }
+}
+
+public sealed class FastOcrFieldPolicy
+{
+    public bool AssistEnabled { get; set; }
+    public double MinScore { get; set; } = FastOcrTemplateIndex.DefaultMinScore;
+    public double MinMargin { get; set; } = FastOcrTemplateIndex.DefaultMinMargin;
+    public int TemplateCount { get; set; }
+    public int LabelCount { get; set; }
+
+    public static FastOcrFieldPolicy Default(string fieldKey)
+    {
+        return new FastOcrFieldPolicy
+        {
+            AssistEnabled = FastOcrTemplateIndex.IsDefaultAssistField(fieldKey),
+            MinScore = FastOcrTemplateIndex.DefaultMinScore,
+            MinMargin = FastOcrTemplateIndex.DefaultMinMargin
+        };
+    }
+}
+
+public sealed class FastOcrTemplate
+{
+    public string FieldKey { get; set; } = "";
+    public string Label { get; set; } = "";
+    public string VisualProfileId { get; set; } = "legacy";
+    public string[] Bits { get; set; } = [];
+    public string SourceImage { get; set; } = "";
+}
+
+public sealed record FastOcrMatch(
+    string FieldKey,
+    string Label,
+    double Score,
+    int Distance,
+    int CandidateCount,
+    string SourceImage,
+    string SourceProfileId,
+    string Top2Label,
+    double Top2Score,
+    double Margin,
+    bool AssistEnabled,
+    double MinScore,
+    double MinMargin,
+    string Reason)
+{
+    public static FastOcrMatch Empty(string fieldKey, string reason) =>
+        new(fieldKey, "", 0, FastOcrImageFeature.CurrentBitCount, 0, "", "", "", 0, 0, false, FastOcrTemplateIndex.DefaultMinScore, FastOcrTemplateIndex.DefaultMinMargin, reason);
+}
+
+public sealed class FastOcrImageFeature
+{
+    public const int Size = 16;
+    public const int LegacyBitCount = Size * Size;
+    public const int CurrentBitCount = LegacyBitCount * 2;
+    public const int ExperimentalBitCount = LegacyBitCount * 3;
+
+    private FastOcrImageFeature(IReadOnlyList<ulong> words)
+    {
+        Words = words.ToArray();
+    }
+
+    public IReadOnlyList<ulong> Words { get; }
+
+    public int BitCount => Words.Count * 64;
+
+    public static FastOcrImageFeature FromBitmap(Bitmap source)
+    {
+        return FromBitmap(source, new Rectangle(0, 0, source.Width, source.Height), FastOcrTemplateIndex.CurrentFeature);
+    }
+
+    public static FastOcrImageFeature FromBitmap(Bitmap source, string featureName)
+    {
+        return FromBitmap(source, new Rectangle(0, 0, source.Width, source.Height), featureName);
+    }
+
+    public static FastOcrImageFeature FromBitmap(Bitmap source, Rectangle sourceRect)
+    {
+        return FromBitmap(source, sourceRect, FastOcrTemplateIndex.CurrentFeature);
+    }
+
+    public static FastOcrImageFeature FromBitmap(Bitmap source, Rectangle sourceRect, string featureName)
+    {
+        var bounds = new Rectangle(0, 0, source.Width, source.Height);
+        var rect = Rectangle.Intersect(bounds, sourceRect);
+        if (rect.Width <= 0 || rect.Height <= 0)
+        {
+            return new FastOcrImageFeature(EmptyWordsForFeature(featureName));
+        }
+
+        if (string.Equals(featureName, FastOcrTemplateIndex.LegacyFeature, StringComparison.OrdinalIgnoreCase))
+        {
+            return new FastOcrImageFeature(BuildAverageHash(source, rect));
+        }
+
+        var words = new List<ulong>(12);
+        words.AddRange(BuildAverageHash(source, rect));
+        words.AddRange(BuildHorizontalDifferenceHash(source, rect));
+        if (string.Equals(featureName, FastOcrTemplateIndex.ExperimentalFeature, StringComparison.OrdinalIgnoreCase))
+        {
+            words.AddRange(BuildVerticalDifferenceHash(source, rect));
+        }
+
+        return new FastOcrImageFeature(words);
+    }
+
+    public static FastOcrImageFeature FromHexWords(IReadOnlyList<string> words)
+    {
+        var parsed = words
+            .Select(Parse)
+            .ToArray();
+        return new FastOcrImageFeature(parsed.Length == 0 ? [0, 0, 0, 0] : parsed);
+    }
+
+    public string[] ToHexWords()
+    {
+        return Words
+            .Select(word => word.ToString("X16", CultureInfo.InvariantCulture))
+            .ToArray();
+    }
+
+    public string ToKey()
+    {
+        return string.Join("", ToHexWords());
+    }
+
+    public int DistanceTo(FastOcrImageFeature other)
+    {
+        var count = Math.Max(Words.Count, other.Words.Count);
+        var distance = 0;
+        for (var i = 0; i < count; i++)
+        {
+            var left = i < Words.Count ? Words[i] : 0;
+            var right = i < other.Words.Count ? other.Words[i] : 0;
+            distance += BitOperations.PopCount(left ^ right);
+        }
+
+        return distance;
+    }
+
+    private static ulong[] BuildAverageHash(Bitmap source, Rectangle rect)
+    {
+        var pixels = RenderLuma(source, rect, Size, Size);
+        var total = 0.0;
+        foreach (var value in pixels)
+        {
+            total += value;
+        }
+
+        var average = total / LegacyBitCount;
+        var words = new ulong[4];
+        for (var i = 0; i < pixels.Length; i++)
+        {
+            if (pixels[i] < average)
+            {
+                continue;
+            }
+
+            words[i / 64] |= 1UL << (i % 64);
+        }
+
+        return words;
+    }
+
+    private static ulong[] BuildHorizontalDifferenceHash(Bitmap source, Rectangle rect)
+    {
+        var pixels = RenderLuma(source, rect, Size + 1, Size);
+        var words = new ulong[4];
+        for (var y = 0; y < Size; y++)
+        {
+            for (var x = 0; x < Size; x++)
+            {
+                var bitIndex = y * Size + x;
+                var left = pixels[y * (Size + 1) + x];
+                var right = pixels[y * (Size + 1) + x + 1];
+                if (left >= right)
+                {
+                    words[bitIndex / 64] |= 1UL << (bitIndex % 64);
+                }
+            }
+        }
+
+        return words;
+    }
+
+    private static ulong[] BuildVerticalDifferenceHash(Bitmap source, Rectangle rect)
+    {
+        var pixels = RenderLuma(source, rect, Size, Size + 1);
+        var words = new ulong[4];
+        for (var y = 0; y < Size; y++)
+        {
+            for (var x = 0; x < Size; x++)
+            {
+                var bitIndex = y * Size + x;
+                var top = pixels[y * Size + x];
+                var bottom = pixels[(y + 1) * Size + x];
+                if (top >= bottom)
+                {
+                    words[bitIndex / 64] |= 1UL << (bitIndex % 64);
+                }
+            }
+        }
+
+        return words;
+    }
+
+    private static ulong[] EmptyWordsForFeature(string featureName)
+    {
+        if (string.Equals(featureName, FastOcrTemplateIndex.ExperimentalFeature, StringComparison.OrdinalIgnoreCase))
+        {
+            return new ulong[12];
+        }
+
+        if (string.Equals(featureName, FastOcrTemplateIndex.LegacyFeature, StringComparison.OrdinalIgnoreCase))
+        {
+            return new ulong[4];
+        }
+
+        return new ulong[8];
+    }
+
+    private static double[] RenderLuma(Bitmap source, Rectangle rect, int width, int height)
+    {
+        using var resized = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        using (var graphics = Graphics.FromImage(resized))
+        {
+            graphics.DrawImage(source, new Rectangle(0, 0, width, height), rect, GraphicsUnit.Pixel);
+        }
+
+        var pixels = new double[width * height];
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var color = resized.GetPixel(x, y);
+                pixels[y * width + x] = color.R * 0.299 + color.G * 0.587 + color.B * 0.114;
+            }
+        }
+
+        return pixels;
+    }
+
+    private static ulong Parse(string word)
+    {
+        return ulong.TryParse(word, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : 0;
+    }
+}

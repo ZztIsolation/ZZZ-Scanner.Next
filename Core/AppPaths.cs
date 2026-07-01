@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace ZZZScannerNext.Core;
 
 public static class AppPaths
@@ -12,7 +14,10 @@ public static class AppPaths
 
     public static string CreateScanDirectory()
     {
-        var dir = Path.Combine(BaseDirectory, "Scans", DateTime.Now.ToString("yyyy-MM-dd-HH-mm-ss"));
+        var root = Path.Combine(BaseDirectory, "Scans");
+        Directory.CreateDirectory(root);
+        var suffix = RandomNumberGenerator.GetHexString(4).ToLowerInvariant();
+        var dir = Path.Combine(root, $"{DateTime.Now:yyyy-MM-dd-HH-mm-ss-fff}-p{Environment.ProcessId:x}-{suffix}");
         Directory.CreateDirectory(dir);
         return dir;
     }

@@ -6,11 +6,13 @@ using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Win32;
 
 namespace ZZZScannerHelper;
 
-internal static class Program
+internal static partial class Program
 {
     private const string ServiceName = "zzz-scanner-helper";
     private const string HelperVersion = "1.0.0";
@@ -170,7 +172,7 @@ internal static class Program
                 var body = await reader.ReadToEndAsync(token);
                 try
                 {
-                    origin = JsonSerializer.Deserialize<TokenRequest>(body, JsonOptions)?.Origin;
+                    origin = JsonSerializer.Deserialize(body, HelperJsonContext.Default.TokenRequest)?.Origin;
                 }
                 catch
                 {
@@ -186,7 +188,7 @@ internal static class Program
             _launchOrigin = origin;
             var tokenValue = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
             _tokens[tokenValue] = DateTimeOffset.Now.AddMinutes(5);
-            await SendJsonAsync(context.Response, 200, new { token = tokenValue }, token);
+            await SendJsonAsync(context.Response, 200, new TokenResponse { Token = tokenValue }, token);
         }
 
         private async Task HandleWebSocketAsync(HttpListenerContext context, CancellationToken token)
@@ -205,35 +207,35 @@ internal static class Program
             await session.RunAsync(token);
         }
 
-        private object HelperInfo()
+        private HelperInfoResponse HelperInfo()
         {
-            return new
+            return new HelperInfoResponse
             {
-                service = ServiceName,
-                version = HelperVersion,
-                protocolVersion = ProtocolVersion,
-                scanner = CurrentScannerState()
+                Service = ServiceName,
+                Version = HelperVersion,
+                ProtocolVersion = ProtocolVersion,
+                Scanner = CurrentScannerState()
             };
         }
 
-        public object CurrentScannerState()
+        public ScannerState CurrentScannerState()
         {
-            return new
+            return new ScannerState
             {
-                version = _manifest?.ScannerVersion,
-                installed = !string.IsNullOrWhiteSpace(_entryPath) && File.Exists(_entryPath),
-                entry = _entryPath
+                Version = _manifest?.ScannerVersion,
+                Installed = !string.IsNullOrWhiteSpace(_entryPath) && File.Exists(_entryPath),
+                Entry = _entryPath
             };
         }
 
-        public async IAsyncEnumerable<object> EnsureScannerAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+        public async IAsyncEnumerable<LauncherProgress> EnsureScannerAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
         {
             await _ensureGate.WaitAsync(token);
             try
             {
-                yield return new { stage = "manifest", message = "正在获取扫描器版本清单..." };
+                yield return new LauncherProgress { Stage = "manifest", Message = "正在获取扫描器版本清单..." };
                 var manifestUrl = ResolveManifestUrl();
-                var manifest = await DownloadJsonAsync<ScannerManifest>(manifestUrl, token)
+                var manifest = await DownloadManifestAsync(manifestUrl, token)
                     ?? throw new InvalidOperationException("Scanner manifest is empty.");
                 _manifest = manifest;
 
@@ -242,17 +244,17 @@ internal static class Program
                 if (File.Exists(entryPath))
                 {
                     _entryPath = entryPath;
-                    yield return new { stage = "ready", message = "扫描器已是最新版本。", version = manifest.ScannerVersion };
+                    yield return new LauncherProgress { Stage = "ready", Message = "扫描器已是最新版本。", Version = manifest.ScannerVersion };
                     yield break;
                 }
 
                 Directory.CreateDirectory(installDir);
                 var packagePath = Path.Combine(PackageCacheDirectory(), $"scanner-{manifest.ScannerVersion}.zip");
 
-                yield return new { stage = "download", message = "正在下载 OCR 扫描器...", version = manifest.ScannerVersion };
+                yield return new LauncherProgress { Stage = "download", Message = "正在下载 OCR 扫描器...", Version = manifest.ScannerVersion };
                 await DownloadAndVerifyPackageAsync(manifestUrl, manifest, packagePath, token);
 
-                yield return new { stage = "checksum", message = "正在校验扫描器文件...", version = manifest.ScannerVersion };
+                yield return new LauncherProgress { Stage = "checksum", Message = "正在校验扫描器文件...", Version = manifest.ScannerVersion };
                 await VerifyPackageSizeAsync(packagePath, manifest.Size);
                 await VerifySha256Async(packagePath, manifest.Sha256, token);
 
@@ -263,7 +265,7 @@ internal static class Program
                 }
 
                 Directory.CreateDirectory(tempDir);
-                yield return new { stage = "extract", message = "正在安装扫描器...", version = manifest.ScannerVersion };
+                yield return new LauncherProgress { Stage = "extract", Message = "正在安装扫描器...", Version = manifest.ScannerVersion };
                 ExtractZipSafe(packagePath, tempDir);
                 if (Directory.Exists(installDir))
                 {
@@ -272,7 +274,7 @@ internal static class Program
 
                 Directory.Move(tempDir, installDir);
                 _entryPath = entryPath;
-                yield return new { stage = "ready", message = "扫描器准备完成。", version = manifest.ScannerVersion };
+                yield return new LauncherProgress { Stage = "ready", Message = "扫描器准备完成。", Version = manifest.ScannerVersion };
             }
             finally
             {
@@ -326,12 +328,12 @@ internal static class Program
             return _launchOrigin;
         }
 
-        private async Task<T?> DownloadJsonAsync<T>(Uri url, CancellationToken token)
+        private async Task<ScannerManifest?> DownloadManifestAsync(Uri url, CancellationToken token)
         {
             using var response = await _http.GetAsync(url, token);
             response.EnsureSuccessStatusCode();
             await using var stream = await response.Content.ReadAsStreamAsync(token);
-            return await JsonSerializer.DeserializeAsync<T>(stream, JsonOptions, token);
+            return await JsonSerializer.DeserializeAsync(stream, HelperJsonContext.Default.ScannerManifest, token);
         }
 
         private async Task DownloadFileAsync(Uri url, string destination, CancellationToken token)
@@ -527,12 +529,12 @@ internal static class Program
 
         public async Task RunAsync(CancellationToken token)
         {
-            await SendAsync("hello", new
+            await SendAsync("hello", new HelperHello
             {
-                service = ServiceName,
-                version = HelperVersion,
-                protocolVersion = ProtocolVersion,
-                scanner = _server.CurrentScannerState()
+                Service = ServiceName,
+                Version = HelperVersion,
+                ProtocolVersion = ProtocolVersion,
+                Scanner = _server.CurrentScannerState()
             }, token);
 
             while (_browser.State == WebSocketState.Open && !token.IsCancellationRequested)
@@ -546,7 +548,7 @@ internal static class Program
                 HelperEnvelope? envelope;
                 try
                 {
-                    envelope = JsonSerializer.Deserialize<HelperEnvelope>(json, JsonOptions);
+                    envelope = JsonSerializer.Deserialize(json, HelperJsonContext.Default.HelperEnvelope);
                 }
                 catch
                 {
@@ -564,7 +566,7 @@ internal static class Program
                 }
                 catch (Exception ex)
                 {
-                    await SendAsync("scan_error", new { message = ex.Message }, CancellationToken.None);
+                    await SendAsync("scan_error", new ErrorMessage { Message = ex.Message }, CancellationToken.None);
                 }
             }
         }
@@ -574,7 +576,7 @@ internal static class Program
             switch (envelope.Cmd)
             {
                 case "ping":
-                    await SendAsync("pong", new { time = DateTimeOffset.Now }, token);
+                    await SendAsync("pong", new PongMessage { Time = DateTimeOffset.Now }, token);
                     break;
 
                 case "ensure_scanner":
@@ -585,14 +587,14 @@ internal static class Program
                     await EnsureScannerProcessAsync(token);
                     if (_scanner is not null)
                     {
-                        await _scanner.SendRawAsync(JsonSerializer.Serialize(envelope, JsonOptions), token);
+                        await _scanner.SendRawAsync(JsonSerializer.Serialize(envelope, HelperJsonContext.Default.HelperEnvelope), token);
                     }
                     break;
 
                 case "scan_stop":
                     if (_scanner is not null)
                     {
-                        await _scanner.SendRawAsync(JsonSerializer.Serialize(envelope, JsonOptions), token);
+                        await _scanner.SendRawAsync(JsonSerializer.Serialize(envelope, HelperJsonContext.Default.HelperEnvelope), token);
                     }
                     break;
             }
@@ -606,7 +608,7 @@ internal static class Program
                 return;
             }
 
-            await SendAsync("launcher_progress", new { stage = "queue", message = "正在准备扫描器任务..." }, token);
+            await SendAsync("launcher_progress", new LauncherProgress { Stage = "queue", Message = "正在准备扫描器任务..." }, token);
             await foreach (var progress in _server.EnsureScannerAsync(token))
             {
                 await SendAsync("launcher_progress", progress, token);
@@ -635,7 +637,7 @@ internal static class Program
                 return;
             }
 
-            var json = JsonSerializer.Serialize(new HelperEnvelope(cmd, data), JsonOptions);
+            var json = JsonSerializer.Serialize(new HelperEnvelope(cmd, data), HelperJsonContext.Default.HelperEnvelope);
             var bytes = Encoding.UTF8.GetBytes(json);
             await _browser.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
         }
@@ -796,7 +798,7 @@ internal static class Program
     {
         response.StatusCode = statusCode;
         response.ContentType = "application/json; charset=utf-8";
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, JsonOptions));
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, ResolveJsonTypeInfo(payload.GetType())));
         response.ContentLength64 = bytes.Length;
         await response.OutputStream.WriteAsync(bytes, token);
         response.Close();
@@ -844,13 +846,18 @@ internal static class Program
         public HelperEnvelope(string cmd, object? data)
         {
             Cmd = cmd;
-            Data = data is null ? default : JsonSerializer.SerializeToElement(data, JsonOptions);
+            Data = data is null ? default : JsonSerializer.SerializeToElement(data, ResolveJsonTypeInfo(data.GetType()));
         }
     }
 
     private sealed class TokenRequest
     {
         public string Origin { get; set; } = "";
+    }
+
+    private sealed class TokenResponse
+    {
+        public string Token { get; set; } = "";
     }
 
     private sealed class ScannerManifest
@@ -863,5 +870,69 @@ internal static class Program
         public string Sha256 { get; set; } = "";
         public long Size { get; set; }
         public string Entry { get; set; } = "ZZZ-Scanner.Next.exe";
+    }
+
+    private sealed class HelperInfoResponse
+    {
+        public string Service { get; set; } = "";
+        public string Version { get; set; } = "";
+        public int ProtocolVersion { get; set; }
+        public ScannerState Scanner { get; set; } = new();
+    }
+
+    private sealed class HelperHello
+    {
+        public string Service { get; set; } = "";
+        public string Version { get; set; } = "";
+        public int ProtocolVersion { get; set; }
+        public ScannerState Scanner { get; set; } = new();
+    }
+
+    private sealed class ScannerState
+    {
+        public string? Version { get; set; }
+        public bool Installed { get; set; }
+        public string? Entry { get; set; }
+    }
+
+    private sealed class LauncherProgress
+    {
+        public string Stage { get; set; } = "";
+        public string Message { get; set; } = "";
+        public string? Version { get; set; }
+    }
+
+    private sealed class ErrorMessage
+    {
+        public string Message { get; set; } = "";
+    }
+
+    private sealed class PongMessage
+    {
+        public DateTimeOffset Time { get; set; }
+    }
+
+    private static JsonTypeInfo ResolveJsonTypeInfo(Type type)
+    {
+        return HelperJsonContext.Default.GetTypeInfo(type)
+            ?? throw new InvalidOperationException($"JSON type is not registered: {type.FullName}");
+    }
+
+    [JsonSerializable(typeof(HelperEnvelope))]
+    [JsonSerializable(typeof(TokenRequest))]
+    [JsonSerializable(typeof(TokenResponse))]
+    [JsonSerializable(typeof(ScannerManifest))]
+    [JsonSerializable(typeof(HelperInfoResponse))]
+    [JsonSerializable(typeof(HelperHello))]
+    [JsonSerializable(typeof(ScannerState))]
+    [JsonSerializable(typeof(LauncherProgress))]
+    [JsonSerializable(typeof(ErrorMessage))]
+    [JsonSerializable(typeof(PongMessage))]
+    [JsonSourceGenerationOptions(
+        PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = false)]
+    private sealed partial class HelperJsonContext : JsonSerializerContext
+    {
     }
 }

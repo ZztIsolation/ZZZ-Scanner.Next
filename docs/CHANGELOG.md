@@ -1,5 +1,205 @@
 # Changelog
 
+## Unreleased
+
+- 1.0.30 引入多环境视觉 profile：新增 `--collect-visual-profile`、`--visual-profile-client`、`--visual-profile-quality` 和 `--profile-routing strict|compatible|auto`；`visual_profile.json` 升到 v2，记录 requested/detected geometry、DPI、capture 后端和路由决策。
+- Fast OCR 模板索引支持 profile 路由，优先同 profile 模板，compatible 模式会尝试同客户端/相近宽高比模板，auto 才回退全局；`scan.log` 和 benchmark 新增 `PROFILE_HEALTH_*`、`FAST_OCR_PROFILE_ROUTE`、`profile_detected_geometry`、`profile_route` 和 `health_fallback_count`。
+- `--collect-visual-profile` 默认关闭 Fast OCR assist、开启 shadow dataset、保守面板/滚动策略，适合作为每轮采集前的安全协议入口。
+- Helper 发布改为 NativeAOT + source-generated JSON，`ZZZ-Scanner-Helper.exe` 从约 67.6MB 降到 7.4MB，并通过本地 HTTP `/` 与 `/token` 探测。
+- 新增 `scripts/publish-slim.ps1`，统一生成瘦身 Helper 与 Scanner zip。
+- Scanner self-contained 发布后自动移除未使用的 FFmpeg 视频 DLL、PDB、调试/诊断文件、native import lib，以及 `Scans`/`StabilitySuites` 输出目录；`1.0.28` OCR zip 从约 129.9MB 降到 115.2MB。
+- 保留同一个 OCR 模型、入口程序和 1.0.28 manifest 协议；未启用 WinForms trimming，避免给用户增加 .NET Runtime 或裁剪兼容风险。
+
+## 2026-07-01 1.0.28 全量扫描滚动冲突自愈
+
+- 新增 `OverlapConflictMode=strict|recheck|recover`，CLI 参数为 `--overlap-conflict-mode strict|recheck|recover`。普通模式默认 `recheck`，`--fast-mode` 默认 `recover`。
+- 重叠签名扫描遇到 `scrollRows` 与 `signatureRows` 不一致时，不再把弱二行签名直接当成硬失败；现在会记录 `RowAdvanceEvidence`，最多复核 3 帧。弱证据可按滚动验证继续，强二行证据必须通过已扫逻辑行覆盖检查才接受。
+- `scan.log` 开头新增 `AppVersion`、assembly/file version、exe 路径、exe 修改时间和 runtime 目录；WebSocket `hello/pong/scan_complete/scan_error` 返回同样的 scanner 诊断信息。
+- `--scan-benchmark` 新增 `overlap_conflict_*`、`overlap_hard_stop_count`、`full_scan_expected`、`full_scan_complete`、`missing_logical_rows_count`、`scanned_logical_rows_count` 和 `total_rows`。
+- 发布到 `publish 1.0.28`，不覆盖旧发布目录。`dotnet build -c Release`、self-contained publish、`npm run test:scanner-bridge` 与 `npm run build:pages` 均通过。
+- 用 1.0.28 benchmark 复查 1.0.26 网页失败目录 `C:\Users\ZZT\AppData\Local\ZZZScannerNext\runtime\1.0.26\Scans\2026-07-01-00-22-11-662-p904c-c955`：识别为 `overlap_conflict_count=1`、`full_scan_expected=true`、`full_scan_complete=false`、`missing_logical_rows_count=41`，可明确定位为全量滚动冲突中止。
+- `zzz_calculator` manifest 与 bridge 已同步到 scanner `1.0.28`；网页默认 payload 追加 `overlapConflictMode="recover"`，扫描失败弹窗显示 scanner 版本和 runtime 目录。
+
+## 2026-06-29 1.0.27 场景化面板下限与滚动 tick 矩阵
+
+- 新增 `PanelFloorMode=static|scene-adaptive`，CLI 可用 `--panel-floor-mode static|scene-adaptive`。`scene-adaptive` 只允许同排普通点击降低面板最低等待；warmup、滚动后首格、视觉第 2 行补扫以及 retry/fallback 场景继续保守。
+- 新增 `--same-row-panel-min-accept-floor <100..120>`、`--post-scroll-panel-min-accept-floor <100..120>` 和 `--scroll-tick-delay-ms <50..80>`，用于显式测试同排点击、滚动后首格和滚动 tick 等待；90ms 下限继续不进入候选矩阵。
+- `--capture-stability-suite` 新增 `--suite-profile speed-1.0.27`，固定跑 DXGI 默认、DXGI `floor110 + postscroll adaptive`、`scene-adaptive same-row105 postscroll110 + scroll60`、`scene-adaptive same-row100 postscroll110 + scroll60`、`scene-adaptive same-row105 postscroll110 + scroll50`。
+- `CELL_TIMING` 与 `--scan-benchmark` 新增 `panel_floor_mode`、`same_row_panel_floor_ms`、`post_scroll_panel_floor_ms`、`floor_wait_limited_count/ms`、`panel_accept_elapsed_vs_floor_ms` 和 `scroll_tick_delay_ms`，用于确认是否真的被最低等待限制。
+- 发布到 `publish 1.0.27`，不覆盖旧发布目录。`dotnet build -c Release` 与 self-contained publish 通过，0 warning / 0 error。
+- 普通模式 30 件目录 `publish 1.0.27\Scans\2026-06-29-21-30-56-768-p3474-58f7`：失败 0、重复 0、`IncompleteRoi=0`、`quick_accept_count=0`、`row_scroll_overshot_count=0`，全部 acceptance pass。
+- 30 件 smoke suite `publish 1.0.27\StabilitySuites\capture-dxgi-20260629-213240`：5 个候选全部 correctness pass。
+- 完整 5 轮 suite `publish 1.0.27\StabilitySuites\capture-dxgi-20260629-213516`：5 个候选均 5/5 轮 correctness pass，失败 0、重复 0、`IncompleteRoi=0`、`quick_accept_sum=0`、`row_scroll_overshot_sum=0`。最佳 5 轮候选为 `scene105/post110/scroll50`，`completed_per_sec_min=3.615`、`avg=3.641`、`p90=3.674`，未达到 3.8/s 目标。
+- 最佳候选 10 轮 suite `publish 1.0.27\StabilitySuites\dxgi-scene105-post110-scroll50-final10-20260629-215153`：10/10 轮 correctness pass，`completed_per_sec_min=3.574`、`p10=3.589`、`avg=3.624`、`p90=3.685`。低于 1.0.26 的最佳稳定候选 `3.719/s`，因此不升级默认 fast-mode。
+- 慢 OCR 压力目录 `publish 1.0.27\Scans\2026-06-29-21-59-48-046-p7310-fe07`：`adaptiveThrottleMs_avg=194.167ms`、`adaptiveThrottleMs_max=300ms`，失败 0、重复 0、`IncompleteRoi=0`；小队列压力下自动背压仍生效。
+- 互斥保护强烟测：先启动 120 件 fast DXGI 扫描，再在扫描中启动第二个 `--scan-once --max-items 1`，扫描目录数量未增加；首个目录 `publish 1.0.27\Scans\2026-06-29-22-07-32-729-p1c2c-c8cf` 正常完成并全 pass。
+- 结论：1.0.27 新增的场景化下限和 scroll tick 诊断稳定可用，但没有带来净提速。默认推荐仍不切换到 scene-adaptive；若要追速度，1.0.26 的 DXGI `--panel-min-accept-floor 110 --post-scroll-panel-accept-mode adaptive-after-scroll` 仍是当前最值得显式复测的安全候选。
+
+## 2026-06-29 1.0.26 后端复核与组合提速矩阵
+
+- 新增 `--capture-stability-suite gdi|dxgi|both --max-items <n> --rounds <n>`，可自动串行跑后端/参数候选并汇总稳定性；`both` 默认覆盖 DXGI 默认、DXGI `--panel-min-accept-floor 110`、DXGI `--panel-min-accept-floor 110 --post-scroll-panel-accept-mode adaptive-after-scroll`、GDI 默认、GDI `--post-scroll-panel-accept-mode adaptive-after-scroll`。
+- `--scan-stability-suite` 新增 `recommended_candidate`、`reject_reason` 和 `speed_vs_baseline_percent`。推荐门槛以 1.0.25 DXGI 默认三轮均值 `3.593/s` 为基线，要求 correctness 全通过、`completed_per_sec_p10 >= 3.65` 且平均速度提升至少 5%。
+- 发布到 `publish 1.0.26`，不覆盖旧发布目录。`dotnet build -c Release` 通过，0 warning / 0 error。
+- 普通模式 30 件目录 `publish 1.0.26\Scans\2026-06-29-20-08-20-763-p82f8-8577`：失败 0、重复 0、`IncompleteRoi=0`、`quick_accept_count=0`、`row_scroll_overshot_count=0`，全部 acceptance pass。
+- 完整 5 轮捕获后端 suite 根目录：`publish 1.0.26\StabilitySuites\capture-both-20260629-200949`。DXGI 默认 5/5 轮 correctness pass，`completed_per_sec_min=3.388`、`p10=3.388`、`avg=3.599`，因 p10 和平均增益不足，`recommended_candidate=false`。
+- DXGI `--panel-min-accept-floor 110` 5/5 轮 correctness pass，`completed_per_sec_min=3.572`、`p10=3.572`、`avg=3.655`，仍因 p10 和平均增益不足不推荐默认。
+- DXGI `--panel-min-accept-floor 110 --post-scroll-panel-accept-mode adaptive-after-scroll` 是本轮最佳稳定组合：5/5 轮 correctness pass，失败 0、重复 0、`IncompleteRoi=0`、`quick_accept_sum=0`、`row_scroll_overshot_sum=0`，`completed_per_sec_min=3.669`、`p10=3.669`、`avg=3.719`、`p90=3.784`。但相对基线平均只提升 `3.504%`，低于 5% 门槛，因此不自动升级为默认。
+- GDI 默认 5 轮中 4 轮 correctness pass、1 轮失败，`export_duplicate_items_sum=2`，即使 `completed_per_sec_avg=3.671` 也直接拒绝推荐。GDI `--post-scroll-panel-accept-mode adaptive-after-scroll` 5/5 轮 correctness pass，`completed_per_sec_avg=3.651`，但 p10 和平均增益不足。
+- 慢 OCR 压力目录 `publish 1.0.26\Scans\2026-06-29-20-30-22-188-p8774-eb9d`：`adaptiveThrottleMs_avg=185ms`、`adaptiveThrottleMs_max=300ms`、`ocr_backlog_max=5`，失败 0、重复 0、`IncompleteRoi=0`；小队列压力下 `backlog_not_saturated=risk` 符合预期。
+- 互斥保护烟测：先启动 30 件扫描，再立即启动第二个 `--scan-once --max-items 1`，第二个实例未创建新扫描目录，首个目录 `publish 1.0.26\Scans\2026-06-29-20-31-25-162-p7694-cb77` 正常完成并全 pass。
+- 结论：1.0.26 验证了 GDI 单轮高速不可靠，默认推荐不切到 GDI。若要手动追速度，当前最值得复测的是 DXGI `--panel-min-accept-floor 110 --post-scroll-panel-accept-mode adaptive-after-scroll`；正式默认仍保持 1.0.25/1.0.24 的安全边界，不启用 90ms、不恢复 quick accept、不放宽旧面板和一行滚动验收。
+
+## 2026-06-29 1.0.25 稳定性复核与滚动后首格实验
+
+- 新增 `--scan-stability-suite <scan-parent>`，可汇总多轮扫描的 `completed_per_sec_min/p10/avg/p90`、正确性通过数、失败数、重复导出、ROI 完整性、overshoot、fallback 和 quick accept。
+- 新增 `PostScrollPanelAcceptMode=safe|adaptive-after-scroll`，CLI 可用 `--post-scroll-panel-accept-mode safe|adaptive-after-scroll`；GUI 高级设置和 WebSocket payload 增加同名配置。默认仍为 `safe`，只作为滚动后首格实验开关。
+- 新增 `--panel-min-accept-floor <ms>`，范围限制为 `90..120`。fast-mode 默认仍为 `120ms`；`110ms/100ms/90ms` 都必须显式传入，不把单轮高速结果直接写成默认。
+- `CELL_TIMING` 新增 `postScrollAcceptMode` 与 `panelMinFloorMs`；`--scan-benchmark` 新增 `post_scroll_adaptive_accept_count`、`post_scroll_safe_accept_count`、`panel_min_floor_ms_*` 和 `before_min_accept_count`。
+- `--scan-once` 增加跨进程互斥保护：如果已有扫描在控制游戏窗口，第二个扫描实例会直接拒绝启动，避免两个进程同时点击导致旧面板或重复读取。
+- 发布到 `publish 1.0.25`，不覆盖旧发布目录。`dotnet build -c Release` 通过，0 warning / 0 error。
+- DXGI fast 默认三轮 stability suite：`publish 1.0.25\StabilitySuites\dxgi-default-20260629-193815`，3/3 轮 correctness pass，`completed_per_sec_min=3.576`、`completed_per_sec_avg=3.593`、失败 0、重复导出 0、`IncompleteRoi=0`、`quick_accept_sum=0`、`row_scroll_overshot_sum=0`。
+- DXGI fast `--panel-min-accept-floor 110` 三轮 suite：`publish 1.0.25\StabilitySuites\dxgi-floor110-20260629-194751`，3/3 轮 correctness pass，`completed_per_sec_min=3.628`、`completed_per_sec_avg=3.675`、最快单轮 `3.704/s`。因为最低轮仍低于 1.0.24 单轮 `3.656/s`，暂不改为默认。
+- DXGI `--post-scroll-panel-accept-mode adaptive-after-scroll` 120 件目录：`publish 1.0.25\Scans\2026-06-29-19-42-42-327-p84ec-3b1f`，全部 acceptance pass，`post_scroll_first_panel_wait_ms_avg=172.064ms`，但 `completed_per_sec=3.634`，不足以默认启用。
+- GDI fast 单轮目录：`publish 1.0.25\Scans\2026-06-29-19-41-11-805-p143c-bdf2`，120 件全部 acceptance pass，`completed_per_sec=3.772`。该结果提示 GDI 在本机当前状态可能更快，但仍需多轮复核后再作为推荐后端。
+- `--panel-min-accept-floor 90` 30 件通过，但 120 件目录 `publish 1.0.25\Scans\2026-06-29-19-45-37-847-p5a5c-644f` 在第 7 行附近触发签名一致性保护停止：`signatureRows=2`。90ms 不作为候选。
+- 慢 OCR 压力目录：`publish 1.0.25\Scans\2026-06-29-19-49-35-812-p74b4-8766`，`ocr-workers=1`、`ocr-queue=4`、`ocr-intra-op=1` 下 `adaptiveThrottleMs_avg=204.167ms`、`adaptiveThrottleMs_max=300ms`，失败 0、重复 0、`IncompleteRoi=0`；小队列压力下 `backlog_not_saturated=risk` 符合预期。
+- 结论：1.0.25 更像“稳定性复核与实验工具版”。默认 fast-mode 保持 1.0.24 的安全组合；若要追速度，可显式复测 `--panel-min-accept-floor 110` 或 GDI fast，但当前默认不接受 90ms 或滚动后首格 adaptive。
+
+## 2026-06-29 1.0.24 面板等待降帧与 fast-mode 默认提速
+
+- 新增 `PanelAcceptMode=safe|adaptive-early-full-roi`，CLI 可用 `--panel-accept-mode safe|adaptive-early-full-roi`；GUI 高级设置增加“面板接受策略”，WebSocket payload 增加 `PanelAcceptMode`。
+- `adaptive-early-full-roi` 只在 warmup 后、非滚动后首格中启用；仍必须看到详情变化、12 个 OCR ROI 全可见、达到本轮自适应最低等待，且 `quick_accept_count` 保持 0。它以 ROI 完整帧作为 early full ROI 接受信号，不跳过旧面板保护。
+- `--fast-mode` 默认推荐组合切到 `PanelAcceptMode=AdaptiveEarlyFullRoi` 与 `ScrollAcceptMode=EarlyOneRow`；显式传入 `--panel-accept-mode safe` 或 `--scroll-accept-mode safe` 可回退保守路径。
+- `CELL_TIMING` 新增 `panelAcceptMode`、`roiCompleteFrames`、`selectedStableFrames` 和 `acceptGateReason`；`--scan-benchmark` 新增 `roi_complete_frames_*`、`selected_stable_frames_*`、`panel_frames_after_warmup_*` 和 `accept_gate_reason_*_count`。
+- 发布到 `publish 1.0.24`，不覆盖旧发布目录。`dotnet build -c Release` 通过，0 warning / 0 error。
+- DXGI fast 显式新组合目录：`publish 1.0.24\Scans\2026-06-29-18-02-16-210-p3c6c-abec`，`Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、`quick_accept_count=0`、`row_scroll_overshot_count=0`、关键 acceptance 全 pass；`completed_per_sec=3.621`，`panel_wait_ms_avg=153.684ms`，`scroll_ms_avg=94.636ms`。
+- DXGI fast 默认命令最终目录：`publish 1.0.24\Scans\2026-06-29-18-06-52-713-p1c74-dd74`，命令为 `--scan-once --fast-mode --capture-mode dxgi --max-items 120`；`Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、`strict_one_way_scroll=pass`、`overlap_rows_complete=pass`，`completed_per_sec=3.656`，超过 1.0.20 DXGI fast 的 `3.406/s` 和本轮 `3.5/s` 目标。
+- GDI fast 新组合目录：`publish 1.0.24\Scans\2026-06-29-17-46-55-703-p2754-8021`，120 件全部 acceptance pass，`completed_per_sec=3.187`。
+- 慢 OCR 压力目录：`publish 1.0.24\Scans\2026-06-29-17-48-12-529-p11ec-33a4`，`ocr-workers=1`、`ocr-queue=4`、`ocr-intra-op=1` 下 `adaptiveThrottleMs_avg=194.167ms`、`adaptiveThrottleMs_max=300ms`，失败 0、重复 0、`IncompleteRoi=0`；小队列压力下 `backlog_not_saturated=risk` 符合预期。
+- 结论：1.0.24 是当前推荐高速路径。速度收益来自面板等待降帧与一行滚动早接受的组合，而不是 OCR 或 quick accept；若个别机器出现波动，应优先回退 `--panel-accept-mode safe` 或 `--scroll-accept-mode safe` 做对照。
+
+## 2026-06-29 1.0.23 滚动后首格诊断与一行早接受实验
+
+- 新增 `ScrollAcceptMode=safe|early-one-row`，CLI 可用 `--scroll-accept-mode safe|early-one-row`；GUI 高级设置增加“滚动接受策略”，WebSocket payload 增加 `ScrollAcceptMode`。
+- `early-one-row` 在行签名确认当前视口只前进一行时允许提前接受滚动结果；多行 overshoot 仍立即阻断，不做回滚修正，不放宽 `strict_one_way_scroll` 和 `overlap_rows_complete` 验收。
+- `CELL_TIMING` 新增 `afterScroll` 与 `postScrollFirstCell`；`--scan-benchmark` 新增 `same_row_panel_wait_ms_*`、`post_scroll_first_panel_wait_ms_*` 和 `post_scroll_first_cell_total_ms_*`，用于分开观察普通同排点击和滚动后首格等待。
+- 重叠扫描在滚动验收成功后复用该帧的行签名，避免后续补扫判断再额外捕获一次行签名；面板稳定源默认仍为 `panel`，不启用 1.0.22 的 `text-core` 作为推荐路径。
+- 发布到 `publish 1.0.23`，不覆盖旧发布目录。`dotnet build -c Release` 通过，0 warning / 0 error。
+- 实机 DXGI fast safe 基线目录：`publish 1.0.23\Scans\2026-06-29-16-38-46-790-paa8-da59`，120 件全部 acceptance pass，`completed_per_sec=3.052`，`scroll_ms_avg=396.364ms`。
+- 实机 DXGI fast early-one-row 目录：`publish 1.0.23\Scans\2026-06-29-16-41-38-252-p828-3b18`，`Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、`row_scroll_overshot_count=0`、关键 acceptance 全 pass；`completed_per_sec=3.119`，`scroll_ms_avg=101.636ms`，`same_row_panel_wait_ms_avg=211.044ms`，`post_scroll_first_panel_wait_ms_avg=219.845ms`。
+- 实机 GDI fast early-one-row 目录：`publish 1.0.23\Scans\2026-06-29-16-43-08-726-p7210-f397`，120 件全部 acceptance pass，`completed_per_sec=2.810`。
+- 慢 OCR 压力目录：`publish 1.0.23\Scans\2026-06-29-16-44-27-731-p10f0-3edf`，`ocr-workers=1`、`ocr-queue=4`、`ocr-intra-op=1` 下 `adaptiveThrottleMs_avg=204.167ms`、`adaptiveThrottleMs_max=300ms`，失败 0、重复 0、`IncompleteRoi=0`，背压仍可自动降速。
+- 结论：`early-one-row` 能显著压低滚动等待且本轮未发现重复/漏行，但 120 件速度低于 1.0.20 DXGI fast 的 `3.406/s`，因此 1.0.23 不把它设为 fast-mode 默认，仅作为显式实验与诊断开关保留。下一步瓶颈主要是 `panel_wait_ms` 和滚动后首格面板等待，而不是滚动签名等待本身。
+
+## 2026-06-29 1.0.22 字段级稳定判定实验与默认回退
+
+- 新增 `PanelStabilityMode=panel|text-core|auto`，CLI 可用 `--panel-stability-mode panel|text-core|auto`；GUI 高级设置增加“面板稳定判定”，WebSocket payload 增加 `PanelStabilityMode`。
+- `text-core` 稳定判定只观察 12 个 OCR ROI 的文字核心区域，核心框为左右各裁 6%、上下各裁 18%，最小宽高 4px；接受条件仍固定为“看到详情变化 + 12 ROI 全可见 + 达到最低等待 + 稳定帧满足”，不恢复 quick accept。
+- `auto` 前 12 件 warmup 记录 panel/text-core 稳定耗时，仅当 text-core 明显更快且没有 stale/retry 风险时才选择；实测本机 text-core 不快，因此默认路径回退 `panel`，`text-core/auto` 保留为显式实验选项。
+- `CELL_TIMING` 新增 `panelTextStableMs`、`panelStableSource`、`panelStabilityReason`、`rarityProbeMs` 和 `selectionProbeMs`；`--scan-benchmark` 对应输出 `panel_text_stable_ms_*`、`panel_stable_source_*`、`rarity_probe_ms_*`、`selection_probe_ms_*`。
+- 发布到 `publish 1.0.22`，不覆盖旧发布目录。`dotnet build -c Release` 通过，0 warning / 0 error。
+- 实机 DXGI fast auto 实验目录：`publish 1.0.22\Scans\2026-06-29-15-45-58-399-p5510-e445`，120 件全部 acceptance pass，但 `panel_stable_source_text_core_count=0`，`completed_per_sec=3.098`，低于 1.0.21 与 1.0.20，不作为推荐提速路径。
+- 实机 DXGI fast 默认 panel 验收目录：`publish 1.0.22\Scans\2026-06-29-15-53-48-089-p958-c953`，`Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、关键 acceptance 全 pass；`completed_per_sec=3.077`，`quick_accept_count=0`，`panel_stable_source_text_core_count=0`。
+- 慢 OCR 压力目录：`publish 1.0.22\Scans\2026-06-29-15-57-00-519-p83c8-c37c`，`ocr-workers=1`、`ocr-queue=4`、`ocr-intra-op=1` 下 `adaptiveThrottleMs_avg=167.5ms`、`adaptiveThrottleMs_max=300ms`，失败 0、重复 0、`IncompleteRoi=0`，背压仍可自动降速。
+
+## 2026-06-28 1.0.21 采集捷径验证与安全收口
+
+- `--scan-benchmark` 继续扩展采集诊断：保留 `quick_accept_count`、`quick_accept_rate_percent`、`panel_frames_*` 和 `selection_change_ms_*`，用于评估未来的快速面板接受策略。
+- `CELL_TIMING` 记录 `quickAccept` 和 `quickRejectReason`；本轮实测后默认禁用 quick panel accept，正式路径仍要求“看到详情变化 + 稳定 + 12 ROI 完整”。
+- 验证并拒绝两条不安全/无收益路线：激进 quick accept 曾达到 `3.549/s`，但 120 件出现重复导出 26 件；保守 quick accept 无重复但降到 `2.973/s`。DXGI raw frame 缓存复用 30 件即出现重复导出，已撤回。
+- `publish 1.0.21` 保持 DXGI 默认 `captureFrameBackend=bitmap-fallback`，raw BGRA 仍仅能通过 `ZZZ_SCANNER_DXGI_RAW=1` 显式实验。
+- 最终 120 件验收目录：`publish 1.0.21\Scans\2026-06-28-20-16-04-105-p7a74-96e8`，`MaxItems=120 --fast-mode --capture-mode dxgi`，`Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、关键 acceptance 全 pass；`quick_accept_count=0`，`completed_per_sec=3.221`。
+- 下一波提速方向确定为字段级稳定判定和隐藏截图成本拆解，而不是继续降低全局面板等待或复用旧帧。
+
+## 2026-06-28 1.0.20 DXGI Raw Frame 实验与并发目录修复
+
+- 新增内部 `CapturedFrame` 抽象，`GameWindow.CaptureFrame` 可统一服务 GDI 与 DXGI；面板签名、ROI 可见性、行签名和视口签名已改为优先从 frame 读像素，最终接受的详情面板才转换为 `Bitmap` 入 OCR 队列。
+- `CELL_TIMING` 与 `--scan-benchmark` 新增 `frame_capture_ms`、`frame_to_bitmap_ms`、`bitmap_created_count`，并在 `scan.log` 记录 `captureFrameBackend=...`。
+- DXGI raw BGRA 路径保留为显式环境变量实验；本机验证出现 Desktop Duplication `ReleaseFrame/Unmap` 与 access lost 稳定性风险，因此默认 `--capture-mode dxgi` 继续使用已验证的 `bitmap-fallback`，不把 raw frame 作为推荐默认。
+- 修复扫描目录同秒碰撞：目录名改为毫秒时间戳 + process id + 短随机后缀；`scan-once-result.json` 只写入对应扫描目录，发布根目录不再生成临时 result 文件。
+- 面板 probe 签名修复为统一坐标系，并保留“probe 不变但目标格选中态变化”兜底，用于相邻外观极近的详情面板；仍然不允许未看到变化时直接复用旧面板。
+- 实机默认模式验证目录：`publish 1.0.20\Scans\2026-06-28-15-57-06-340-p7444-74dc`，`MaxItems=30`，`Completed=30`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、关键 acceptance 全 pass。
+- 实机 GDI fast 验证目录：`publish 1.0.20\Scans\2026-06-28-15-48-51-387-p4d10-caf9`，`Completed=120`、重复导出 0、关键 acceptance 全 pass；`completed_per_sec=3.081`，略高于 1.0.19 GDI 的 `3.054/s`。
+- 实机 DXGI fast 最终验证目录：`publish 1.0.20\Scans\2026-06-28-15-47-04-018-p75e8-c80c`，`Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、`strict_one_way_scroll=pass`、`overlap_rows_complete=pass`；`completed_per_sec=3.406`，基本持平 1.0.19 DXGI 的 `3.410/s`。
+- 慢 OCR 压力验证目录：`publish 1.0.20\Scans\2026-06-28-15-54-58-745-p67bc-f7a6`，关闭 Fast OCR 且 `ocr-workers=1/queue=4/intra-op=1` 后，`adaptiveThrottleMs_avg=205ms`、`adaptiveThrottleMs_max=300ms`，扫描自动降速且失败 0、重复 0。
+
+## 2026-06-28 1.0.19 稳定边界内的采集端提速
+
+- 面板等待继续保留 1.0.18 的安全边界：必须看到详情变化、稳定，并且 12 个 OCR ROI 全部可见；未看到变化仍拒绝复用旧面板。
+- GDI 路径在等待变化阶段使用 `panelChangeProbeRect` 轻量截图，但签名仍按 12 个 ROI 位置采样，避免整块稀疏采样漏掉文字变化。
+- DXGI 路径 warmup 后将稳定帧要求从 2 帧降到 1 帧；仍保留变化签名、ROI 完整和最低接受时间，用来避免回到 1.0.17 激进版本的旧面板重复问题。
+- 单行滚动从“等待列表稳定后再验证”改为“轮询一行位移并等待该一行匹配稳定”，更早接受已经验证的一行滚动，同时继续阻断多行 overshoot。
+- 实机 DXGI fast 验证目录：`publish 1.0.19\Scans\2026-06-28-03-02-41`，`Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、关键 acceptance 全 pass；`completed_per_sec=3.410`，相对 1.0.18 DXGI `3.146` 提升约 `8.4%`。
+- 1.0.19 仍略低于 1.0.17 DXGI 最终 `3.467/s`，但保留 1.0.18 的旧面板拒绝、12 ROI 完整和 OCR 背压策略；本轮优先选择稳定性。
+
+## 2026-06-28 1.0.18 本轮自适应面板状态机与 OCR 背压
+
+- 新增 `--adaptive-timing` 与 `--no-adaptive-timing`；`--fast-mode` 默认启用本轮自适应，普通模式可手动启用。GUI 增加“本轮自适应等待”，WebSocket payload 增加 `AdaptiveTiming`。
+- 面板等待改为更明确的状态机：点击后必须看到 panel probe 相对上一件变化，再等稳定帧，并且 12 个 OCR ROI 全部可见后才接受；未看到变化时只重试点击，不复用旧面板。
+- 新增运行内 `AdaptiveTimingState`，前 12 件记录面板变化、稳定、ROI 完整和帧循环耗时；warmup 后只在“变化+稳定+ROI完整”已经满足的前提下收缩安全等待，不写长期机器画像。
+- 保留 bounded OCR 队列并新增 `AdaptiveOcrThrottle`：OCR backlog 连续高于队列容量 60% 时，在下一次点击前增加小延迟；低于 25% 后逐步撤销。
+- `CELL_TIMING` 增加 `adaptiveThrottleMs`、`ocrBacklogBeforeEnqueue`、`adaptivePanelMinMs`、`adaptivePanelSamples` 和 `adaptivePanelReason`；`--scan-benchmark` 增加 `adaptive_throttle_ms_*`、`ocr_backlog_before_enqueue_*` 和 `adaptive_panel_min_ms_*`。
+
+## 2026-06-28 1.0.17 DXGI 截图后端与采集端诊断
+
+- 新增 `CaptureMode=gdi|dxgi`、CLI `--capture-mode gdi|dxgi`、GUI 高级设置“截图后端”和 WebSocket `CaptureMode` 字段；默认仍使用 GDI，DXGI 仅作为显式实验路径。
+- `GameWindow` 改为通过 capture source 截图；GDI 保持原 `CopyFromScreen` 行为，DXGI 使用 Desktop Duplication 按窗口坐标裁剪。DXGI 初始化失败、取帧失败或尺寸异常时自动回退 GDI 并写入 `scan.log`。
+- `CELL_TIMING` 增加 `captureMs`、`signatureMs`、`visibleRoiMs`、`frameLoopMs`；滚动日志增加 `ROW_SCROLL_TIMING`，记录 `scroll_tick_wait_ms`、`list_stable_ms`、`row_signature_ms` 和 `post_scroll_viewport_ms`。
+- `--scan-benchmark` 新增 `capture_ms_*`、`panel_signature_ms_*`、`visible_roi_ms_*`、`frame_loop_ms_*`、`scroll_list_stable_ms_*`、`row_signature_ms_*` 等采集端分解指标。
+- 减少重复截图：行签名和列表视口签名尽量复用同一次截图；同一面板等待循环内记录每帧截图、签名和 ROI 检查成本。旧面板保护仍要求看到变化且 ROI 完整/稳定。
+- 实机 GDI fast 验证目录：`publish 1.0.17\Scans\2026-06-28-01-17-31`，`Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0，`completed_per_sec=3.320`，相对 1.0.16 提升约 `5.6%`。
+- 实机 DXGI fast 最终验证目录：`publish 1.0.17\Scans\2026-06-28-01-28-45`，`Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、滚动验收全 pass；`completed_per_sec=3.467`，相对 1.0.16 的 `3.144` 提升约 `10.3%`。
+- 一轮更激进 DXGI 参数曾达到 `4.213/s`，但出现重复导出，判定为不安全结果并拒绝；最终版本为 DXGI 面板变化接受保留额外安全下限，避免旧面板重复读取。
+- 本轮未达到 `+15%` 接受目标；benchmark 显示 OCR 和截图已不是主瓶颈，剩余慢点主要在 `scroll_list_stable_ms_avg=349ms` 与滚动后首格等待。
+
+## 2026-06-27 1.0.16 Fast Mode 与采集端拆解
+
+- 新增 `--fast-mode`：自动启用 fast scan profile 与 Fast OCR assist；启动时校验 `Data/ocr_fast_templates.json` 必须为 v3+ 且存在已启用字段，否则回退普通模式并写入 `scan.log`。
+- 新增独立扫描 profile `ZZZ背包驱动盘-16比9-fast`，普通 profile 保持安全默认；fast profile 当前参数为 `loadPollMs=10`、`panelSettleDelayMs=30`、`panelChangedMinimumAcceptMs=60`、`scrollTickDelayMs=60`。
+- `loadPollMs` 的代码下限从 15ms 放宽到 5ms；新增 `panelChangedMinimumAcceptMs` profile 参数，普通模式保持 120ms。
+- `--scan-benchmark` 新增 `panel_change_ms`、`panel_roi_ms`、`panel_stable_ms`、`after_scroll_extra_ms` 和 `capture_limited`，用于区分采集端与 OCR 端瓶颈。
+- 新增 `--ocr-fast-feature-eval <shadow-parent>`，比较 v3 与候选 v4 特征在 `name/subStat4` 上的跨轮误接受和接受率；`--ocr-fast-calibrate` 可显式传入 `--feature v4`。
+- 随包 `ocr_fast_templates.json` 改为 v4 特征：`level/mainStat/subStat1/subStat2/subStat3/subStat4` 启用，`name` 仍因跨轮接受率不足保持禁用。
+- 实机 `MaxItems=120 --fast-mode` 验证目录：`publish 1.0.16\Scans\2026-06-27-23-02-38`。结果 `Completed=120`、`Failed=0`、`IncompleteRoi=0`、重复导出 0、滚动验收全 pass；`completed_per_sec=3.144`，相对 1.0.15 assist `2.828` 提升约 `11.2%`。
+- 本轮未达到 `3.3/s` 或 `+15%` 目标；benchmark 显示 `capture_limited=true`，剩余瓶颈在 GDI 截图和详情面板探针循环，OCR backlog 已降到 max 1。
+
+## 2026-06-27 1.0.15 Fast OCR 自动校准与 v3 特征
+
+- 新增 `--ocr-fast-calibrate <shadow-parent> --output <index.json>`：读取多轮 shadow 数据，生成字段级 `AssistEnabled`、`MinScore`、`MinMargin` 策略，并写出 `ocr_fast_eval.csv`、`ocr_fast_confusion.csv`、`ocr_fast_calibration.csv`。
+- `ocr_fast_templates.json` schema 升到 v3，新增 `ahash-dhash-16x16-v3` 特征；旧 v1/v2 索引继续按原 `ahash-16x16-grayscale-v1` 兼容读取。
+- 校准器少于两轮 shadow 数据时会保持 assist 全禁用；字段启用必须满足跨轮零误接受，`name` 还需要接受率达到 95%。
+- `--ocr-fast-eval` 和 `--ocr-fast-cross-validate` 会额外输出 `ocr_fast_confusion.csv`，用于定位误接受和常见拒绝标签。
+- `--scan-benchmark` 新增 `fast_accepted_per_item`、`fast_rejected_per_item`、`ppocr_roi_per_item`、`fast_match_ms_per_item`，可直接判断 assist 是否减少 PP-OCR ROI。
+- 已用 3 轮 `MaxItems=120` shadow 样本校准并实测 assist：启用 `level/mainStat/subStat1/subStat2/subStat3`，120 件扫描失败 0、重复 0，`ppocr_roi_per_item` 从 12 降到 7，`ocr_total_ms_per_item_avg` 从约 927ms 降到约 271ms。
+
+## 2026-06-27 1.0.14 Fast OCR 可回退辅助识别
+
+- Fast OCR 模板索引升级到 v2，记录每个字段的 `minScore`、`minMargin`、模板数和标签数，并保留 v1 索引读取兼容。
+- 新增 `--ocr-fast-eval <index.json> <shadow-dir-or-parent>` 与 `--ocr-fast-cross-validate <shadow-parent>`，可输出 `ocr_fast_eval.csv` 并统计字段级接受率、匹配率、误接受数和耗时。
+- 新增 `--ocr-fast-assist --ocr-fast-index <index.json>`：`level/mainStat/subStat1..4` 可先走模板快路径，不支持、禁用或未达阈值的 ROI 会回退 PP-OCR；`name` 默认仍只参与 shadow/eval。
+- 扫描目录新增 `ocr_fast_assist.csv`，`ocr_diagnostics.csv` 追加 `fast_match_ms`、`fast_accepted_count`、`fast_rejected_count` 和 `ppocr_roi_count`，用于确认 PP-OCR 实际 ROI 是否下降。
+
+## 2026-06-26 1.0.3 重叠签名扫描实验版
+
+- 默认遍历切换为 `OverlapSignaturePage`：按仓库数量计算逻辑行，用已扫逻辑行集合去重；首屏扫描视觉第 1/2/3 行，中间扫描未读的新行，底部补扫视觉第 4 行。
+- 滚动仍保持单向向下，不做自动反向上翻恢复；如果游戏偶发把一次滚轮结算成两行，重叠模式会接受前进距离，并在下一屏补扫落到视觉第 2 行的未读逻辑行，避免为了回退而制造重复读取。
+- 新增 `OVERLAP_VIEWPORT`、`OVERLAP_ROW_CANDIDATE`、`OVERLAP_ROW_SCANNED`、`OVERLAP_SCROLL_ACCEPTED` 日志，方便回放每一屏扫描了哪些逻辑行。
+- `--scan-benchmark` 增加重叠页计数和 `acceptance.overlap_rows_complete`，并允许重叠补扫场景下合理的视觉第 2 行点击，不再把它误报为不安全。
+- GUI 遍历模式增加“重叠签名扫描”，默认“按配置”指向新的 profile 默认值；`SafeBandViewport`、`CalibratedPage`、`LegacyThirdRow` 仍保留为高级诊断选项。
+
+## 2026-06-25 1.0.2 扫描提速与基准验收
+
+- 实机验证发现 `OcrBatchSize=4` 会让 PP-OCRv5 单件耗时从约 405ms 退化到约 549ms，并造成 OCR 队列反压；默认批量回退为 `OcrBatchSize=1`。
+- 默认 OCR 改为自动最多 2 worker、`OcrQueueCapacity=48`、`OcrIntraOpThreads=3`；`2026-06-26` 实机复测显示 2 worker 能解除队列反压，3 worker 虽更快收尾但出现滚动越行风险，暂不写成默认。
+- 扫描 profile 加入显式等待下限：`minPanelSettleDelayMs`、`minPanelUnchangedFallbackMs`、`listStableTimeoutMs`、`minListStableTimeoutMs`、`minScrollTickDelayMs`。默认轮询降到 `loadPollMs=15`，面板盲等降到 `panelSettleDelayMs=40`，逐行滚动等待保留 `scrollTickDelayMs=50`，避免一行滚动验证失败。
+- `--scan-once` 会自动执行一次扫描并写出发布目录和扫描目录内的 `scan-once-result.json`，供无人值守 benchmark 判断成功、失败和输出目录。
+- 品质检测新增固定点和中心小范围 fast path，只有失败时才回退到原 73x73 区域扫描；日志中的 `Probe` 会写出 `fullScan=True/False`。
+- `--scan-benchmark` 增加 `cell_timing_per_sec`、`queued_per_sec`、`completed_per_sec`、`ocr_total_ms_per_item`、`unsafe_visual_row2_clicks`、滚动越行/恢复计数、导出一致性和 acceptance/risk 字段，用于对比 `publish 1.0.1` 与 `publish 1.0.2`。
+- 详情面板探针继续复用当前详情截图计算签名，不额外截图；变化检测仍看大面板加关键 ROI，稳定检测改为只看全部 OCR ROI，减少背景动画导致的等待，同时不放宽旧面板保护。`CELL_TIMING` 会追加 `panelFrames/changeMs/fullRoiMs/stableMs/accept`，用于定位慢格子是在等面板变化、ROI 出现还是稳定帧。
+- `SafeBandViewport` 收紧点击约束：首屏边界允许视觉第 1、2、3 行，中途必须固定读视觉第 3 行；如果滚动验证发现一次推进多行并会让目标落到视觉第 2 行，会先做一次反向滚轮并验证回到目标顶部，回退失败才停止本轮扫描，避免重复读取。
+- 安全带逐行滚动改为更小的 `scrollTickDelta=-30` 分步推进，单 tick 后按 YAS 风格等待 80ms 再验证行签名，降低游戏一次结算两行的概率。
+- 默认关闭自动反向恢复：`allowScrollRecovery=false`。如果游戏仍把某个小 tick 结算成两行，扫描写出 `ROW_SCROLL_STRICT_STOP` 并停止，不再自动上翻，避免回滚动作导致重复读取或漏扫。
+
 ## 2026-05-19
 
 - 创建新子项目 `ZZZ-Scanner.Next`。
