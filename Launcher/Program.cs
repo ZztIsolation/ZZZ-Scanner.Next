@@ -16,7 +16,7 @@ namespace ZZZScannerHelper;
 internal static partial class Program
 {
     private const string ServiceName = "zzz-scanner-helper";
-    private const string HelperVersion = "1.0.1";
+    private const string HelperVersion = "1.0.2";
     private const int ProtocolVersion = 1;
     private const int HelperPort = 22355;
     private const string ProtocolName = "zzz-scanner";
@@ -365,6 +365,19 @@ internal static partial class Program
             for (var attempt = 1; attempt <= PackageDownloadMaxAttempts; attempt++)
             {
                 var existingBytes = File.Exists(temp) ? new FileInfo(temp).Length : 0L;
+                if (expectedSize > 0 && existingBytes == expectedSize)
+                {
+                    await report(DownloadProgress(version, url, existingBytes, expectedSize, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
+                    MoveCompletedPackage(temp, destination);
+                    return;
+                }
+
+                if (expectedSize > 0 && existingBytes > expectedSize)
+                {
+                    SafeDelete(temp);
+                    existingBytes = 0;
+                }
+
                 try
                 {
                     using var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -374,6 +387,15 @@ internal static partial class Program
                     }
 
                     using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+                    if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable
+                        && expectedSize > 0
+                        && existingBytes == expectedSize)
+                    {
+                        await report(DownloadProgress(version, url, existingBytes, expectedSize, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
+                        MoveCompletedPackage(temp, destination);
+                        return;
+                    }
+
                     if (existingBytes > 0 && response.StatusCode == HttpStatusCode.OK)
                     {
                         SafeDelete(temp);
@@ -417,23 +439,25 @@ internal static partial class Program
 
                     await output.FlushAsync(token);
                     await report(DownloadProgress(version, url, downloaded, totalBytes, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
-                    if (File.Exists(destination))
-                    {
-                        File.Delete(destination);
-                    }
-
-                    File.Move(temp, destination);
+                    MoveCompletedPackage(temp, destination);
                     return;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     lastError = ex;
+                    var downloaded = File.Exists(temp) ? new FileInfo(temp).Length : 0L;
+                    if (expectedSize > 0 && downloaded == expectedSize)
+                    {
+                        await report(DownloadProgress(version, url, downloaded, expectedSize, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
+                        MoveCompletedPackage(temp, destination);
+                        return;
+                    }
+
                     if (attempt >= PackageDownloadMaxAttempts)
                     {
                         break;
                     }
 
-                    var downloaded = File.Exists(temp) ? new FileInfo(temp).Length : 0L;
                     await report(DownloadProgress(
                         version,
                         url,
@@ -448,6 +472,16 @@ internal static partial class Program
 
             SafeDelete(temp);
             throw new IOException($"Scanner package download failed after {PackageDownloadMaxAttempts} attempts: {lastError?.Message}", lastError);
+        }
+
+        private static void MoveCompletedPackage(string temp, string destination)
+        {
+            if (File.Exists(destination))
+            {
+                File.Delete(destination);
+            }
+
+            File.Move(temp, destination);
         }
 
         private static LauncherProgress DownloadProgress(
