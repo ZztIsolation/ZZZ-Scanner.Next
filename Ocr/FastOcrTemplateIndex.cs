@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing.Imaging;
 using System.Globalization;
 using System.Numerics;
@@ -11,10 +12,11 @@ namespace ZZZScannerNext.Ocr;
 
 public sealed class FastOcrTemplateIndex
 {
-    public const string CurrentVersion = "5";
+    public const string CurrentVersion = "6";
     public const string LegacyFeature = "ahash-16x16-grayscale-v1";
     public const string CurrentFeature = "ahash-dhash-16x16-v3";
     public const string ExperimentalFeature = "ahash-dhash-vhash-16x16-v4";
+    public const string CanonicalFeature = "canonical-ahash-dhash-vhash-edge-16x16-v6";
     public const double DefaultMinScore = 0.90;
     public const double DefaultMinMargin = 0.02;
 
@@ -24,9 +26,11 @@ public sealed class FastOcrTemplateIndex
     public List<FastOcrTemplate> Templates { get; set; } = new();
     public Dictionary<string, FastOcrFieldPolicy> FieldPolicies { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, FastOcrFieldPolicy> ProfileFieldPolicies { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, FastOcrFieldPolicy> FamilyFieldPolicies { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     private Dictionary<string, List<FastOcrTemplate>>? _byField;
     private Dictionary<string, List<FastOcrTemplate>>? _byFieldAndProfile;
+    private Dictionary<string, List<FastOcrTemplate>>? _byFieldAndFamily;
 
     public static IReadOnlySet<string> SupportedFields { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -97,7 +101,8 @@ public sealed class FastOcrTemplateIndex
 
             var index = Load(resolvedFile);
             if (!string.Equals(index.Feature, CurrentFeature, StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(index.Feature, ExperimentalFeature, StringComparison.OrdinalIgnoreCase))
+                && !string.Equals(index.Feature, ExperimentalFeature, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(index.Feature, CanonicalFeature, StringComparison.OrdinalIgnoreCase))
             {
                 reason = $"unsupported fast OCR feature: {index.Feature}";
                 return false;
@@ -110,8 +115,12 @@ public sealed class FastOcrTemplateIndex
             }
 
             var enabledFields = index.FieldPolicies
+                .Concat(index.ProfileFieldPolicies.Select(pair => new KeyValuePair<string, FastOcrFieldPolicy>(FieldFromPolicyKey(pair.Key), pair.Value)))
+                .Concat(index.FamilyFieldPolicies.Select(pair => new KeyValuePair<string, FastOcrFieldPolicy>(FieldFromPolicyKey(pair.Key), pair.Value)))
                 .Where(pair => pair.Value.AssistEnabled && pair.Value.TemplateCount > 0)
                 .Select(pair => pair.Key)
+                .Where(field => !string.IsNullOrWhiteSpace(field))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(field => field, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             if (enabledFields.Length == 0)
@@ -156,6 +165,7 @@ public sealed class FastOcrTemplateIndex
                 using var bitmap = new Bitmap(row.ResolvedImageFile);
                 var feature = FastOcrImageFeature.FromBitmap(bitmap, index.Feature);
                 var visualProfileId = NormalizeProfileId(row.VisualProfileId);
+                var familyId = ProfileFamilyId(visualProfileId);
                 var key = $"{visualProfileId}\0{row.FieldKey}\0{row.CleanLabel}\0{feature.ToKey()}";
                 if (!seen.Add(key))
                 {
@@ -167,6 +177,7 @@ public sealed class FastOcrTemplateIndex
                     FieldKey = row.FieldKey,
                     Label = row.CleanLabel,
                     VisualProfileId = visualProfileId,
+                    ProfileFamilyId = familyId,
                     Bits = feature.ToHexWords(),
                     SourceImage = Path.GetFullPath(row.ResolvedImageFile)
                 });
@@ -269,12 +280,16 @@ public sealed class FastOcrTemplateIndex
             candidates.Count,
             best.SourceImage,
             best.VisualProfileId,
+            ProfileFamilyId(best.VisualProfileId),
             secondDifferentLabel?.Label ?? "",
             top2Score,
             margin,
             policy.AssistEnabled,
             policy.MinScore,
             policy.MinMargin,
+            feature.CanonicalCropSucceeded,
+            feature.CanonicalCropFallback,
+            feature.FeatureElapsedMs,
             route.Reason);
     }
 
@@ -312,6 +327,13 @@ public sealed class FastOcrTemplateIndex
             return profilePolicy;
         }
 
+        var familyId = ProfileFamilyId(normalizedProfileId);
+        if (!string.IsNullOrWhiteSpace(familyId)
+            && FamilyFieldPolicies.TryGetValue(ProfilePolicyKey(familyId, fieldKey), out var familyPolicy))
+        {
+            return familyPolicy;
+        }
+
         var policies = FieldPolicies ?? new Dictionary<string, FastOcrFieldPolicy>(StringComparer.OrdinalIgnoreCase);
         return policies.TryGetValue(fieldKey, out var policy)
             ? policy
@@ -335,12 +357,14 @@ public sealed class FastOcrTemplateIndex
             route.PolicyProfileId,
             route.RouteName,
             route.Templates.Count,
+            route.ProfileFamilyId,
             route.Reason);
     }
 
     private TemplateRoute ResolveTemplateRoute(string fieldKey, string visualProfileId, ProfileRoutingMode routingMode)
     {
         var normalizedProfileId = NormalizeProfileId(visualProfileId);
+        var requestedFamily = ProfileFamilyId(normalizedProfileId);
         var exactTemplates = TemplatesForFieldAndProfile(fieldKey, normalizedProfileId);
         if (exactTemplates.Count > 0)
         {
@@ -348,6 +372,7 @@ public sealed class FastOcrTemplateIndex
                 exactTemplates,
                 normalizedProfileId,
                 "exact",
+                requestedFamily,
                 $"profile_exact:{normalizedProfileId}");
         }
 
@@ -357,7 +382,32 @@ public sealed class FastOcrTemplateIndex
                 [],
                 normalizedProfileId,
                 "strict_missing",
+                requestedFamily,
                 $"profile_strict_missing:{normalizedProfileId}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(requestedFamily))
+        {
+            var familyTemplates = TemplatesForFieldAndFamily(fieldKey, requestedFamily);
+            if (familyTemplates.Count > 0)
+            {
+                return new TemplateRoute(
+                    familyTemplates,
+                    requestedFamily,
+                    "family",
+                    requestedFamily,
+                    $"profile_family:{normalizedProfileId}->{requestedFamily}");
+            }
+        }
+
+        if (routingMode == ProfileRoutingMode.Family)
+        {
+            return new TemplateRoute(
+                [],
+                requestedFamily,
+                "family_missing",
+                requestedFamily,
+                $"profile_family_missing:{normalizedProfileId}->{requestedFamily}");
         }
 
         var compatibleProfile = FindCompatibleProfile(normalizedProfileId, fieldKey);
@@ -370,6 +420,7 @@ public sealed class FastOcrTemplateIndex
                     compatibleTemplates,
                     compatibleProfile,
                     "compatible",
+                    ProfileFamilyId(compatibleProfile),
                     $"profile_compatible:{normalizedProfileId}->{compatibleProfile}");
             }
         }
@@ -383,6 +434,7 @@ public sealed class FastOcrTemplateIndex
                     allTemplates,
                     "",
                     "global",
+                    "",
                     $"profile_global_fallback:{normalizedProfileId}");
             }
         }
@@ -391,7 +443,16 @@ public sealed class FastOcrTemplateIndex
             [],
             normalizedProfileId,
             "no_templates",
+            requestedFamily,
             $"profile_no_templates:{normalizedProfileId}");
+    }
+
+    private IReadOnlyList<FastOcrTemplate> TemplatesForFieldAndFamily(string fieldKey, string profileFamilyId)
+    {
+        _byFieldAndFamily ??= Templates
+            .GroupBy(template => ProfilePolicyKey(ProfileFamilyId(template.VisualProfileId), template.FieldKey), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+        return _byFieldAndFamily.TryGetValue(ProfilePolicyKey(profileFamilyId, fieldKey), out var templates) ? templates : [];
     }
 
     private IReadOnlyList<FastOcrTemplate> TemplatesForFieldAndProfile(string fieldKey, string visualProfileId)
@@ -431,9 +492,13 @@ public sealed class FastOcrTemplateIndex
         Feature = string.IsNullOrWhiteSpace(Feature) ? LegacyFeature : Feature;
         FieldPolicies = new Dictionary<string, FastOcrFieldPolicy>(FieldPolicies ?? new(), StringComparer.OrdinalIgnoreCase);
         ProfileFieldPolicies = new Dictionary<string, FastOcrFieldPolicy>(ProfileFieldPolicies ?? new(), StringComparer.OrdinalIgnoreCase);
+        FamilyFieldPolicies = new Dictionary<string, FastOcrFieldPolicy>(FamilyFieldPolicies ?? new(), StringComparer.OrdinalIgnoreCase);
         foreach (var template in Templates)
         {
             template.VisualProfileId = NormalizeProfileId(template.VisualProfileId);
+            template.ProfileFamilyId = string.IsNullOrWhiteSpace(template.ProfileFamilyId)
+                ? ProfileFamilyId(template.VisualProfileId)
+                : NormalizeProfileId(template.ProfileFamilyId);
         }
 
         foreach (var field in SupportedFields)
@@ -480,8 +545,36 @@ public sealed class FastOcrTemplateIndex
             }
         }
 
+        foreach (var familyId in Templates
+            .Select(template => ProfileFamilyId(template.VisualProfileId))
+            .Where(family => !string.IsNullOrWhiteSpace(family))
+            .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var field in SupportedFields)
+            {
+                var key = ProfilePolicyKey(familyId, field);
+                var templates = Templates
+                    .Where(template => template.FieldKey.Equals(field, StringComparison.OrdinalIgnoreCase)
+                        && ProfileFamilyId(template.VisualProfileId).Equals(familyId, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                if (!FamilyFieldPolicies.TryGetValue(key, out var policy))
+                {
+                    continue;
+                }
+
+                policy.TemplateCount = templates.Length;
+                policy.LabelCount = templates
+                    .Select(template => template.Label)
+                    .Where(label => !string.IsNullOrWhiteSpace(label))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Count();
+                FamilyFieldPolicies[key] = policy;
+            }
+        }
+
         _byField = null;
         _byFieldAndProfile = null;
+        _byFieldAndFamily = null;
     }
 
     public static string NormalizeProfileId(string? visualProfileId)
@@ -496,6 +589,26 @@ public sealed class FastOcrTemplateIndex
         return $"{NormalizeProfileId(visualProfileId)}|{fieldKey}";
     }
 
+    private static string FieldFromPolicyKey(string policyKey)
+    {
+        var separator = policyKey.LastIndexOf('|');
+        return separator >= 0 && separator + 1 < policyKey.Length
+            ? policyKey[(separator + 1)..]
+            : policyKey;
+    }
+
+    public static string ProfileFamilyId(string? visualProfileId)
+    {
+        var normalized = NormalizeProfileId(visualProfileId);
+        var key = VisualProfileKey.Parse(normalized);
+        if (!key.IsUsable)
+        {
+            return normalized.Equals("legacy", StringComparison.OrdinalIgnoreCase) ? "legacy" : "";
+        }
+
+        return $"{key.ClientKind}-{key.AspectBucket}-{key.DpiBucket}-{key.QualityLabel}".ToLowerInvariant();
+    }
+
     private static double ScoreFromDistance(int distance, int bitCount)
     {
         return bitCount <= 0 ? 0 : 1.0 - distance / (double)bitCount;
@@ -508,12 +621,14 @@ public sealed record FastOcrProfileRoute(
     string PolicyProfileId,
     string RouteName,
     int TemplateCount,
+    string ProfileFamilyId,
     string Reason);
 
 internal sealed record TemplateRoute(
     IReadOnlyList<FastOcrTemplate> Templates,
     string PolicyProfileId,
     string RouteName,
+    string ProfileFamilyId,
     string Reason);
 
 internal readonly record struct VisualProfileKey(string ClientKind, int Width, int Height, string QualityLabel)
@@ -522,7 +637,21 @@ internal readonly record struct VisualProfileKey(string ClientKind, int Width, i
 
     public double AspectRatio => Height <= 0 ? 0 : Width / (double)Height;
 
+    public string AspectBucket => Width <= 0 || Height <= 0
+        ? "unknown"
+        : NormalizeBucket(Math.Round(AspectRatio, 2).ToString("F2", CultureInfo.InvariantCulture));
+
+    public string DpiBucket => "dpi";
+
     public int PixelCount => Math.Max(0, Width) * Math.Max(0, Height);
+
+    public string ToFamilyId(string qualityLabel)
+    {
+        var normalizedQuality = string.IsNullOrWhiteSpace(qualityLabel)
+            ? "current"
+            : qualityLabel.Trim().ToLowerInvariant();
+        return $"{ClientKind}-{AspectBucket}-{DpiBucket}-{normalizedQuality}";
+    }
 
     public static VisualProfileKey Parse(string profileId)
     {
@@ -550,6 +679,13 @@ internal readonly record struct VisualProfileKey(string ClientKind, int Width, i
 
         return new VisualProfileKey("", 0, 0, "");
     }
+
+    private static string NormalizeBucket(string value)
+    {
+        return string.Concat(value.Select(c => char.IsLetterOrDigit(c) ? c : '-'))
+            .Trim('-')
+            .ToLowerInvariant();
+    }
 }
 
 public sealed class FastOcrFieldPolicy
@@ -576,6 +712,7 @@ public sealed class FastOcrTemplate
     public string FieldKey { get; set; } = "";
     public string Label { get; set; } = "";
     public string VisualProfileId { get; set; } = "legacy";
+    public string ProfileFamilyId { get; set; } = "";
     public string[] Bits { get; set; } = [];
     public string SourceImage { get; set; } = "";
 }
@@ -588,16 +725,20 @@ public sealed record FastOcrMatch(
     int CandidateCount,
     string SourceImage,
     string SourceProfileId,
+    string SourceFamilyId,
     string Top2Label,
     double Top2Score,
     double Margin,
     bool AssistEnabled,
     double MinScore,
     double MinMargin,
+    bool CanonicalCropSucceeded,
+    bool CanonicalCropFallback,
+    double FeatureElapsedMs,
     string Reason)
 {
     public static FastOcrMatch Empty(string fieldKey, string reason) =>
-        new(fieldKey, "", 0, FastOcrImageFeature.CurrentBitCount, 0, "", "", "", 0, 0, false, FastOcrTemplateIndex.DefaultMinScore, FastOcrTemplateIndex.DefaultMinMargin, reason);
+        new(fieldKey, "", 0, FastOcrImageFeature.CurrentBitCount, 0, "", "", "", "", 0, 0, false, FastOcrTemplateIndex.DefaultMinScore, FastOcrTemplateIndex.DefaultMinMargin, false, false, 0, reason);
 }
 
 public sealed class FastOcrImageFeature
@@ -606,13 +747,25 @@ public sealed class FastOcrImageFeature
     public const int LegacyBitCount = Size * Size;
     public const int CurrentBitCount = LegacyBitCount * 2;
     public const int ExperimentalBitCount = LegacyBitCount * 3;
+    public const int CanonicalBitCount = LegacyBitCount * 4;
 
     private FastOcrImageFeature(IReadOnlyList<ulong> words)
     {
         Words = words.ToArray();
     }
 
+    private FastOcrImageFeature(IReadOnlyList<ulong> words, bool canonicalCropSucceeded, bool canonicalCropFallback, double featureElapsedMs)
+    {
+        Words = words.ToArray();
+        CanonicalCropSucceeded = canonicalCropSucceeded;
+        CanonicalCropFallback = canonicalCropFallback;
+        FeatureElapsedMs = featureElapsedMs;
+    }
+
     public IReadOnlyList<ulong> Words { get; }
+    public bool CanonicalCropSucceeded { get; }
+    public bool CanonicalCropFallback { get; }
+    public double FeatureElapsedMs { get; }
 
     public int BitCount => Words.Count * 64;
 
@@ -633,27 +786,52 @@ public sealed class FastOcrImageFeature
 
     public static FastOcrImageFeature FromBitmap(Bitmap source, Rectangle sourceRect, string featureName)
     {
+        var sw = Stopwatch.StartNew();
         var bounds = new Rectangle(0, 0, source.Width, source.Height);
         var rect = Rectangle.Intersect(bounds, sourceRect);
         if (rect.Width <= 0 || rect.Height <= 0)
         {
-            return new FastOcrImageFeature(EmptyWordsForFeature(featureName));
+            sw.Stop();
+            return new FastOcrImageFeature(EmptyWordsForFeature(featureName), false, true, sw.Elapsed.TotalMilliseconds);
         }
 
         if (string.Equals(featureName, FastOcrTemplateIndex.LegacyFeature, StringComparison.OrdinalIgnoreCase))
         {
-            return new FastOcrImageFeature(BuildAverageHash(source, rect));
+            sw.Stop();
+            return new FastOcrImageFeature(BuildAverageHash(source, rect), false, false, sw.Elapsed.TotalMilliseconds);
         }
 
-        var words = new List<ulong>(12);
-        words.AddRange(BuildAverageHash(source, rect));
-        words.AddRange(BuildHorizontalDifferenceHash(source, rect));
-        if (string.Equals(featureName, FastOcrTemplateIndex.ExperimentalFeature, StringComparison.OrdinalIgnoreCase))
+        var useCanonical = string.Equals(featureName, FastOcrTemplateIndex.CanonicalFeature, StringComparison.OrdinalIgnoreCase);
+        var canonicalSucceeded = false;
+        var canonicalFallback = false;
+        Rectangle? canonical = null;
+        if (useCanonical)
         {
-            words.AddRange(BuildVerticalDifferenceHash(source, rect));
+            canonical = TryCanonicalize(source, rect, out _, out canonicalSucceeded, out canonicalFallback);
+        }
+        else
+        {
+            canonicalSucceeded = false;
+            canonicalFallback = false;
         }
 
-        return new FastOcrImageFeature(words);
+        var featureRect = canonical ?? rect;
+        var words = new List<ulong>(16);
+        words.AddRange(BuildAverageHash(source, featureRect));
+        words.AddRange(BuildHorizontalDifferenceHash(source, featureRect));
+        if (string.Equals(featureName, FastOcrTemplateIndex.ExperimentalFeature, StringComparison.OrdinalIgnoreCase)
+            || useCanonical)
+        {
+            words.AddRange(BuildVerticalDifferenceHash(source, featureRect));
+        }
+
+        if (useCanonical)
+        {
+            words.AddRange(BuildEdgeDensityHash(source, featureRect));
+        }
+
+        sw.Stop();
+        return new FastOcrImageFeature(words, canonicalSucceeded, canonicalFallback, sw.Elapsed.TotalMilliseconds);
     }
 
     public static FastOcrImageFeature FromHexWords(IReadOnlyList<string> words)
@@ -756,8 +934,37 @@ public sealed class FastOcrImageFeature
         return words;
     }
 
+    private static ulong[] BuildEdgeDensityHash(Bitmap source, Rectangle rect)
+    {
+        var pixels = RenderLuma(source, rect, Size, Size);
+        var words = new ulong[4];
+        for (var y = 1; y < Size - 1; y++)
+        {
+            for (var x = 1; x < Size - 1; x++)
+            {
+                var idx = y * Size + x;
+                var left = pixels[idx - 1];
+                var right = pixels[idx + 1];
+                var up = pixels[idx - Size];
+                var down = pixels[idx + Size];
+                var gradient = Math.Abs(left - right) + Math.Abs(up - down);
+                if (gradient >= 36)
+                {
+                    words[idx / 64] |= 1UL << (idx % 64);
+                }
+            }
+        }
+
+        return words;
+    }
+
     private static ulong[] EmptyWordsForFeature(string featureName)
     {
+        if (string.Equals(featureName, FastOcrTemplateIndex.CanonicalFeature, StringComparison.OrdinalIgnoreCase))
+        {
+            return new ulong[16];
+        }
+
         if (string.Equals(featureName, FastOcrTemplateIndex.ExperimentalFeature, StringComparison.OrdinalIgnoreCase))
         {
             return new ulong[12];
@@ -790,6 +997,95 @@ public sealed class FastOcrImageFeature
         }
 
         return pixels;
+    }
+
+    private static Rectangle? TryCanonicalize(Bitmap source, Rectangle rect, out Rectangle canonicalRect, out bool succeeded, out bool fallback)
+    {
+        canonicalRect = rect;
+        succeeded = false;
+        fallback = false;
+
+        var insetX = Math.Max(1, (int)Math.Round(rect.Width * 0.08, MidpointRounding.AwayFromZero));
+        var insetYTop = Math.Max(1, (int)Math.Round(rect.Height * 0.18, MidpointRounding.AwayFromZero));
+        var insetYBottom = Math.Max(1, (int)Math.Round(rect.Height * 0.18, MidpointRounding.AwayFromZero));
+        var cropped = Rectangle.FromLTRB(rect.Left + insetX, rect.Top + insetYTop, rect.Right - insetX, rect.Bottom - insetYBottom);
+        if (cropped.Width < 4 || cropped.Height < 4)
+        {
+            fallback = true;
+            return null;
+        }
+
+        const int sampleWidth = 48;
+        const int sampleHeight = 24;
+        var luminance = RenderLuma(source, cropped, sampleWidth, sampleHeight);
+        var total = luminance.Length;
+        if (total <= 0)
+        {
+            fallback = true;
+            return null;
+        }
+
+        var darkPixels = luminance.Count(value => value < 210);
+        var darkRate = darkPixels / (double)total;
+        if (darkRate < 0.02)
+        {
+            fallback = true;
+            return null;
+        }
+
+        var threshold = Math.Min(220, Math.Max(90, luminance.Average() - 12));
+        var minX = sampleWidth;
+        var minY = sampleHeight;
+        var maxX = -1;
+        var maxY = -1;
+        for (var y = 0; y < sampleHeight; y++)
+        {
+            for (var x = 0; x < sampleWidth; x++)
+            {
+                var idx = y * sampleWidth + x;
+                var center = luminance[idx];
+                var left = x > 0 ? luminance[idx - 1] : center;
+                var right = x + 1 < sampleWidth ? luminance[idx + 1] : center;
+                var up = y > 0 ? luminance[idx - sampleWidth] : center;
+                var down = y + 1 < sampleHeight ? luminance[idx + sampleWidth] : center;
+                var gradient = Math.Abs(left - right) + Math.Abs(up - down);
+                if (center <= threshold || gradient >= 42)
+                {
+                    minX = Math.Min(minX, x);
+                    minY = Math.Min(minY, y);
+                    maxX = Math.Max(maxX, x);
+                    maxY = Math.Max(maxY, y);
+                }
+            }
+        }
+
+        if (maxX < minX || maxY < minY)
+        {
+            fallback = true;
+            return null;
+        }
+
+        var leftPx = cropped.Left + (int)Math.Floor(minX * cropped.Width / (double)sampleWidth);
+        var topPx = cropped.Top + (int)Math.Floor(minY * cropped.Height / (double)sampleHeight);
+        var rightPx = cropped.Left + (int)Math.Ceiling((maxX + 1) * cropped.Width / (double)sampleWidth);
+        var bottomPx = cropped.Top + (int)Math.Ceiling((maxY + 1) * cropped.Height / (double)sampleHeight);
+        var textBounds = Rectangle.FromLTRB(leftPx, topPx, rightPx, bottomPx);
+        var padX = Math.Max(1, (int)Math.Round(textBounds.Width * 0.12, MidpointRounding.AwayFromZero));
+        var padY = Math.Max(1, (int)Math.Round(textBounds.Height * 0.20, MidpointRounding.AwayFromZero));
+        canonicalRect = Rectangle.Intersect(cropped, Rectangle.FromLTRB(
+            textBounds.Left - padX,
+            textBounds.Top - padY,
+            textBounds.Right + padX,
+            textBounds.Bottom + padY));
+        if (canonicalRect.Width < 4 || canonicalRect.Height < 4)
+        {
+            fallback = true;
+            canonicalRect = cropped;
+            return null;
+        }
+
+        succeeded = true;
+        return canonicalRect;
     }
 
     private static ulong Parse(string word)

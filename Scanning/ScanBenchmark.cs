@@ -205,6 +205,7 @@ public static class ScanBenchmark
         var cellTimings = ParseCellTimings(lines);
         var scrollTimings = ParseScrollTimings(lines);
         var ocrRows = ReadCsv(Path.Combine(scanDirectory, "ocr_diagnostics.csv"));
+        var fastAssistRows = ReadCsv(Path.Combine(scanDirectory, "ocr_fast_assist.csv"));
         var resourceRows = ReadCsv(Path.Combine(scanDirectory, "resource.csv"));
         var ocrPerItemTotal = ReadOcrMillisecondsPerItem(ocrRows);
         var fastMatchMsPerItem = ReadColumnPerItem(ocrRows, "fast_match_ms");
@@ -240,11 +241,19 @@ public static class ScanBenchmark
             OcrIntraOpThreads = startSettings?.IntraOpThreads,
             MaxItemsSetting = ParseMaxItems(lines),
             ProfileId = visualProfile.ProfileId,
+            TrainingProfileId = visualProfile.TrainingProfileId,
+            ProfileFamilyId = visualProfile.ProfileFamilyId,
+            ProfileGeometryStatus = visualProfile.ProfileGeometryStatus,
             RequestedProfileId = visualProfile.RequestedProfileId,
             DetectedProfileId = visualProfile.DetectedProfileId,
             ProfileDetectedGeometry = visualProfile.GeometryKey,
             ProfileRoute = ParseProfileRoute(lines),
+            FastAcceptByProfileFamily = ParseFastAcceptByProfileFamily(fastAssistRows),
+            FastExactProfileAcceptCount = CountFastExactProfileAccepts(fastAssistRows),
             HealthFallbackCount = lines.Count(line => line.Contains("PROFILE_HEALTH_DEGRADED", StringComparison.Ordinal)),
+            CanonicalCropSucceededCount = CountBool(fastAssistRows, "canonical_crop_succeeded", expected: true),
+            CanonicalCropFallbackCount = CountBool(fastAssistRows, "canonical_crop_fallback", expected: true),
+            CanonicalCropDecisionCount = CountRowsWithColumn(fastAssistRows, "canonical_crop_fallback"),
             Traversal = traversal,
             ExportItemCount = exportStats.ItemCount,
             ExportDuplicateGroupCount = exportStats.DuplicateGroupCount,
@@ -254,6 +263,10 @@ public static class ScanBenchmark
             CellTimingCount = cellTimings.Count,
             CellTimingFallbackCount = cellTimings.Count(x => x.Fallback),
             CellTimingFallbackLogCount = lines.Count(line => line.Contains("Panel probes stayed unchanged", StringComparison.Ordinal)),
+            SelectionOnlyAcceptCount = lines.Count(line => line.Contains("accept=selection_changed_stable_full_roi", StringComparison.Ordinal)),
+            PostScrollSelectionOnlyBlockedCount = events.Count(x => x.Kind == "PANEL_SELECTION_ONLY_BLOCKED"
+                && x.Detail.Contains("post_scroll_panel_change_required=True", StringComparison.OrdinalIgnoreCase)),
+            WeakPanelChangeBlockedCount = events.Count(x => x.Kind == "PANEL_WEAK_CHANGE_BLOCKED"),
             PanelStablePanelCount = cellTimings.Count(x => string.Equals(x.StableSource, "panel", StringComparison.OrdinalIgnoreCase)),
             PanelStableTextCoreCount = cellTimings.Count(x => string.Equals(x.StableSource, "text-core", StringComparison.OrdinalIgnoreCase)),
             VisualRow2ClickCount = clickPositions.Count(x => x.VisualRow == 2),
@@ -340,6 +353,7 @@ public static class ScanBenchmark
             FastAcceptedPerItem = Stats.From(fastAcceptedPerItem),
             FastRejectedPerItem = Stats.From(fastRejectedPerItem),
             PpOcrRoiPerItem = Stats.From(ppOcrRoiPerItem),
+            FastOcrFeatureMs = Stats.From(ReadColumn(fastAssistRows, "feature_ms")),
             ScannerCpu = Stats.From(ReadColumn(resourceRows, "scanner_cpu_percent")),
             ResourceBacklog = Stats.From(ReadColumn(resourceRows, "ocr_backlog"))
         };
@@ -926,6 +940,41 @@ public static class ScanBenchmark
         return string.IsNullOrWhiteSpace(summary) ? "none" : summary;
     }
 
+    private static string ParseFastAcceptByProfileFamily(IReadOnlyList<Dictionary<string, string>> rows)
+    {
+        var groups = rows
+            .Where(row => row.TryGetValue("source", out var source)
+                && source.Equals("fast", StringComparison.OrdinalIgnoreCase))
+            .Select(row => row.TryGetValue("source_family_id", out var family) && !string.IsNullOrWhiteSpace(family)
+                ? family
+                : "unknown")
+            .GroupBy(family => family, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => $"{NormalizeMetricName(group.Key)}:{group.Count()}");
+        var summary = string.Join("+", groups);
+        return string.IsNullOrWhiteSpace(summary) ? "none" : summary;
+    }
+
+    private static int CountRowsWithColumn(IReadOnlyList<Dictionary<string, string>> rows, string column)
+    {
+        return rows.Count(row => row.ContainsKey(column));
+    }
+
+    private static int CountFastExactProfileAccepts(IReadOnlyList<Dictionary<string, string>> rows)
+    {
+        return rows.Count(row => row.TryGetValue("source", out var source)
+            && source.Equals("fast", StringComparison.OrdinalIgnoreCase)
+            && row.TryGetValue("reason", out var reason)
+            && reason.StartsWith("profile_exact:", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static int CountBool(IReadOnlyList<Dictionary<string, string>> rows, string column, bool expected)
+    {
+        return rows.Count(row => row.TryGetValue(column, out var value)
+            && bool.TryParse(value, out var parsed)
+            && parsed == expected);
+    }
+
     private static void WriteReport(string prefix, ScanReport report)
     {
         Write(prefix, "scan_dir", report.ScanDirectory);
@@ -946,11 +995,19 @@ public static class ScanBenchmark
         Write(prefix, "ocr_intra_op_threads", report.OcrIntraOpThreads);
         Write(prefix, "max_items_setting", report.MaxItemsSetting);
         Write(prefix, "profile_id", report.ProfileId);
+        Write(prefix, "training_profile_id", report.TrainingProfileId);
+        Write(prefix, "profile_family_id", report.ProfileFamilyId);
+        Write(prefix, "profile_geometry_status", report.ProfileGeometryStatus);
         Write(prefix, "profile_requested_id", report.RequestedProfileId);
         Write(prefix, "profile_detected_id", report.DetectedProfileId);
         Write(prefix, "profile_detected_geometry", report.ProfileDetectedGeometry);
         Write(prefix, "profile_route", report.ProfileRoute);
+        Write(prefix, "fast_accept_by_profile_family", report.FastAcceptByProfileFamily);
+        Write(prefix, "fast_exact_profile_accept_count", report.FastExactProfileAcceptCount);
         Write(prefix, "health_fallback_count", report.HealthFallbackCount);
+        Write(prefix, "canonical_crop_succeeded_count", report.CanonicalCropSucceededCount);
+        Write(prefix, "canonical_crop_fallback_count", report.CanonicalCropFallbackCount);
+        Write(prefix, "canonical_crop_fallback_rate", PercentValue(report.CanonicalCropFallbackCount, report.CanonicalCropDecisionCount));
         Write(prefix, "export_items", report.ExportItemCount);
         Write(prefix, "export_matches_completed", ExportMatchesCompleted(report));
         Write(prefix, "export_duplicate_groups", report.ExportDuplicateGroupCount);
@@ -964,6 +1021,9 @@ public static class ScanBenchmark
         Write(prefix, "cell_timing_count", report.CellTimingCount);
         Write(prefix, "fallback_count", report.EffectiveFallbackCount);
         Write(prefix, "fallback_rate_percent", Percent(report.EffectiveFallbackCount, Math.Max(report.CellTimingCount, report.ClickAll.Count)));
+        Write(prefix, "selection_only_accept_count", report.SelectionOnlyAcceptCount);
+        Write(prefix, "post_scroll_selection_only_blocked_count", report.PostScrollSelectionOnlyBlockedCount);
+        Write(prefix, "weak_panel_change_blocked_count", report.WeakPanelChangeBlockedCount);
         Write(prefix, "quick_accept_count", report.QuickAcceptCount);
         Write(prefix, "quick_reject_count", report.QuickRejectCount);
         Write(prefix, "quick_accept_rate_percent", Percent(report.QuickAcceptCount, Math.Max(1, report.QuickAcceptCount + report.QuickRejectCount)));
@@ -1056,6 +1116,7 @@ public static class ScanBenchmark
         WriteStats(prefix, "fast_accepted_per_item", report.FastAcceptedPerItem);
         WriteStats(prefix, "fast_rejected_per_item", report.FastRejectedPerItem);
         WriteStats(prefix, "ppocr_roi_per_item", report.PpOcrRoiPerItem);
+        WriteStats(prefix, "v6_feature_ms", report.FastOcrFeatureMs);
         WriteStats(prefix, "scanner_cpu_percent", report.ScannerCpu);
         WriteStats(prefix, "resource_ocr_backlog", report.ResourceBacklog);
         foreach (var (reason, count) in report.AcceptGateReasons.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
@@ -1371,11 +1432,19 @@ public static class ScanBenchmark
         public int? OcrIntraOpThreads { get; set; }
         public int? MaxItemsSetting { get; set; }
         public string ProfileId { get; set; } = "";
+        public string TrainingProfileId { get; set; } = "";
+        public string ProfileFamilyId { get; set; } = "";
+        public string ProfileGeometryStatus { get; set; } = "";
         public string RequestedProfileId { get; set; } = "";
         public string DetectedProfileId { get; set; } = "";
         public string ProfileDetectedGeometry { get; set; } = "";
         public string ProfileRoute { get; set; } = "";
+        public string FastAcceptByProfileFamily { get; set; } = "";
+        public int FastExactProfileAcceptCount { get; set; }
         public int HealthFallbackCount { get; set; }
+        public int CanonicalCropSucceededCount { get; set; }
+        public int CanonicalCropFallbackCount { get; set; }
+        public int CanonicalCropDecisionCount { get; set; }
         public int? ExportItemCount { get; set; }
         public int ExportDuplicateGroupCount { get; set; }
         public int ExportDuplicateItemCount { get; set; }
@@ -1385,6 +1454,9 @@ public static class ScanBenchmark
         public int CellTimingFallbackCount { get; set; }
         public int CellTimingFallbackLogCount { get; set; }
         public int EffectiveFallbackCount => CellTimingCount > 0 ? CellTimingFallbackCount : CellTimingFallbackLogCount;
+        public int SelectionOnlyAcceptCount { get; set; }
+        public int PostScrollSelectionOnlyBlockedCount { get; set; }
+        public int WeakPanelChangeBlockedCount { get; set; }
         public int QuickAcceptCount { get; set; }
         public int QuickRejectCount { get; set; }
         public int PanelStablePanelCount { get; set; }
@@ -1476,6 +1548,7 @@ public static class ScanBenchmark
         public Stats FastAcceptedPerItem { get; set; }
         public Stats FastRejectedPerItem { get; set; }
         public Stats PpOcrRoiPerItem { get; set; }
+        public Stats FastOcrFeatureMs { get; set; }
         public Stats ScannerCpu { get; set; }
         public Stats ResourceBacklog { get; set; }
         public Dictionary<string, int> AcceptGateReasons { get; set; } = new(StringComparer.OrdinalIgnoreCase);

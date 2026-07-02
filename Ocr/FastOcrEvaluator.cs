@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using ZZZScannerNext.Scanning;
 
 namespace ZZZScannerNext.Ocr;
 
@@ -101,26 +102,39 @@ public static class FastOcrEvaluator
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Count();
         var hasCrossValidation = rowsByCsv.Length >= 2;
-        var evaluations = profileCount >= 2
-            ? BuildCrossProfileEvaluations(rowsByCsv, feature)
-            : hasCrossValidation
-                ? BuildCrossValidationEvaluations(rowsByCsv, feature)
-                : EvaluateRows("calibrate_self", allRows, index);
+        var evaluations = hasCrossValidation
+            ? BuildCrossValidationEvaluations(rowsByCsv, feature, ProfileRoutingMode.Family)
+            : EvaluateRows("calibrate_self", allRows, index);
+        var crossProfileEvaluations = profileCount >= 2
+            ? BuildCrossProfileEvaluations(rowsByCsv, feature, ProfileRoutingMode.Family)
+            : Array.Empty<FastOcrEvaluationRow>();
+        var familyCalibrationEvaluations = evaluations
+            .Concat(crossProfileEvaluations.Where(ShouldUseCrossProfileEvaluationForFamilyCalibration))
+            .ToArray();
         var calibration = CalibratePolicies(index, evaluations, hasCrossValidation);
         var profileCalibration = CalibrateProfilePolicies(index, evaluations, hasCrossValidation);
+        var familyCalibration = CalibrateFamilyPolicies(index, familyCalibrationEvaluations, hasCrossValidation);
 
         var fullOutputFile = Path.GetFullPath(outputFile);
         index.Save(fullOutputFile);
 
         var outputDirectory = Path.GetDirectoryName(fullOutputFile) ?? ".";
         var evalFile = Path.Combine(outputDirectory, "ocr_fast_eval.csv");
+        var crossProfileEvalFile = Path.Combine(outputDirectory, "ocr_fast_cross_profile_eval.csv");
         var confusionFile = Path.Combine(outputDirectory, "ocr_fast_confusion.csv");
         var calibrationFile = Path.Combine(outputDirectory, "ocr_fast_calibration.csv");
         var profileCalibrationFile = Path.Combine(outputDirectory, "ocr_fast_profile_calibration.csv");
+        var familyCalibrationFile = Path.Combine(outputDirectory, "ocr_fast_family_calibration.csv");
         WriteReport(evalFile, evaluations);
+        if (crossProfileEvaluations.Count > 0)
+        {
+            WriteReport(crossProfileEvalFile, crossProfileEvaluations);
+        }
+
         WriteConfusionReport(confusionFile, evaluations);
         WriteCalibrationReport(calibrationFile, calibration);
         WriteProfileCalibrationReport(profileCalibrationFile, profileCalibration);
+        WriteFamilyCalibrationReport(familyCalibrationFile, familyCalibration);
         WriteSummary(evaluations);
         WriteCalibrationSummary(calibration);
         foreach (var row in profileCalibration)
@@ -129,17 +143,30 @@ public static class FastOcrEvaluator
             Console.WriteLine($"profile.{SanitizeKey(row.VisualProfileId)}.field.{SanitizeKey(row.FieldKey)}.false_accepts={row.FalseAccepts}");
             Console.WriteLine($"profile.{SanitizeKey(row.VisualProfileId)}.field.{SanitizeKey(row.FieldKey)}.accept_rate={row.AcceptRate.ToString("F6", CultureInfo.InvariantCulture)}");
         }
+        foreach (var row in familyCalibration)
+        {
+            Console.WriteLine($"family.{SanitizeKey(row.ProfileFamilyId)}.field.{SanitizeKey(row.FieldKey)}.assist_enabled={row.AssistEnabled.ToString(CultureInfo.InvariantCulture).ToLowerInvariant()}");
+            Console.WriteLine($"family.{SanitizeKey(row.ProfileFamilyId)}.field.{SanitizeKey(row.FieldKey)}.false_accepts={row.FalseAccepts}");
+            Console.WriteLine($"family.{SanitizeKey(row.ProfileFamilyId)}.field.{SanitizeKey(row.FieldKey)}.accept_rate={row.AcceptRate.ToString("F6", CultureInfo.InvariantCulture)}");
+        }
 
         Console.WriteLine($"fast_calibrate_visual.index_file={fullOutputFile}");
         Console.WriteLine($"fast_calibrate_visual.eval_file={evalFile}");
+        Console.WriteLine($"fast_calibrate_visual.cross_profile_eval_file={(crossProfileEvaluations.Count > 0 ? crossProfileEvalFile : "")}");
         Console.WriteLine($"fast_calibrate_visual.confusion_file={confusionFile}");
         Console.WriteLine($"fast_calibrate_visual.calibration_file={calibrationFile}");
         Console.WriteLine($"fast_calibrate_visual.profile_calibration_file={profileCalibrationFile}");
+        Console.WriteLine($"fast_calibrate_visual.family_calibration_file={familyCalibrationFile}");
         Console.WriteLine($"fast_calibrate_visual.shadow_runs={rowsByCsv.Length}");
         Console.WriteLine($"fast_calibrate_visual.visual_profiles={profileCount}");
         Console.WriteLine($"fast_calibrate_visual.feature={feature}");
         Console.WriteLine($"fast_calibrate_visual.cross_validation={hasCrossValidation.ToString(CultureInfo.InvariantCulture).ToLowerInvariant()}");
         return 0;
+    }
+
+    private static bool ShouldUseCrossProfileEvaluationForFamilyCalibration(FastOcrEvaluationRow row)
+    {
+        return row.Reason.Contains("profile_family:", StringComparison.OrdinalIgnoreCase);
     }
 
     public static int RunCrossValidate(string shadowParent)
@@ -191,7 +218,8 @@ public static class FastOcrEvaluator
         var features = new[]
         {
             FastOcrTemplateIndex.CurrentFeature,
-            FastOcrTemplateIndex.ExperimentalFeature
+            FastOcrTemplateIndex.ExperimentalFeature,
+            FastOcrTemplateIndex.CanonicalFeature
         };
         var reportRows = new List<FastOcrFeatureEvalRow>();
         foreach (var feature in features)
@@ -263,12 +291,20 @@ public static class FastOcrEvaluator
             return FastOcrTemplateIndex.ExperimentalFeature;
         }
 
+        if (string.Equals(featureName, "v6", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(featureName, "canonical", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(featureName, FastOcrTemplateIndex.CanonicalFeature, StringComparison.OrdinalIgnoreCase))
+        {
+            return FastOcrTemplateIndex.CanonicalFeature;
+        }
+
         throw new ArgumentException($"Unsupported fast OCR feature: {featureName}");
     }
 
     private static IReadOnlyList<FastOcrEvaluationRow> BuildCrossValidationEvaluations(
         IReadOnlyList<(string file, IReadOnlyList<OcrShadowDatasetRow> rows)> rowsByCsv,
-        string featureName = FastOcrTemplateIndex.CurrentFeature)
+        string featureName = FastOcrTemplateIndex.CurrentFeature,
+        ProfileRoutingMode routingMode = ProfileRoutingMode.Family)
     {
         var allEvaluations = new List<FastOcrEvaluationRow>();
         foreach (var test in rowsByCsv)
@@ -279,7 +315,7 @@ public static class FastOcrEvaluator
                 .ToArray();
             var index = FastOcrTemplateIndex.Build(trainRows, Console.Error.WriteLine, featureName);
             var fold = Path.GetFileName(Path.GetDirectoryName(test.file) ?? test.file);
-            allEvaluations.AddRange(EvaluateRows(fold, test.rows, index));
+            allEvaluations.AddRange(EvaluateRows(fold, test.rows, index, routingMode));
         }
 
         return allEvaluations;
@@ -287,7 +323,8 @@ public static class FastOcrEvaluator
 
     private static IReadOnlyList<FastOcrEvaluationRow> BuildCrossProfileEvaluations(
         IReadOnlyList<(string file, IReadOnlyList<OcrShadowDatasetRow> rows)> rowsByCsv,
-        string featureName = FastOcrTemplateIndex.CurrentFeature)
+        string featureName = FastOcrTemplateIndex.CurrentFeature,
+        ProfileRoutingMode routingMode = ProfileRoutingMode.Family)
     {
         var allRows = rowsByCsv.SelectMany(item => item.rows).ToArray();
         var profiles = allRows
@@ -305,7 +342,7 @@ public static class FastOcrEvaluator
                 .Where(row => FastOcrTemplateIndex.NormalizeProfileId(row.VisualProfileId).Equals(profile, StringComparison.OrdinalIgnoreCase))
                 .ToArray();
             var index = FastOcrTemplateIndex.Build(trainRows, Console.Error.WriteLine, featureName);
-            allEvaluations.AddRange(EvaluateRows($"profile_{profile}", testRows, index));
+            allEvaluations.AddRange(EvaluateRows($"profile_{profile}", testRows, index, routingMode));
         }
 
         return allEvaluations;
@@ -314,7 +351,8 @@ public static class FastOcrEvaluator
     private static IReadOnlyList<FastOcrEvaluationRow> EvaluateRows(
         string fold,
         IReadOnlyList<OcrShadowDatasetRow> rows,
-        FastOcrTemplateIndex index)
+        FastOcrTemplateIndex index,
+        ProfileRoutingMode routingMode = ProfileRoutingMode.Family)
     {
         var evaluations = new List<FastOcrEvaluationRow>();
         foreach (var row in rows)
@@ -333,7 +371,7 @@ public static class FastOcrEvaluator
             else
             {
                 using var bitmap = new Bitmap(row.ResolvedImageFile);
-                match = index.Match(row.FieldKey, bitmap, new OpenCvSharp.Rect(0, 0, bitmap.Width, bitmap.Height), row.VisualProfileId);
+                match = index.Match(row.FieldKey, bitmap, new OpenCvSharp.Rect(0, 0, bitmap.Width, bitmap.Height), row.VisualProfileId, routingMode);
             }
             sw.Stop();
 
@@ -345,6 +383,7 @@ public static class FastOcrEvaluator
                 row.ItemIndex,
                 row.RoiIndex,
                 FastOcrTemplateIndex.NormalizeProfileId(row.VisualProfileId),
+                FastOcrTemplateIndex.ProfileFamilyId(row.VisualProfileId),
                 row.FieldKey,
                 row.CleanLabel,
                 match.Label,
@@ -357,6 +396,10 @@ public static class FastOcrEvaluator
                 matchesClean,
                 accepted && !matchesClean,
                 sw.Elapsed.TotalMilliseconds,
+                match.SourceFamilyId,
+                match.CanonicalCropSucceeded,
+                match.CanonicalCropFallback,
+                match.FeatureElapsedMs,
                 match.Reason));
         }
 
@@ -367,7 +410,7 @@ public static class FastOcrEvaluator
     {
         Directory.CreateDirectory(Path.GetDirectoryName(outputFile) ?? ".");
         using var writer = new StreamWriter(outputFile, append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-        writer.WriteLine("fold,csv_file,item_index,roi_index,visual_profile_id,field_key,clean_label,fast_label,score,top2_label,top2_score,margin,assist_enabled,accepted,matches_clean,false_accept,elapsed_ms,reason");
+        writer.WriteLine("fold,csv_file,item_index,roi_index,visual_profile_id,profile_family_id,field_key,clean_label,fast_label,score,top2_label,top2_score,margin,assist_enabled,accepted,matches_clean,false_accept,elapsed_ms,source_family_id,canonical_crop_succeeded,canonical_crop_fallback,feature_ms,reason");
         foreach (var row in rows)
         {
             writer.WriteLine(string.Join(",", [
@@ -376,6 +419,7 @@ public static class FastOcrEvaluator
                 row.ItemIndex.ToString(CultureInfo.InvariantCulture),
                 row.RoiIndex.ToString(CultureInfo.InvariantCulture),
                 EscapeCsv(row.VisualProfileId),
+                EscapeCsv(row.ProfileFamilyId),
                 EscapeCsv(row.FieldKey),
                 EscapeCsv(row.CleanLabel),
                 EscapeCsv(row.FastLabel),
@@ -388,6 +432,10 @@ public static class FastOcrEvaluator
                 row.MatchesClean.ToString(CultureInfo.InvariantCulture),
                 row.FalseAccept.ToString(CultureInfo.InvariantCulture),
                 row.ElapsedMs.ToString("F3", CultureInfo.InvariantCulture),
+                EscapeCsv(row.SourceFamilyId),
+                row.CanonicalCropSucceeded.ToString(CultureInfo.InvariantCulture),
+                row.CanonicalCropFallback.ToString(CultureInfo.InvariantCulture),
+                row.FeatureMs.ToString("F3", CultureInfo.InvariantCulture),
                 EscapeCsv(row.Reason)
             ]));
         }
@@ -551,6 +599,73 @@ public static class FastOcrEvaluator
         return rows;
     }
 
+    private static IReadOnlyList<FastOcrFamilyCalibrationRow> CalibrateFamilyPolicies(
+        FastOcrTemplateIndex index,
+        IReadOnlyList<FastOcrEvaluationRow> evaluations,
+        bool hasCrossValidation)
+    {
+        var rows = new List<FastOcrFamilyCalibrationRow>();
+        foreach (var familyGroup in evaluations
+            .GroupBy(row => string.IsNullOrWhiteSpace(row.ProfileFamilyId) ? "unknown" : row.ProfileFamilyId, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var field in FastOcrTemplateIndex.SupportedFields.OrderBy(field => field, StringComparer.OrdinalIgnoreCase))
+            {
+                var values = familyGroup
+                    .Where(row => row.FieldKey.Equals(field, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                var selected = SelectThreshold(values);
+                var minAcceptRate = field.Equals("name", StringComparison.OrdinalIgnoreCase)
+                    ? NameAssistMinAcceptRate
+                    : DefaultAssistMinAcceptRate;
+                var eligibleField = FastOcrTemplateIndex.IsDefaultAssistField(field)
+                    || field.Equals("name", StringComparison.OrdinalIgnoreCase);
+                var enabled = hasCrossValidation
+                    && eligibleField
+                    && selected.FalseAccepts == 0
+                    && selected.Accepted > 0
+                    && selected.AcceptRate >= minAcceptRate;
+                var reason = enabled
+                    ? ""
+                    : CalibrationDisableReason(hasCrossValidation, eligibleField, selected, minAcceptRate);
+
+                var familyPolicy = new FastOcrFieldPolicy
+                {
+                    AssistEnabled = enabled,
+                    MinScore = selected.MinScore,
+                    MinMargin = selected.MinMargin,
+                    TemplateCount = index.Templates.Count(template =>
+                        template.FieldKey.Equals(field, StringComparison.OrdinalIgnoreCase)
+                        && FastOcrTemplateIndex.ProfileFamilyId(template.VisualProfileId).Equals(familyGroup.Key, StringComparison.OrdinalIgnoreCase)),
+                    LabelCount = index.Templates
+                        .Where(template => template.FieldKey.Equals(field, StringComparison.OrdinalIgnoreCase)
+                            && FastOcrTemplateIndex.ProfileFamilyId(template.VisualProfileId).Equals(familyGroup.Key, StringComparison.OrdinalIgnoreCase))
+                        .Select(template => template.Label)
+                        .Where(label => !string.IsNullOrWhiteSpace(label))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .Count()
+                };
+
+                index.FamilyFieldPolicies[FastOcrTemplateIndex.ProfilePolicyKey(familyGroup.Key, field)] = familyPolicy;
+                rows.Add(new FastOcrFamilyCalibrationRow(
+                    familyGroup.Key,
+                    field,
+                    values.Length,
+                    selected.Accepted,
+                    selected.FalseAccepts,
+                    selected.AcceptRate,
+                    selected.MatchRate,
+                    selected.MinScore,
+                    selected.MinMargin,
+                    enabled,
+                    minAcceptRate,
+                    reason));
+            }
+        }
+
+        return rows;
+    }
+
     private static string CalibrationDisableReason(
         bool hasCrossValidation,
         bool eligibleField,
@@ -673,6 +788,30 @@ public static class FastOcrEvaluator
         {
             writer.WriteLine(string.Join(",", [
                 EscapeCsv(row.VisualProfileId),
+                EscapeCsv(row.FieldKey),
+                row.Rows.ToString(CultureInfo.InvariantCulture),
+                row.Accepted.ToString(CultureInfo.InvariantCulture),
+                row.FalseAccepts.ToString(CultureInfo.InvariantCulture),
+                row.AcceptRate.ToString("F6", CultureInfo.InvariantCulture),
+                row.MatchRate.ToString("F6", CultureInfo.InvariantCulture),
+                row.MinScore.ToString("F6", CultureInfo.InvariantCulture),
+                row.MinMargin.ToString("F6", CultureInfo.InvariantCulture),
+                row.AssistEnabled.ToString(CultureInfo.InvariantCulture),
+                row.MinAcceptRate.ToString("F6", CultureInfo.InvariantCulture),
+                EscapeCsv(row.Reason)
+            ]));
+        }
+    }
+
+    private static void WriteFamilyCalibrationReport(string outputFile, IReadOnlyList<FastOcrFamilyCalibrationRow> rows)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(outputFile) ?? ".");
+        using var writer = new StreamWriter(outputFile, append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        writer.WriteLine("profile_family_id,field_key,rows,accepted,false_accepts,accept_rate,match_rate,min_score,min_margin,assist_enabled,min_accept_rate,reason");
+        foreach (var row in rows)
+        {
+            writer.WriteLine(string.Join(",", [
+                EscapeCsv(row.ProfileFamilyId),
                 EscapeCsv(row.FieldKey),
                 row.Rows.ToString(CultureInfo.InvariantCulture),
                 row.Accepted.ToString(CultureInfo.InvariantCulture),
@@ -818,6 +957,7 @@ public sealed record FastOcrEvaluationRow(
     int ItemIndex,
     int RoiIndex,
     string VisualProfileId,
+    string ProfileFamilyId,
     string FieldKey,
     string CleanLabel,
     string FastLabel,
@@ -830,10 +970,28 @@ public sealed record FastOcrEvaluationRow(
     bool MatchesClean,
     bool FalseAccept,
     double ElapsedMs,
+    string SourceFamilyId,
+    bool CanonicalCropSucceeded,
+    bool CanonicalCropFallback,
+    double FeatureMs,
     string Reason);
 
 public sealed record FastOcrProfileCalibrationRow(
     string VisualProfileId,
+    string FieldKey,
+    int Rows,
+    int Accepted,
+    int FalseAccepts,
+    double AcceptRate,
+    double MatchRate,
+    double MinScore,
+    double MinMargin,
+    bool AssistEnabled,
+    double MinAcceptRate,
+    string Reason);
+
+public sealed record FastOcrFamilyCalibrationRow(
+    string ProfileFamilyId,
     string FieldKey,
     int Rows,
     int Accepted,

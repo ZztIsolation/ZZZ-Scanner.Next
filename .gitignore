@@ -39,8 +39,9 @@ TestResults/
 tmp-fast-*.json
 
 # Experimental Fast OCR templates are generated from local visual profiles.
-# Force-add a validated release template explicitly when it is ready.
+# Keep only the validated release template in source control.
 Data/ocr_fast_templates*.json
+!Data/ocr_fast_templates.json
 
 # Large OCR model is bundled in release archives.
 Resources/models/*.onnx

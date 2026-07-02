@@ -9,6 +9,9 @@ public sealed class RuntimeVisualProfile
     public string SchemaVersion { get; set; } = "2";
     public string CreatedAt { get; set; } = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture);
     public string ProfileId { get; set; } = "";
+    public string TrainingProfileId { get; set; } = "";
+    public string ProfileFamilyId { get; set; } = "";
+    public string ProfileGeometryStatus { get; set; } = "";
     public string RequestedProfileId { get; set; } = "auto";
     public string DetectedProfileId { get; set; } = "";
     public string GeometryKey { get; set; } = "";
@@ -42,11 +45,13 @@ public sealed class RuntimeVisualProfile
         var height = window.ClientScreenRect.Height;
         var geometryKey = $"{clientKind}-{width}x{height}-dpi{window.Dpi}-{normalizedQuality}";
         var detectedProfileId = $"{clientKind}-{width}x{height}-{normalizedQuality}";
+        var profileId = ResolveEffectiveProfileId(requestedId, detectedProfileId, clientKind, width, height, normalizedQuality, out var geometryStatus);
         return new RuntimeVisualProfile
         {
-            ProfileId = requestedId.Length == 0 || string.Equals(requestedId, "auto", StringComparison.OrdinalIgnoreCase)
-                ? detectedProfileId
-                : requestedId,
+            ProfileId = profileId,
+            TrainingProfileId = profileId,
+            ProfileFamilyId = BuildProfileFamilyId(profileId, clientKind, width, height, normalizedQuality),
+            ProfileGeometryStatus = geometryStatus,
             RequestedProfileId = string.IsNullOrWhiteSpace(requestedProfileId) ? "auto" : NormalizeToken(requestedProfileId),
             DetectedProfileId = detectedProfileId,
             GeometryKey = geometryKey,
@@ -72,8 +77,10 @@ public sealed class RuntimeVisualProfile
         {
             try
             {
-                return JsonSerializer.Deserialize<RuntimeVisualProfile>(File.ReadAllText(file), JsonDefaults.Read)
+                var profile = JsonSerializer.Deserialize<RuntimeVisualProfile>(File.ReadAllText(file), JsonDefaults.Read)
                     ?? Legacy(scanDirectory);
+                profile.NormalizeForUse();
+                return profile;
             }
             catch
             {
@@ -100,6 +107,9 @@ public sealed class RuntimeVisualProfile
                 ? File.GetLastWriteTime(Path.Combine(scanDirectory, "ocr_shadow.csv")).ToString("O", CultureInfo.InvariantCulture)
                 : DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture),
             ProfileId = "legacy",
+            TrainingProfileId = "legacy",
+            ProfileFamilyId = "legacy",
+            ProfileGeometryStatus = "legacy",
             RequestedProfileId = "legacy",
             DetectedProfileId = "legacy",
             GeometryKey = "legacy",
@@ -147,5 +157,128 @@ public sealed class RuntimeVisualProfile
         }
 
         return normalized.Trim('-');
+    }
+
+    private void NormalizeForUse()
+    {
+        var quality = NormalizeToken(string.IsNullOrWhiteSpace(QualityLabel) ? RequestedQualityLabel : QualityLabel);
+        var detected = string.IsNullOrWhiteSpace(DetectedProfileId)
+            ? BuildDetectedProfileId(ClientKind, ClientWidth, ClientHeight, quality)
+            : NormalizeToken(DetectedProfileId);
+        var requested = string.IsNullOrWhiteSpace(RequestedProfileId) || RequestedProfileId.Equals("legacy", StringComparison.OrdinalIgnoreCase)
+            ? ProfileId
+            : RequestedProfileId;
+        var effective = ResolveEffectiveProfileId(
+            NormalizeToken(requested),
+            detected,
+            ClientKind,
+            ClientWidth,
+            ClientHeight,
+            quality,
+            out var status);
+
+        ProfileId = effective;
+        TrainingProfileId = effective;
+        ProfileGeometryStatus = status;
+        ProfileFamilyId = BuildProfileFamilyId(effective, ClientKind, ClientWidth, ClientHeight, quality);
+    }
+
+    private static string ResolveEffectiveProfileId(
+        string requestedId,
+        string detectedProfileId,
+        string clientKind,
+        int width,
+        int height,
+        string qualityLabel,
+        out string status)
+    {
+        var normalizedRequested = NormalizeToken(string.IsNullOrWhiteSpace(requestedId) ? "auto" : requestedId);
+        var normalizedDetected = NormalizeToken(detectedProfileId);
+        if (string.IsNullOrWhiteSpace(normalizedDetected))
+        {
+            normalizedDetected = BuildDetectedProfileId(clientKind, width, height, qualityLabel);
+        }
+
+        if (string.IsNullOrWhiteSpace(normalizedRequested)
+            || normalizedRequested.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            status = "auto_detected";
+            return normalizedDetected;
+        }
+
+        if (normalizedRequested.Equals(normalizedDetected, StringComparison.OrdinalIgnoreCase)
+            || RequestedProfileMatchesDetectedGeometry(normalizedRequested, clientKind, width, height, qualityLabel))
+        {
+            status = "requested_matches_detected";
+            return normalizedRequested;
+        }
+
+        status = $"requested_mismatch_detected_fallback:{normalizedRequested}->{normalizedDetected}";
+        return normalizedDetected;
+    }
+
+    private static bool RequestedProfileMatchesDetectedGeometry(string requestedId, string clientKind, int width, int height, string qualityLabel)
+    {
+        var parsed = TryParseProfileId(requestedId);
+        if (string.IsNullOrWhiteSpace(parsed.client) || parsed.width <= 0 || parsed.height <= 0)
+        {
+            return false;
+        }
+
+        return parsed.client.Equals(clientKind, StringComparison.OrdinalIgnoreCase)
+            && parsed.width == width
+            && parsed.height == height
+            && (string.IsNullOrWhiteSpace(parsed.quality)
+                || parsed.quality.Equals(qualityLabel, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string BuildDetectedProfileId(string clientKind, int width, int height, string qualityLabel)
+    {
+        if (string.IsNullOrWhiteSpace(clientKind) || width <= 0 || height <= 0)
+        {
+            return "legacy";
+        }
+
+        return NormalizeToken($"{clientKind}-{width}x{height}-{qualityLabel}");
+    }
+
+    private static string BuildProfileFamilyId(string profileId, string clientKind, int width, int height, string qualityLabel)
+    {
+        var parsed = TryParseProfileId(profileId);
+        var effectiveClient = !string.IsNullOrWhiteSpace(parsed.client) ? parsed.client : clientKind;
+        var effectiveWidth = parsed.width > 0 ? parsed.width : width;
+        var effectiveHeight = parsed.height > 0 ? parsed.height : height;
+        var effectiveQuality = !string.IsNullOrWhiteSpace(parsed.quality) ? parsed.quality : qualityLabel;
+        var aspectBucket = effectiveWidth <= 0 || effectiveHeight <= 0
+            ? "unknown"
+            : NormalizeToken(Math.Round(effectiveWidth / (double)effectiveHeight, 2).ToString("F2", CultureInfo.InvariantCulture));
+        return NormalizeToken($"{effectiveClient}-{aspectBucket}-dpi-{effectiveQuality}");
+    }
+
+    private static (string client, int width, int height, string quality) TryParseProfileId(string profileId)
+    {
+        var parts = profileId.Split('-', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3)
+        {
+            return ("", 0, 0, "");
+        }
+
+        for (var i = 1; i < parts.Length; i++)
+        {
+            var sizeParts = parts[i].Split('x', StringSplitOptions.RemoveEmptyEntries);
+            if (sizeParts.Length != 2
+                || !int.TryParse(sizeParts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var width)
+                || !int.TryParse(sizeParts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var height))
+            {
+                continue;
+            }
+
+            var quality = i + 1 < parts.Length
+                ? string.Join("-", parts.Skip(i + 1))
+                : "current";
+            return (parts[0], width, height, quality);
+        }
+
+        return ("", 0, 0, "");
     }
 }

@@ -17,7 +17,9 @@ namespace ZZZScannerNext.Scanning;
 public sealed class ScanController
 {
     private const int PanelChangeTolerance = 8;
+    private const int PanelStrongChangeTolerance = PanelChangeTolerance * 2;
     private const int PanelStableTolerance = 4;
+    private const double MinReliablePanelChangeMs = 25.0;
     private const int ListMovementTolerance = 6;
     private const int ListStableTolerance = 4;
     private const int RowShiftMatchTolerance = 36;
@@ -195,7 +197,7 @@ public sealed class ScanController
                 window);
             visualProfile.ProfileRoutingDecision = options.ProfileRouting.ToString().ToLowerInvariant();
             visualProfile.Save(outputDir);
-            scanLog.Write($"VISUAL_PROFILE_SELECTED id={visualProfile.ProfileId}, requested_label={visualProfile.RequestedProfileId}, detected_profile={visualProfile.DetectedProfileId}, detected_geometry={visualProfile.GeometryKey}, clientKind={visualProfile.ClientKind}, quality={visualProfile.QualityLabel}, size={visualProfile.ClientWidth}x{visualProfile.ClientHeight}, dpi={visualProfile.Dpi}, captureRequested={visualProfile.CaptureModeRequested}, captureActive={visualProfile.CaptureModeActive}, frameBackend={visualProfile.CaptureFrameBackend}, profileRouting={options.ProfileRouting}");
+            scanLog.Write($"VISUAL_PROFILE_SELECTED id={visualProfile.ProfileId}, trainingProfile={visualProfile.TrainingProfileId}, profileFamily={visualProfile.ProfileFamilyId}, geometryStatus={visualProfile.ProfileGeometryStatus}, requested_label={visualProfile.RequestedProfileId}, detected_profile={visualProfile.DetectedProfileId}, detected_geometry={visualProfile.GeometryKey}, clientKind={visualProfile.ClientKind}, quality={visualProfile.QualityLabel}, size={visualProfile.ClientWidth}x{visualProfile.ClientHeight}, dpi={visualProfile.Dpi}, captureRequested={visualProfile.CaptureModeRequested}, captureActive={visualProfile.CaptureModeActive}, frameBackend={visualProfile.CaptureFrameBackend}, profileRouting={options.ProfileRouting}");
             if (!visualProfile.ProfileId.Equals(visualProfile.DetectedProfileId, StringComparison.OrdinalIgnoreCase))
             {
                 scanLog.Write($"VISUAL_PROFILE_LABEL_GEOMETRY_MISMATCH requested_label={visualProfile.ProfileId}, detected_profile={visualProfile.DetectedProfileId}, detected_geometry={visualProfile.GeometryKey}");
@@ -2541,21 +2543,24 @@ public sealed class ScanController
 
     private static bool HasProbeChange(IReadOnlyList<ImageSignature> previousSignatures, IReadOnlyList<ImageSignature> currentSignatures, int tolerance)
     {
+        return ProbeChangeDistance(previousSignatures, currentSignatures) > tolerance;
+    }
+
+    private static int ProbeChangeDistance(IReadOnlyList<ImageSignature> previousSignatures, IReadOnlyList<ImageSignature> currentSignatures)
+    {
         var count = Math.Min(previousSignatures.Count, currentSignatures.Count);
         if (count == 0 || previousSignatures.Count != currentSignatures.Count)
         {
-            return true;
+            return int.MaxValue;
         }
 
+        var maxDistance = 0;
         for (var i = 0; i < count; i++)
         {
-            if (SignatureDistance(previousSignatures[i], currentSignatures[i]) > tolerance)
-            {
-                return true;
-            }
+            maxDistance = Math.Max(maxDistance, SignatureDistance(previousSignatures[i], currentSignatures[i]));
         }
 
-        return false;
+        return maxDistance;
     }
 
     private static ImageSignature CreateSignature(Bitmap image, Rectangle rect)
@@ -2684,7 +2689,8 @@ public sealed class ScanController
         {
             try
             {
-                return await CaptureStablePanelAsync(window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect, activePreviousPanelSignatures, activeSelectionProbeRect, activeBeforeSelectionSignature, runtimeState, scanLog, token, postScrollFirstCell, sceneAdaptivePanelFloorEligible && attempt == 1);
+                var allowSelectionOnlyFallback = !postScrollFirstCell && attempt == 1;
+                return await CaptureStablePanelAsync(window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect, activePreviousPanelSignatures, activeSelectionProbeRect, activeBeforeSelectionSignature, runtimeState, scanLog, token, postScrollFirstCell, sceneAdaptivePanelFloorEligible && attempt == 1, allowSelectionOnlyFallback);
             }
             catch (StalePanelException) when (attempt < maxAttempts)
             {
@@ -2805,7 +2811,8 @@ public sealed class ScanController
         ScanLog scanLog,
         CancellationToken token,
         bool postScrollFirstCell,
-        bool sceneAdaptivePanelFloorEligible)
+        bool sceneAdaptivePanelFloorEligible,
+        bool allowSelectionOnlyFallback)
     {
         var timeout = TimeSpan.FromMilliseconds(profile.LoadTimeoutMs);
         var interval = TimeSpan.FromMilliseconds(Math.Max(5, profile.LoadPollMs));
@@ -2858,6 +2865,8 @@ public sealed class ScanController
         ImageSignature[]? previousTextCoreStableProbeSignatures = null;
         var stableProbeFrames = 0;
         var textCoreStableProbeFrames = 0;
+        var weakPanelChange = false;
+        var weakPanelChangeDistance = 0;
         var frameCount = 0;
         var captureMilliseconds = 0.0;
         var signatureMilliseconds = 0.0;
@@ -2866,6 +2875,7 @@ public sealed class ScanController
         var frameToBitmapMilliseconds = 0.0;
         var bitmapCreatedCount = 0;
         double? changeMilliseconds = previousPanelSignatures is null ? 0 : null;
+        double? weakPanelChangeMilliseconds = null;
         double? selectionChangeMilliseconds = null;
         double? fullRoiMilliseconds = null;
         double? stableMilliseconds = null;
@@ -2897,23 +2907,50 @@ public sealed class ScanController
             return false;
         }
 
-        bool PromoteSelectionChange(double elapsed)
+        bool PromoteSelectionChange(double elapsed, out string blockedReason)
         {
+            blockedReason = "";
             if (!ObserveSelectionChange(elapsed))
             {
                 return false;
             }
 
-            sawPanelChange = true;
-            acceptReason = "selection_changed_stable_full_roi";
-            changeMilliseconds ??= selectionChangeMilliseconds ?? elapsed;
-            if (panelTiming.PanelFloorMode == PanelFloorMode.SceneAdaptive && changedMinimumAcceptMs < 120)
+            if (postScrollFirstCell)
             {
-                changedMinimumAcceptMs = 120;
-                panelFloorReason = "scene_selection_fallback";
+                blockedReason = "post_scroll_first_cell";
+                return false;
             }
-            scanLog.Write("Panel probes stayed unchanged, but target cell selection changed; treating as identical-detail transition.");
-            return true;
+
+            if (!allowSelectionOnlyFallback)
+            {
+                blockedReason = "retry_or_recover_context";
+                return false;
+            }
+
+            if (selectionChangeMilliseconds is null || selectionChangeMilliseconds.Value <= 0.5)
+            {
+                blockedReason = "selection_change_not_positive";
+                return false;
+            }
+
+            blockedReason = weakPanelChange
+                ? "weak_panel_change_requires_retry"
+                : "selection_only_requires_retry";
+            return false;
+        }
+
+        void WriteSelectionOnlyBlocked(string reason, double elapsed)
+        {
+            scanLog.WriteEvent(
+                "PANEL_SELECTION_ONLY_BLOCKED",
+                $"selection_only_blocked_reason={reason}, post_scroll_panel_change_required={postScrollFirstCell}, elapsedMs={elapsed:F1}, selectionChangeMs={FormatOptionalMs(selectionChangeMilliseconds)}, allowSelectionOnlyFallback={allowSelectionOnlyFallback}");
+        }
+
+        void WriteWeakPanelChangeBlocked(string reason, double elapsed)
+        {
+            scanLog.WriteEvent(
+                "PANEL_WEAK_CHANGE_BLOCKED",
+                $"weak_panel_change_blocked_reason={reason}, weakPanelChangeMs={FormatOptionalMs(weakPanelChangeMilliseconds)}, weakPanelChangeDistance={weakPanelChangeDistance}, strongTolerance={PanelStrongChangeTolerance}, elapsedMs={elapsed:F1}, selectionChangeMs={FormatOptionalMs(selectionChangeMilliseconds)}");
         }
 
         while (DateTime.UtcNow - start < timeout)
@@ -2932,11 +2969,20 @@ public sealed class ScanController
 
                 var probeSignatureWatch = Stopwatch.StartNew();
                 var probeSignatures = CreateSignatures(probeImage, probeCaptureRects);
-                if (HasProbeChange(previousPanelSignatures, probeSignatures, PanelChangeTolerance))
+                var probeChangeDistance = ProbeChangeDistance(previousPanelSignatures, probeSignatures);
+                if (probeChangeDistance > PanelStrongChangeTolerance && elapsedMilliseconds >= MinReliablePanelChangeMs)
                 {
                     sawPanelChange = true;
                     changeMilliseconds ??= elapsedMilliseconds;
                     quickRejectReason = runtimeState.QuickPanelAcceptEnabled ? "waiting_for_roi" : quickRejectReason;
+                }
+                else if (probeChangeDistance > PanelChangeTolerance)
+                {
+                    weakPanelChange = true;
+                    weakPanelChangeDistance = Math.Max(weakPanelChangeDistance, probeChangeDistance);
+                    weakPanelChangeMilliseconds ??= elapsedMilliseconds;
+                    ObserveSelectionChange(elapsedMilliseconds);
+                    quickRejectReason = runtimeState.QuickPanelAcceptEnabled ? "waiting_for_strong_panel_change" : quickRejectReason;
                 }
                 probeSignatureWatch.Stop();
                 signatureMilliseconds += probeSignatureWatch.Elapsed.TotalMilliseconds;
@@ -2946,8 +2992,18 @@ public sealed class ScanController
                     ObserveSelectionChange(elapsedMilliseconds);
                     if (DateTime.UtcNow - start >= unchangedFallbackDelay)
                     {
-                        if (!PromoteSelectionChange(elapsedMilliseconds))
+                        if (!PromoteSelectionChange(elapsedMilliseconds, out var blockedReason))
                         {
+                            if (!string.IsNullOrWhiteSpace(blockedReason))
+                            {
+                                WriteSelectionOnlyBlocked(blockedReason, elapsedMilliseconds);
+                            }
+
+                            if (weakPanelChange)
+                            {
+                                WriteWeakPanelChangeBlocked(blockedReason.Length == 0 ? "no_selection_change" : blockedReason, elapsedMilliseconds);
+                            }
+
                             scanLog.Write("Panel probes stayed unchanged past fallback delay; refusing to capture stale detail panel.");
                             throw new StalePanelException("详情面板未检测到变化，已拒绝复用旧面板。");
                         }
@@ -2973,11 +3029,21 @@ public sealed class ScanController
             var signatureWatch = Stopwatch.StartNew();
             var changeProbeSignatures = CreateSignatures(image, fullPanelProbeRects);
             if (!sawPanelChange
-                && previousPanelSignatures is not null
-                && HasProbeChange(previousPanelSignatures, changeProbeSignatures, PanelChangeTolerance))
+                && previousPanelSignatures is not null)
             {
-                sawPanelChange = true;
-                changeMilliseconds ??= elapsedMilliseconds;
+                var fullPanelChangeDistance = ProbeChangeDistance(previousPanelSignatures, changeProbeSignatures);
+                if (fullPanelChangeDistance > PanelStrongChangeTolerance && elapsedMilliseconds >= MinReliablePanelChangeMs)
+                {
+                    sawPanelChange = true;
+                    changeMilliseconds ??= elapsedMilliseconds;
+                }
+                else if (fullPanelChangeDistance > PanelChangeTolerance)
+                {
+                    weakPanelChange = true;
+                    weakPanelChangeDistance = Math.Max(weakPanelChangeDistance, fullPanelChangeDistance);
+                    weakPanelChangeMilliseconds ??= elapsedMilliseconds;
+                    ObserveSelectionChange(elapsedMilliseconds);
+                }
             }
 
             var stableProbeSignatures = CreateSignatures(image, stableProbeRects);
@@ -3104,8 +3170,18 @@ public sealed class ScanController
 
                 if (fullPanelReadable && !sawPanelChange && stableProbeFrames >= requiredStableFrames && DateTime.UtcNow - start >= unchangedFallbackDelay)
                 {
-                    if (!PromoteSelectionChange(elapsedMilliseconds))
+                    if (!PromoteSelectionChange(elapsedMilliseconds, out var blockedReason))
                     {
+                        if (!string.IsNullOrWhiteSpace(blockedReason))
+                        {
+                            WriteSelectionOnlyBlocked(blockedReason, elapsedMilliseconds);
+                        }
+
+                        if (weakPanelChange)
+                        {
+                            WriteWeakPanelChangeBlocked(blockedReason.Length == 0 ? "no_selection_change" : blockedReason, elapsedMilliseconds);
+                        }
+
                         scanLog.Write("Panel probes stayed unchanged past fallback delay; refusing to capture stale detail panel.");
                         throw new StalePanelException("详情面板未检测到变化，已拒绝复用旧面板。");
                     }

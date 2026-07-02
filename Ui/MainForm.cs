@@ -399,7 +399,7 @@ public sealed class MainForm : Form
             PanelAcceptMode = SelectedPanelAcceptMode(),
             PostScrollPanelAcceptMode = SelectedPostScrollPanelAcceptMode(),
             PanelMinAcceptFloorMs = (int)_panelMinAcceptFloorMs.Value,
-            ProfileRouting = ProfileRoutingMode.Auto,
+            ProfileRouting = ProfileRoutingMode.Strict,
             VisualProfileClient = VisualProfileClientKind.Auto,
             OcrBatchSize = (int)_ocrBatchSize.Value,
             OcrWorkerCount = (int)_ocrWorkers.Value,

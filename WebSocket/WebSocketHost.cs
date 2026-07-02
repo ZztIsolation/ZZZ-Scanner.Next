@@ -234,6 +234,11 @@ public sealed class WebSocketHost : IDisposable
             CollectVisualProfile = !string.IsNullOrWhiteSpace(payload.CollectVisualProfile)
         };
 
+        if (!string.IsNullOrWhiteSpace(payload.ProcessName))
+        {
+            options.ProcessName = payload.ProcessName.Trim();
+        }
+
         if (!string.IsNullOrWhiteSpace(payload.CollectVisualProfile))
         {
             options.VisualProfileId = payload.CollectVisualProfile;
@@ -381,13 +386,13 @@ public sealed class WebSocketHost : IDisposable
     {
         if (string.IsNullOrWhiteSpace(value))
         {
-            return ProfileRoutingMode.Auto;
+            return ProfileRoutingMode.Strict;
         }
 
         var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
         return Enum.TryParse<ProfileRoutingMode>(normalized, ignoreCase: true, out var mode)
             ? mode
-            : ProfileRoutingMode.Auto;
+            : ProfileRoutingMode.Strict;
     }
 
     private static async Task SendProgressAsync(System.Net.WebSockets.WebSocket socket, SemaphoreSlim sendGate, ScanProgress progress, CancellationToken token)
@@ -526,6 +531,7 @@ public sealed class WebSocketHost : IDisposable
         public bool? AdaptiveTiming { get; set; }
         public string FastOcrTemplateIndexFile { get; set; } = "";
         public string ProfileName { get; set; } = "";
+        public string ProcessName { get; set; } = "";
         public string CaptureMode { get; set; } = "gdi";
         public string PanelStabilityMode { get; set; } = "";
         public string ScrollAcceptMode { get; set; } = "";

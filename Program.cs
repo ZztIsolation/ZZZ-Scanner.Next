@@ -161,6 +161,19 @@ static class Program
             return true;
         }
 
+        if (string.Equals(args[0], "--ocr-fast-merge-indexes", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args.Length < 4)
+            {
+                Console.Error.WriteLine("Usage: ZZZ-Scanner.Next.exe --ocr-fast-merge-indexes <output.json> <index1.json> <index2.json> [...]");
+                exitCode = 2;
+                return true;
+            }
+
+            exitCode = RunFastOcrMergeIndexes(args[1], args.Skip(2));
+            return true;
+        }
+
         if (string.Equals(args[0], "--scan-once", StringComparison.OrdinalIgnoreCase))
         {
             exitCode = RunScanOnce(args);
@@ -785,7 +798,7 @@ static class Program
             }
             else
             {
-                throw new ArgumentException($"Unknown profile routing mode: {profileRouting}. Expected strict, compatible, or auto.");
+                throw new ArgumentException($"Unknown profile routing mode: {profileRouting}. Expected strict, family, compatible, or auto.");
             }
         }
 
@@ -1010,7 +1023,7 @@ static class Program
             return true;
         }
 
-        mode = ProfileRoutingMode.Auto;
+        mode = ProfileRoutingMode.Strict;
         return false;
     }
 
@@ -1047,6 +1060,108 @@ static class Program
             .OrderByDescending(info => info.LastWriteTimeUtc)
             .Select(info => info.FullName)
             .FirstOrDefault() ?? "";
+    }
+
+    private static int RunFastOcrMergeIndexes(string outputFile, IEnumerable<string> inputFiles)
+    {
+        var inputs = inputFiles
+            .Where(file => !string.IsNullOrWhiteSpace(file))
+            .Select(Path.GetFullPath)
+            .ToArray();
+        if (inputs.Length < 2)
+        {
+            Console.Error.WriteLine("At least two input indexes are required.");
+            return 2;
+        }
+
+        var merged = new FastOcrTemplateIndex
+        {
+            Version = FastOcrTemplateIndex.CurrentVersion,
+            Feature = FastOcrTemplateIndex.CanonicalFeature,
+            CreatedAt = DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture)
+        };
+        var templateKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var input in inputs)
+        {
+            if (!File.Exists(input))
+            {
+                Console.Error.WriteLine($"Input index not found: {input}");
+                return 2;
+            }
+
+            var index = FastOcrTemplateIndex.Load(input);
+            if (!string.Equals(index.Feature, FastOcrTemplateIndex.CanonicalFeature, StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine($"Only v6 canonical indexes can be merged. {input} uses feature={index.Feature}");
+                return 2;
+            }
+
+            foreach (var template in index.Templates)
+            {
+                var key = string.Join(
+                    '\u001f',
+                    template.FieldKey,
+                    template.Label,
+                    template.VisualProfileId,
+                    template.ProfileFamilyId,
+                    string.Join("|", template.Bits));
+                if (templateKeys.Add(key))
+                {
+                    merged.Templates.Add(new FastOcrTemplate
+                    {
+                        FieldKey = template.FieldKey,
+                        Label = template.Label,
+                        VisualProfileId = template.VisualProfileId,
+                        ProfileFamilyId = template.ProfileFamilyId,
+                        Bits = template.Bits.ToArray(),
+                        SourceImage = template.SourceImage
+                    });
+                }
+            }
+
+            MergePolicies(merged.FieldPolicies, index.FieldPolicies);
+            MergePolicies(merged.ProfileFieldPolicies, index.ProfileFieldPolicies);
+            MergePolicies(merged.FamilyFieldPolicies, index.FamilyFieldPolicies);
+        }
+
+        merged.Save(outputFile);
+        Console.WriteLine($"fast_merge.output={Path.GetFullPath(outputFile)}");
+        Console.WriteLine($"fast_merge.inputs={inputs.Length}");
+        Console.WriteLine($"fast_merge.templates={merged.Templates.Count}");
+        Console.WriteLine($"fast_merge.field_policies={merged.FieldPolicies.Count}");
+        Console.WriteLine($"fast_merge.profile_policies={merged.ProfileFieldPolicies.Count}");
+        Console.WriteLine($"fast_merge.family_policies={merged.FamilyFieldPolicies.Count}");
+        return 0;
+    }
+
+    private static void MergePolicies(
+        IDictionary<string, FastOcrFieldPolicy> target,
+        IReadOnlyDictionary<string, FastOcrFieldPolicy> source)
+    {
+        foreach (var (key, policy) in source)
+        {
+            if (target.TryGetValue(key, out var existing))
+            {
+                existing.AssistEnabled = existing.AssistEnabled && policy.AssistEnabled;
+                existing.MinScore = Math.Max(existing.MinScore, policy.MinScore);
+                existing.MinMargin = Math.Max(existing.MinMargin, policy.MinMargin);
+                existing.TemplateCount += policy.TemplateCount;
+                existing.LabelCount = Math.Max(existing.LabelCount, policy.LabelCount);
+                target[key] = existing;
+            }
+            else
+            {
+                target[key] = new FastOcrFieldPolicy
+                {
+                    AssistEnabled = policy.AssistEnabled,
+                    MinScore = policy.MinScore,
+                    MinMargin = policy.MinMargin,
+                    TemplateCount = policy.TemplateCount,
+                    LabelCount = policy.LabelCount
+                };
+            }
+        }
     }
 
     private static void TryDeleteFile(string path)

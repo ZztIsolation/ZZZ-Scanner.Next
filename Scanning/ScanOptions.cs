@@ -64,6 +64,7 @@ public enum VisualProfileClientKind
 public enum ProfileRoutingMode
 {
     Strict,
+    Family,
     Compatible,
     Auto
 }
@@ -103,7 +104,7 @@ public sealed class ScanOptions
     public string VisualQualityLabel { get; set; } = "current";
     public VisualProfileClientKind VisualProfileClient { get; set; } = VisualProfileClientKind.Auto;
     public bool CollectVisualProfile { get; set; }
-    public ProfileRoutingMode ProfileRouting { get; set; } = ProfileRoutingMode.Auto;
+    public ProfileRoutingMode ProfileRouting { get; set; } = ProfileRoutingMode.Strict;
     public int OcrBatchSize { get; set; } = 1;
     public int OcrWorkerCount { get; set; } = 0;
     public int OcrQueueCapacity { get; set; } = 48;
@@ -162,7 +163,7 @@ public sealed class ScanRunCommand
     public string VisualQualityLabel { get; set; } = "current";
     public VisualProfileClientKind VisualProfileClient { get; set; } = VisualProfileClientKind.Auto;
     public bool CollectVisualProfile { get; set; }
-    public ProfileRoutingMode ProfileRouting { get; set; } = ProfileRoutingMode.Auto;
+    public ProfileRoutingMode ProfileRouting { get; set; } = ProfileRoutingMode.Strict;
     public int OcrBatchSize { get; set; } = 1;
     public int OcrWorkerCount { get; set; } = 0;
     public int OcrQueueCapacity { get; set; } = 48;

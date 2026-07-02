@@ -107,7 +107,9 @@ public static class OcrShadowDataset
                 CleanLevel = ParseInt(Get(fields, columns, "clean_level")),
                 CleanMaxLevel = ParseInt(Get(fields, columns, "clean_max_level")),
                 CleanLabel = Get(fields, columns, "clean_label"),
-                VisualProfileId = string.IsNullOrWhiteSpace(visualProfile.ProfileId) ? "legacy" : visualProfile.ProfileId,
+                VisualProfileId = string.IsNullOrWhiteSpace(visualProfile.TrainingProfileId)
+                    ? string.IsNullOrWhiteSpace(visualProfile.ProfileId) ? "legacy" : visualProfile.ProfileId
+                    : visualProfile.TrainingProfileId,
                 VisualClientKind = visualProfile.ClientKind,
                 VisualQualityLabel = visualProfile.QualityLabel
             });

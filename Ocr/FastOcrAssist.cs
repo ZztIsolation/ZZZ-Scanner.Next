@@ -167,7 +167,8 @@ public sealed class FastOcrAssistEngine
         foreach (var fieldKey in _fieldKeys.Where(FastOcrTemplateIndex.IsSupportedField).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var route = _index.DescribeRoute(fieldKey, VisualProfileId, _profileRoutingMode);
-            _log($"FAST_OCR_PROFILE_ROUTE field={fieldKey}, requestedProfile={route.RequestedProfileId}, policyProfile={route.PolicyProfileId}, route={route.RouteName}, templates={route.TemplateCount}, mode={_profileRoutingMode}, reason={route.Reason}");
+            _log($"FAST_OCR_PROFILE_ROUTE field={fieldKey}, requestedProfile={route.RequestedProfileId}, policyProfile={route.PolicyProfileId}, profileFamily={route.ProfileFamilyId}, route={route.RouteName}, templates={route.TemplateCount}, mode={_profileRoutingMode}, reason={route.Reason}");
+            _log($"FAST_OCR_PROFILE_FAMILY_ROUTE field={fieldKey}, requestedProfile={route.RequestedProfileId}, profileFamily={route.ProfileFamilyId}, route={route.RouteName}, templates={route.TemplateCount}, mode={_profileRoutingMode}");
         }
     }
 
@@ -280,10 +281,14 @@ public sealed record FastOcrAssistDecision(
     string FastLabel,
     double Score,
     string SourceProfileId,
+    string SourceFamilyId,
     string Top2Label,
     double Top2Score,
     double Margin,
     bool Accepted,
+    bool CanonicalCropSucceeded,
+    bool CanonicalCropFallback,
+    double FeatureMs,
     double ElapsedMs,
     string Reason)
 {
@@ -294,7 +299,7 @@ public sealed record FastOcrAssistDecision(
         FromMatch(itemIndex, roiIndex, fieldKey, rarity, "rejected", match, accepted: false, elapsedMs);
 
     public static FastOcrAssistDecision PpOcr(int itemIndex, int roiIndex, string fieldKey, string rarity, string reason, string source = "ppocr") =>
-        new(itemIndex, roiIndex, fieldKey, rarity, source, "", 0, "", "", 0, 0, false, 0, reason);
+        new(itemIndex, roiIndex, fieldKey, rarity, source, "", 0, "", "", "", 0, 0, false, false, false, 0, 0, reason);
 
     private static FastOcrAssistDecision FromMatch(
         int itemIndex,
@@ -305,7 +310,7 @@ public sealed record FastOcrAssistDecision(
         FastOcrMatch match,
         bool accepted,
         double elapsedMs) =>
-        new(itemIndex, roiIndex, fieldKey, rarity, source, match.Label, match.Score, match.SourceProfileId, match.Top2Label, match.Top2Score, match.Margin, accepted, elapsedMs, match.Reason);
+        new(itemIndex, roiIndex, fieldKey, rarity, source, match.Label, match.Score, match.SourceProfileId, match.SourceFamilyId, match.Top2Label, match.Top2Score, match.Margin, accepted, match.CanonicalCropSucceeded, match.CanonicalCropFallback, match.FeatureElapsedMs, elapsedMs, match.Reason);
 }
 
 public sealed class FastOcrAssistRecorder : IDisposable
@@ -316,7 +321,7 @@ public sealed class FastOcrAssistRecorder : IDisposable
     public FastOcrAssistRecorder(string outputDirectory)
     {
         _writer = new StreamWriter(Path.Combine(outputDirectory, "ocr_fast_assist.csv"), append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-        _writer.WriteLine("timestamp,item_index,roi_index,field_key,source,rarity,fast_label,score,source_profile_id,top2_label,top2_score,margin,accepted,final_text,elapsed_ms,reason");
+        _writer.WriteLine("timestamp,item_index,roi_index,field_key,source,rarity,fast_label,score,source_profile_id,source_family_id,top2_label,top2_score,margin,accepted,canonical_crop_succeeded,canonical_crop_fallback,feature_ms,final_text,elapsed_ms,reason");
         _writer.Flush();
     }
 
@@ -337,10 +342,14 @@ public sealed class FastOcrAssistRecorder : IDisposable
                     EscapeCsv(decision.FastLabel),
                     decision.Score.ToString("F6", CultureInfo.InvariantCulture),
                     EscapeCsv(decision.SourceProfileId),
+                    EscapeCsv(decision.SourceFamilyId),
                     EscapeCsv(decision.Top2Label),
                     decision.Top2Score.ToString("F6", CultureInfo.InvariantCulture),
                     decision.Margin.ToString("F6", CultureInfo.InvariantCulture),
                     decision.Accepted.ToString(CultureInfo.InvariantCulture),
+                    decision.CanonicalCropSucceeded.ToString(CultureInfo.InvariantCulture),
+                    decision.CanonicalCropFallback.ToString(CultureInfo.InvariantCulture),
+                    decision.FeatureMs.ToString("F3", CultureInfo.InvariantCulture),
                     EscapeCsv(finalText),
                     decision.ElapsedMs.ToString("F3", CultureInfo.InvariantCulture),
                     EscapeCsv(decision.Reason)

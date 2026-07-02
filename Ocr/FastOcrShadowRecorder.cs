@@ -21,7 +21,7 @@ public sealed class FastOcrShadowRecorder : IDisposable
         _fieldKeys = fieldKeys.ToArray();
         _index = index;
         _writer = new StreamWriter(Path.Combine(outputDirectory, "ocr_fast_shadow.csv"), append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-        _writer.WriteLine("timestamp,item_index,roi_index,field_key,rarity,raw_text,clean_label,fast_label,score,top2_label,top2_score,margin,distance,candidate_count,assist_enabled,would_accept,matches_clean,elapsed_ms,match_source,reason");
+        _writer.WriteLine("timestamp,item_index,roi_index,field_key,rarity,raw_text,clean_label,fast_label,score,source_profile_id,source_family_id,top2_label,top2_score,margin,distance,candidate_count,assist_enabled,would_accept,matches_clean,canonical_crop_succeeded,canonical_crop_fallback,feature_ms,elapsed_ms,match_source,reason");
         _writer.Flush();
     }
 
@@ -97,6 +97,8 @@ public sealed class FastOcrShadowRecorder : IDisposable
                 cleanLabel,
                 match.Label,
                 match.Score.ToString("F6", CultureInfo.InvariantCulture),
+                match.SourceProfileId,
+                match.SourceFamilyId,
                 match.Top2Label,
                 match.Top2Score.ToString("F6", CultureInfo.InvariantCulture),
                 match.Margin.ToString("F6", CultureInfo.InvariantCulture),
@@ -105,6 +107,9 @@ public sealed class FastOcrShadowRecorder : IDisposable
                 match.AssistEnabled.ToString(CultureInfo.InvariantCulture),
                 wouldAccept.ToString(CultureInfo.InvariantCulture),
                 matchesClean.ToString(CultureInfo.InvariantCulture),
+                match.CanonicalCropSucceeded.ToString(CultureInfo.InvariantCulture),
+                match.CanonicalCropFallback.ToString(CultureInfo.InvariantCulture),
+                match.FeatureElapsedMs.ToString("F3", CultureInfo.InvariantCulture),
                 sw.Elapsed.TotalMilliseconds.ToString("F3", CultureInfo.InvariantCulture),
                 match.SourceImage,
                 match.Reason

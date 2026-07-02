@@ -5,7 +5,7 @@ namespace ZZZScannerNext.Core;
 
 public static class AppInfo
 {
-    public const string Version = "1.0.30";
+    public const string Version = "1.0.35";
 
     public static string ExecutablePath => Environment.ProcessPath ?? AppContext.BaseDirectory;
 

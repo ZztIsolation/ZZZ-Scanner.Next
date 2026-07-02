@@ -41,7 +41,7 @@
 
 这比全屏 OCR 快很多，也避免扫描游戏内无关文字。
 
-点击新驱动盘前会记录详情多探针签名；截图前必须看到面板/文本探针变化、连续稳定，以及 12 个 OCR ROI 全部可见，避免把上一张详情面板重复入队。GDI 等待变化阶段会先截 `panelChangeProbeRect`，但签名仍按 12 个 ROI 的相对位置采样，避免整块稀疏采样漏掉文字变化；DXGI 在 warmup 后允许 1 帧稳定，但仍保留变化签名、ROI 完整和最低接受时间。未看到变化时只重试点击，不复用旧面板。
+点击新驱动盘前会记录详情多探针签名；截图前必须看到面板/文本探针变化、连续稳定，以及 12 个 OCR ROI 全部可见，避免把上一张详情面板重复入队。GDI 等待变化阶段会先截 `panelChangeProbeRect`，但签名仍按 12 个 ROI 的相对位置采样，避免整块稀疏采样漏掉文字变化；DXGI 在 warmup 后允许 1 帧稳定，但仍保留变化签名、ROI 完整和最低接受时间。未看到变化时只重试点击，不复用旧面板。1.0.32 起，`selection_changed_stable_full_roi` 不再作为直接接受旧面板的路径；滚动后首格、retry/fallback/recover 场景或 selection 变化时间无明确正值时会记录 `PANEL_SELECTION_ONLY_BLOCKED`，并继续走 stale retry。同排相邻格的弱 panel change 和点击后 25ms 内的过早 change 也会记录 `PANEL_WEAK_CHANGE_BLOCKED`，只有后续可靠面板变化或 retry 成功后才入队。
 
 1.0.22 增加 `PanelStabilityMode=panel|text-core|auto`。`panel` 是默认稳定判定；`text-core` 只用 12 个 OCR ROI 的文字核心区计算稳定帧，核心框为左右各裁 6%、上下各裁 18%；`auto` 会在前 12 件 warmup 中同时记录 panel/text-core 稳定耗时，只有 text-core 明显更快且没有 stale/retry 风险时才选择。无论选择哪种模式，接受条件都仍然是“看到变化、12 ROI 全可见、达到最低等待、稳定帧满足”。本机 1.0.22 实测 text-core 没有提速，因此 fast-mode 默认仍回到 `panel`，text-core/auto 作为显式实验保留。
 
@@ -51,7 +51,9 @@
 
 默认 OCR 使用自动 worker 并行、`OcrBatchSize=1`、`OcrQueueCapacity=48` 和 `OcrIntraOpThreads=3`；自动模式最多启用 2 个 worker。实机日志表明 batch 合大后单件耗时会退化，3 worker 虽能缩短收尾但更容易诱发滚动/面板等待波动，所以不作为默认。GUI 中仍可手动调整 worker、batch、队列容量和 IntraOp 线程；多 worker 只影响截图后的识别，不改变点击、等待、滚动逻辑。
 
-Fast OCR 是字段名类 ROI 的可回退快路径。`--ocr-shadow-dataset` 保存经 PP-OCR 清洗后的 ROI 样本，`--ocr-fast-calibrate` 用多轮 shadow 数据生成模板索引：v3 包含 16x16 灰度 aHash 和横向差分 hash，v4 追加纵向差分 hash。字段策略记录 `AssistEnabled`、`MinScore` 和 `MinMargin`。Assist 模式只替换通过字段策略的 `level/mainStat/subStat1..4/name`，数值字段仍交给 PP-OCR；未启用、未达阈值或不支持的 ROI 必须回退 PP-OCR。`--fast-mode` 会在索引通过 v3+ 与启用字段校验后启用 fast profile 和 assist，否则回退普通模式。
+Fast OCR 是字段名类 ROI 的可回退快路径。`--ocr-shadow-dataset` 保存经 PP-OCR 清洗后的 ROI 样本，`--ocr-fast-calibrate` 用多轮 shadow 数据生成模板索引：v3 包含 16x16 灰度 aHash 和横向差分 hash，v4 追加纵向差分 hash，v6 会先对 ROI 文字核心做 canonical crop，再生成灰度、横向差分、纵向差分和边缘梯度 hash。字段策略记录 `AssistEnabled`、`MinScore` 和 `MinMargin`。Assist 模式只替换通过字段策略的 `level/mainStat/subStat1..4/name`，数值字段仍交给 PP-OCR；未启用、未达阈值或不支持的 ROI 必须回退 PP-OCR。
+
+1.0.31 起 Fast OCR 增加 profile family 路由。`visual_profile.json` 会记录 `ProfileFamilyId`，由 `client + aspect bucket + dpi bucket + quality` 组成。1.0.32 起默认 `--profile-routing strict` 只允许 exact profile 模板参与 assist 导出；`family`、`compatible` 和 `auto` 仍可用于离线评估或显式实验，但不会作为默认 assist 路径。1.0.34 将完成本地三挡分辨率与云绝区零大窗口/普通窗口/全屏验收的 v6 模板内置到 `Data/ocr_fast_templates.json`，覆盖 `local-1280x720-current`、`local-1600x900-current`、`local-1920x1080-current`、`cloud-1592x896-current`、`cloud-1440x808-current` 和 `cloud-1920x1080-current`。`--ocr-fast-calibrate-visual-profiles --feature v6` 会写出 `ProfileFieldPolicies` 与 `FamilyFieldPolicies`，任一字段只有跨轮/跨 profile `false_accepts=0` 并达到接受率门槛才启用。`--ocr-fast-merge-indexes` 可合并多个 v6 canonical index，保留 profile-specific policies，并对 global/family policy 采用更严格阈值。`--fast-mode` 会在索引通过 v3+ 与启用字段校验后启用 fast profile 和 assist，否则回退普通模式。
 
 1.0.18 起，`--fast-mode` 默认启用本轮自适应等待。它只在内存中记录当前扫描的面板变化、稳定帧、ROI 完整和 OCR backlog，不写长期机器 profile。面板接受必须满足“看到变化、稳定、12 个 ROI 全部可见”；OCR backlog 高时通过 bounded queue 和小幅点击前延迟降速。1.0.19 在这个边界内优化采集等待，主要减少 DXGI warmup 后稳定帧和滚动稳定等待，不把未验证的固定短延迟写成默认。1.0.20 增加内部 frame API 和 `captureFrameBackend` 诊断；DXGI raw BGRA 只保留为显式实验路径，默认 DXGI 发布候选仍使用稳定的 bitmap fallback。1.0.21 记录 quick accept 诊断，但默认关闭：实测跳过完整稳定等待会导致重复导出或速度退化。1.0.22 记录字段级稳定诊断，但 text-core/auto 未达默认推荐门槛。1.0.23 记录滚动后首格诊断并加入 `early-one-row`，但默认仍保持 `safe`。1.0.24 在面板接受中加入 `adaptive-early-full-roi`，并把 fast-mode 默认切到 `adaptive-early-full-roi + early-one-row`；最终 DXGI 120 件为 `3.656/s` 且全部 correctness acceptance pass。1.0.26 没有进一步放宽默认安全边界，而是增加 `--capture-stability-suite` 证明候选是否足够稳定。
 

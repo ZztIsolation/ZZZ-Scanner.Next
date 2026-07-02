@@ -1,5 +1,157 @@
 # Testing
 
+## 2026-07-02 1.0.34 本地三挡 + 云绝区零大窗口/普通窗口/全屏 v6 模板内置
+
+已执行：
+
+```powershell
+Copy-Item ".\tmp-fast-cloud-1592x896-current-v6-20260702-1550\ocr_fast_templates.local-1280-1600-1920-plus-cloud-1592x896.v6.json" ".\Data\ocr_fast_templates.json"
+Get-FileHash -Algorithm SHA256 ".\Data\ocr_fast_templates.json"
+dotnet build -c Release -p:NuGetAudit=false
+dotnet publish -c Release -r win-x64 --self-contained false -p:NuGetAudit=false -o "publish 1.0.34"
+.\scripts\publish-slim.ps1 -Version 1.0.34
+.\publish 1.0.33\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.33\Scans\2026-07-02-15-41-16-411-p3044-8561"
+.\publish 1.0.33\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.33\Scans\2026-07-02-15-49-26-567-p6f70-eaa3"
+.\publish 1.0.33\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.33\Scans\2026-07-02-15-50-20-722-p40a8-f36c"
+.\publish 1.0.33\ZZZ-Scanner.Next.exe --ocr-fast-calibrate-visual-profiles ".\tmp-fast-cloud-1592x896-current-v6-20260702-1550" --output ".\tmp-fast-cloud-1592x896-current-v6-20260702-1550\ocr_fast_templates.cloud-1592x896-current.v6.json" --feature v6
+.\publish 1.0.33\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.33\Scans\2026-07-02-15-55-50-424-p64ec-f3d4"
+.\publish 1.0.33\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.33\Scans\2026-07-02-16-00-24-632-p2bac-9906"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-once --process "Zenless Zone Zero Cloud" --profile "ZZZ背包驱动盘-16比9-fast" --capture-mode dxgi --max-items 0 --fast-mode --profile-routing strict --visual-profile-client cloud --visual-profile-quality current --overlap-conflict-mode recover
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-16-12-06-487-p4320-ff38"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --ocr-fast-eval ".\Data\ocr_fast_templates.json" ".\tmp-fast-cloud-1592x896-current-v6-20260702-1550"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-16-38-11-646-p4f84-835f"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-16-39-37-937-p5428-181e"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-16-40-24-782-p749c-214e"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --ocr-fast-calibrate-visual-profiles ".\tmp-fast-cloud-1440x808-current-v6-20260702-1641" --output ".\tmp-fast-cloud-1440x808-current-v6-20260702-1641\ocr_fast_templates.cloud-1440x808-current.v6.json" --feature v6
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-16-44-59-913-p738-b64c"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-16-48-24-860-p2d00-835f"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-16-52-23-420-p5a6c-f391"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-16-57-32-843-p3224-e657"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-17-09-15-183-p858-caab"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-17-10-07-407-p451c-6d71"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-17-11-02-634-p2e88-933f"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --ocr-fast-calibrate-visual-profiles ".\tmp-fast-cloud-1920x1080-current-v6-20260702-1712" --output ".\tmp-fast-cloud-1920x1080-current-v6-20260702-1712\ocr_fast_templates.cloud-1920x1080-current.v6.json" --feature v6
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-17-15-45-213-pd14-db93"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-17-21-34-514-p6c68-5211"
+.\publish 1.0.34\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.34\Scans\2026-07-02-17-22-33-432-pb00-a556"
+```
+
+结果：
+
+- 正式模板文件已复制到 `Data\ocr_fast_templates.json`。模板 `Version=6`、`Feature=canonical-ahash-dhash-vhash-edge-16x16-v6`、`templates=8275`、`FieldPolicies=7`、`ProfileFieldPolicies=42`、`FamilyFieldPolicies=14`。正式模板已清空训练用 `SourceImage` 本机路径，SHA-256 `481a7d08e02c514bce3188f6cf04a6126404417e3c1788ed940df8f6ad12c26a`。
+- 云绝区零大窗口实际客户区检测为 `1592x896`，DPI 96，profile 为 `cloud-1592x896-current`；不是本地 `1600x900` 模板的复用。
+- 云大窗口 clean shadow 三轮：`2026-07-02-15-41-16-411-p3044-8561`、`2026-07-02-15-49-26-567-p6f70-eaa3`、`2026-07-02-15-50-20-722-p40a8-f36c`。三轮均 `Completed=120`、`Failed=0`、`export_duplicate_items=0`、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`，每轮 `ocr_shadow.csv` 为 1440 条 ROI 样本加表头。
+- 云大窗口 v6 校准：`fast_eval.false_accepts=0`。`level/mainStat/subStat1/subStat2/subStat3/subStat4` 启用；`name` 因接受率 `85.556%` 保持禁用并回退 PP-OCR。
+- 云大窗口单独 v6 index assist 120 件目录 `publish 1.0.33\Scans\2026-07-02-15-55-50-424-p64ec-f3d4`：`Completed=120`、`Failed=0`、`completed_per_sec=3.864`、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`ocr_backlog_max=1`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.958`、`ppocr_roi_per_item_avg=6.042`。
+- 合并模板云大窗口 30 件 smoke 目录 `publish 1.0.33\Scans\2026-07-02-16-00-24-632-p2bac-9906`：`Completed=30`、`Failed=0`、重复导出 0、`IncompleteRoi=0`、`profile_route=exact:7`、`fast_accepted_per_item_avg=6.000`、`ppocr_roi_per_item_avg=6.000`，确认合并模板在 strict 路由下不会误用本地 profile。
+- 云绝区零普通窗口实际客户区检测为 `1440x808`，DPI 96，profile 为 `cloud-1440x808-current`；不是本地 `1280x720/1600x900/1920x1080` 模板的复用。
+- 云普通窗口 clean shadow 三轮：`2026-07-02-16-38-11-646-p4f84-835f`、`2026-07-02-16-39-37-937-p5428-181e`、`2026-07-02-16-40-24-782-p749c-214e`。三轮均 `Completed=120`、`Failed=0`、`export_duplicate_items=0`、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`，每轮 `ocr_shadow.csv` 为 1440 条 ROI 样本加表头。
+- 云普通窗口 v6 校准：`false_accepts=0`。`level/mainStat/subStat1/subStat2/subStat3/subStat4` 启用；`name` 因接受率 `82.778%` 保持禁用并回退 PP-OCR。
+- 云普通窗口单独 v6 index assist 120 件目录 `publish 1.0.34\Scans\2026-07-02-16-44-59-913-p738-b64c`：`Completed=120`、`Failed=0`、`completed_per_sec=3.868`、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`ocr_backlog_max=1`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.900`、`ppocr_roi_per_item_avg=6.100`。
+- 云普通窗口合并模板内置 Data 120 件 smoke 目录 `publish 1.0.34\Scans\2026-07-02-16-48-24-860-p2d00-835f`：`Completed=120`、`Failed=0`、`completed_per_sec=3.646`、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`ocr_backlog_max=1`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.917`、`ppocr_roi_per_item_avg=6.083`。
+- 覆盖 `publish 1.0.34` 后再次跑发布目录内置模板 30 件 smoke：`publish 1.0.34\Scans\2026-07-02-16-52-23-420-p5a6c-f391`，`Completed=30`、`Failed=0`、重复导出 0、`IncompleteRoi=0`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.867`、`ppocr_roi_per_item_avg=6.133`。
+- 云普通窗口默认有效全量验收：`publish 1.0.34\Scans\2026-07-02-16-57-32-843-p3224-e657`，命令未显式传入 `--ocr-fast-index`，使用发布目录内置模板；`Completed=466`、`Failed=0`、`completed_per_sec=4.036`、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`ocr_backlog_max=1`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.906`、`ppocr_roi_per_item_avg=6.094`。第 467 个检测为非 15 级 `云岿如我 S 12/15` 并停止，符合网页正式导入路径。
+- 云绝区零全屏实际客户区检测为 `1920x1080`，DPI 96，profile 为 `cloud-1920x1080-current`；不是本地 `local-1920x1080-current` 模板的复用。
+- 云全屏 clean shadow 训练三轮：`2026-07-02-17-09-15-183-p858-caab`、`2026-07-02-17-10-07-407-p451c-6d71`、`2026-07-02-17-11-02-634-p2e88-933f`。三轮均 `Completed=120`、`Failed=0`、`export_duplicate_items=0`、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`，每轮 `ocr_shadow.csv` 为 1440 条 ROI 样本加表头。
+- 云全屏 v6 校准：`false_accepts=0`。`level/mainStat/subStat1/subStat2/subStat3/subStat4` 启用；`name` 因接受率 `85.000%` 保持禁用并回退 PP-OCR。
+- 云全屏单独 v6 index assist 120 件目录 `publish 1.0.34\Scans\2026-07-02-17-15-45-213-pd14-db93`：`Completed=120`、`Failed=0`、`completed_per_sec=3.780`、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`ocr_backlog_max=1`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.992`、`ppocr_roi_per_item_avg=6.008`。
+- 云全屏发布目录内置模板 120 件验收目录 `publish 1.0.34\Scans\2026-07-02-17-21-34-514-p6c68-5211`：`Completed=120`、`Failed=0`、`completed_per_sec=3.728`、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`ocr_backlog_max=1`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.992`、`ppocr_roi_per_item_avg=6.008`。
+- 云全屏默认有效全量验收：`publish 1.0.34\Scans\2026-07-02-17-22-33-432-pb00-a556`，命令未显式传入 `--ocr-fast-index`，使用发布目录内置模板；`Completed=466`、`Failed=0`、`completed_per_sec=4.048`、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`ocr_backlog_max=1`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.961`、`ppocr_roi_per_item_avg=6.039`。第 467 个检测为非 15 级 `云岿如我 S 12/15` 并停止，符合网页正式导入路径。
+- Release build 通过，0 warning / 0 error；按本轮要求覆盖发布到 `publish 1.0.34`。发布包内置模板 hash 与正式 Data 文件一致，exe `FileVersion=1.0.34.0`。
+- 瘦身分发包已重新生成：`dist\ZZZ-Scanner.Next-win-x64-1.0.34.zip`，大小 `115521420` 字节，SHA-256 `7956191c3894b875851e27199545311703d0cc8a1a141568e9101929ab1db7c0`；zip 内包含清理后的 `Data/ocr_fast_templates.json` 和 `ZZZ-Scanner.Next.exe`。
+- 1.0.34 云大窗口默认有效全量验收：`publish 1.0.34\Scans\2026-07-02-16-12-06-487-p4320-ff38`，命令未显式传入 `--ocr-fast-index`，日志确认使用 `publish 1.0.34\Data\ocr_fast_templates.json`；`Completed=466`、`Failed=0`、`completed_per_sec=3.963`、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`quick_accept_count=0`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.726`、`ppocr_roi_per_item_avg=6.274`、`ocr_backlog_max=2`。第 467 个检测为非 15 级并停止，符合网页正式导入路径。
+- 清理 `SourceImage` 本机路径并重新发布后，用正式 `Data\ocr_fast_templates.json` 对云大窗口三轮 shadow 数据做离线 eval：`fast_eval.rows=2520`、`accepted=2520`、`false_accepts=0`。该清理只影响溯源元数据，不影响匹配特征和 assist policy。
+
+## 2026-07-02 1.0.33 三挡本地分辨率 v6 模板内置
+
+已执行：
+
+```powershell
+Copy-Item ".\tmp-fast-1.0.32\ocr_fast_templates.local-1280-1600-1920.v6.json" ".\Data\ocr_fast_templates.json"
+Get-FileHash -Algorithm SHA256 ".\Data\ocr_fast_templates.json"
+dotnet build -c Release -p:NuGetAudit=false
+dotnet publish -c Release -r win-x64 --self-contained false -p:NuGetAudit=false -o "publish 1.0.33"
+.\publish 1.0.33\ZZZ-Scanner.Next.exe --scan-once --process ZenlessZoneZero --profile "ZZZ背包驱动盘-16比9-fast" --capture-mode dxgi --max-items 30 --fast-mode --profile-routing strict --overlap-conflict-mode recover
+.\publish 1.0.33\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.33\Scans\2026-07-02-00-24-48-646-p6e68-944f"
+.\publish 1.0.32\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.32\Scans\2026-07-01-23-30-10-351-p61cc-385f"
+.\publish 1.0.32\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.32\Scans\2026-07-01-23-38-19-956-p8b9c-6a8e"
+.\publish 1.0.32\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.32\Scans\2026-07-01-23-15-00-300-p3540-9b24"
+.\publish 1.0.32\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.32\Scans\2026-07-02-00-07-29-895-p5420-0228"
+.\publish 1.0.32\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.32\Scans\2026-07-01-23-41-50-841-p7a34-6e08"
+.\publish 1.0.32\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.32\Scans\2026-07-02-00-02-19-833-p3f24-375f"
+```
+
+结果：
+
+- 正式模板文件已复制到 `Data\ocr_fast_templates.json`。模板 `Version=6`、`Feature=canonical-ahash-dhash-vhash-edge-16x16-v6`、`templates=719`、`FieldPolicies=7`、`ProfileFieldPolicies=21`、`FamilyFieldPolicies=7`，SHA-256 `c5b18d4abcd612a4a406f10fc3214e9746f685f403b81c2303cb018b21890a0a`。
+- Release build 通过，0 warning / 0 error；已发布到 `publish 1.0.33`，未覆盖 `publish 1.0.32`。发布包内置模板 hash 与正式 Data 文件一致，exe `FileVersion=1.0.33.0`。
+- 1.0.33 内置模板 smoke：`publish 1.0.33\Scans\2026-07-02-00-24-48-646-p6e68-944f`，命令未显式传入 `--ocr-fast-index`，日志确认使用 `publish 1.0.33\Data\ocr_fast_templates.json`；`Completed=30`、`Failed=0`、重复导出 0、`IncompleteRoi=0`、`profile_route=exact:7`、`fast_accepted_per_item_avg=7.000`、`ppocr_roi_per_item_avg=5.000`、`quick_accept_count=0`。
+- 120 件 assist 验收：
+  - 1280x720：`publish 1.0.32\Scans\2026-07-01-23-30-10-351-p61cc-385f`，`completed_per_sec=4.217`、`profile_route=exact:7`、`fast_accepted_per_item_avg=6.983`、`ppocr_roi_per_item_avg=5.017`、失败 0、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`。
+  - 1600x900：`publish 1.0.32\Scans\2026-07-01-23-38-19-956-p8b9c-6a8e`，`completed_per_sec=3.983`、`profile_route=exact:7`、`fast_accepted_per_item_avg=5.958`、`ppocr_roi_per_item_avg=6.042`、失败 0、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`。
+  - 1920x1080：`publish 1.0.32\Scans\2026-07-01-23-15-00-300-p3540-9b24`，`completed_per_sec=3.788`、`profile_route=exact:7`、`fast_accepted_per_item_avg=6.850`、`ppocr_roi_per_item_avg=5.150`、失败 0、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`。
+- 默认有效全量验收。这里的“有效全量”保留 `StopAtNonLevel15=true`，遇到第一个非 15 级驱动盘停止，符合网页正式导入路径；因此 `full_scan_complete=false` 与 `missing_logical_rows_count>0` 是预期跳过的后续非 15 区域，不是导出漏扫。
+  - 1280x720：`publish 1.0.32\Scans\2026-07-02-00-07-29-895-p5420-0228`，`Completed=466`、`Failed=0`、`completed_per_sec=4.096`、`export_duplicate_items=0`、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`quick_accept_count=0`、`profile_route=exact:7`。
+  - 1600x900：`publish 1.0.32\Scans\2026-07-01-23-41-50-841-p7a34-6e08`，`Completed=451`、`Failed=0`、`completed_per_sec=4.201`、`export_duplicate_items=0`、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`quick_accept_count=0`、`profile_route=exact:7`。
+  - 1920x1080：`publish 1.0.32\Scans\2026-07-02-00-02-19-833-p3f24-375f`，`Completed=466`、`Failed=0`、`completed_per_sec=4.052`、`export_duplicate_items=0`、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`row_scroll_overshot_count=0`、`quick_accept_count=0`、`profile_route=exact:7`。
+- 额外探索：1600x900 使用 `--include-non15` 的真正全仓读取会在非 15 级盘处触发 `PanelCellCaptureException`，根因是非 15 面板天然不满 12 个 OCR ROI；该能力需要后续 partial ROI 路径，不纳入 1.0.33 默认模板验收。
+- `.gitignore` 已从“忽略全部 `Data/ocr_fast_templates*.json`”调整为允许正式 `Data/ocr_fast_templates.json`，同时继续忽略其它实验模板。
+
+## 2026-07-01 1.0.32 三挡本地分辨率 Fast OCR v6 稳定化
+
+已执行：
+
+```powershell
+dotnet build -c Release -p:NuGetAudit=false
+dotnet publish -c Release -r win-x64 --self-contained false -p:NuGetAudit=false -o "publish 1.0.32"
+dotnet run -c Release --no-build -- --ocr-fast-merge-indexes ".\tmp-fast-1.0.32\ocr_fast_templates.1280-1600.v6.dotnetrun.json" "E:\yan1\zzz\ZZZ-Scanner.Next-artifacts\tmp-1.0.31-local-1280x720-current-3runs-v6\ocr_fast_templates.v6.json" "E:\yan1\zzz\ZZZ-Scanner.Next-artifacts\tmp-1.0.31-local-1600x900-current-3runs-v6\ocr_fast_templates.v6.json"
+dotnet run -c Release --no-build -- --scan-benchmark "E:\yan1\zzz\ZZZ-Scanner.Next\publish 1.0.31\Scans\2026-07-01-21-42-57-562-p8d2c-1ef0"
+dotnet run -c Release --no-build -- --ocr-fast-calibrate-visual-profiles ".\tmp-fast-1.0.32\local-1920x1080-current-clean-shadow-patched" --output ".\tmp-fast-1.0.32\local-1920x1080-current-v6\ocr_fast_templates.v6.json" --feature v6
+dotnet run -c Release --no-build -- --ocr-fast-merge-indexes ".\tmp-fast-1.0.32\ocr_fast_templates.local-1280-1600-1920.v6.json" "E:\yan1\zzz\ZZZ-Scanner.Next-artifacts\tmp-1.0.31-local-1280x720-current-3runs-v6\ocr_fast_templates.v6.json" "E:\yan1\zzz\ZZZ-Scanner.Next-artifacts\tmp-1.0.31-local-1600x900-current-3runs-v6\ocr_fast_templates.v6.json" ".\tmp-fast-1.0.32\local-1920x1080-current-v6\ocr_fast_templates.v6.json"
+```
+
+结果：
+
+- `NuGetAudit=false` 下 Release build 与 publish 均通过，0 warning / 0 error。普通 `dotnet build -c Release` 在当前网络受限环境会出现 NU1900 包漏洞审计源不可达警告，不是代码警告。
+- 已发布到 `publish 1.0.32`，未覆盖 `publish 1.0.31`。
+- `--ocr-fast-merge-indexes` 已验证可合并 1280x720 与 1600x900 的 v6 canonical index：`templates=555`、`field_policies=7`、`profile_policies=14`、`family_policies=7`。
+- 1600x900 既有 assist 烟测目录 benchmark 可读取新指标：`profile_route=exact:7`、`fast_exact_profile_accept_count=180`、`selection_only_accept_count=0`、`post_scroll_selection_only_blocked_count=0`、重复导出 0、`IncompleteRoi=0`、`strict_one_way_scroll=pass`。
+- 本轮代码已收紧 selection-only 兜底：滚动后首格、retry/fallback/recover 场景或 selection 变化时间无明确正值时会记录 `PANEL_SELECTION_ONLY_BLOCKED` 并触发 stale retry。
+- 验证中发现同排相邻格可能出现 `changeMs=0` 的旧面板重复。1.0.32 已继续加入弱 panel change 与过早 panel change 保护：低于强阈值或点击后 25ms 内的变化不会开启接受门，会记录 `PANEL_WEAK_CHANGE_BLOCKED` 并进入 stale retry。
+- `local-1920x1080-current` 使用修补后的 1.0.32 完成 3 轮 clean shadow：`2026-07-01-23-07-28-119-p8018-0736`、`2026-07-01-23-09-24-512-p5518-1a5c`、`2026-07-01-23-11-25-589-p5af0-def0`。三轮均 `Completed=120`、`Failed=0`、重复导出 0、`IncompleteRoi=0`、`overlap_hard_stop_count=0`、`strict_one_way_scroll=pass`；安全采集速度约 `2.08-2.16/s`。
+- 1920x1080 v6 校准输出到 `tmp-fast-1.0.32\local-1920x1080-current-v6\ocr_fast_templates.v6.json`。校准评估 `false_accepts=0`；exact profile 策略启用 `level/mainStat/name/subStat1..4`。
+- 1920x1080 单独 v6 index assist：30 件 smoke `2026-07-01-23-14-04-519-p6824-1d94` 全 pass；120 件 `2026-07-01-23-15-00-300-p3540-9b24` 全 pass，`completed_per_sec=3.788`、`capture_queued_per_sec=3.805`、`profile_route=exact:7`、`fast_accepted_per_item_avg=6.850`、`ppocr_roi_per_item_avg=5.150`、`ocr_backlog_max=1`、重复导出 0、`IncompleteRoi=0`。
+- 三挡合并候选输出到 `tmp-fast-1.0.32\ocr_fast_templates.local-1280-1600-1920.v6.json`：`templates=719`、`field_policies=7`、`profile_policies=21`、`family_policies=7`。在当前 1920x1080 环境 30 件烟测 `2026-07-01-23-16-52-146-p20a8-4013` 全 pass，`profile_route=exact:7`、`fast_accepted_per_item_avg=6.933`、重复导出 0、`IncompleteRoi=0`。
+
+后续：
+
+- 1.0.33 已补齐三挡 120 件与默认有效全量验收，并将合并候选复制到 `Data/ocr_fast_templates.json`。
+
+## 2026-07-01 1.0.31 Fast OCR v6 模板归一化与 Profile Family 路由
+
+已执行：
+
+```powershell
+dotnet build -c Release
+dotnet run -c Release -- --ocr-fast-calibrate-visual-profiles "E:\yan1\zzz\ZZZ-Scanner.Next-artifacts\2026-07-01-cleanup-20260701-191002\publish 1.0.30\Scans\2026-07-01-18-45-27-948-p82b0-a13b" --output "E:\yan1\zzz\ZZZ-Scanner.Next-artifacts\tmp-1.0.31-v6-smoke\ocr_fast_templates.v6.json" --feature v6
+dotnet run -c Release -- --ocr-fast-eval "E:\yan1\zzz\ZZZ-Scanner.Next-artifacts\tmp-1.0.31-v6-smoke\ocr_fast_templates.v6.json" "E:\yan1\zzz\ZZZ-Scanner.Next-artifacts\2026-07-01-cleanup-20260701-191002\publish 1.0.30\Scans\2026-07-01-18-45-27-948-p82b0-a13b"
+```
+
+结果：
+
+- `dotnet build -c Release` 通过，0 warning / 0 error。
+- v6 smoke 生成 `Version=6`、`Feature=canonical-ahash-dhash-vhash-edge-16x16-v6` 的候选 index，模板记录 `ProfileFamilyId=local-1-33-dpi-current`，每条 v6 feature 为 16 个 64-bit word。
+- 因本次 artifacts 只有 1 轮 shadow，`--ocr-fast-calibrate-visual-profiles` 按安全策略保持所有 `FieldPolicies/ProfileFieldPolicies/FamilyFieldPolicies` 的 `AssistEnabled=false`，原因均为 `needs_at_least_two_shadow_runs`。
+- 单轮自测 eval 仅作为链路 smoke：`fast_eval.rows=840`、`accepted=840`、`false_accepts=0`；这不代表可以启用 assist，正式启用仍要求至少 3 轮 shadow 和跨轮/跨 profile `false_accepts=0`。
+- 新报告已验证生成：`ocr_fast_eval.csv` 包含 `profile_family_id/source_family_id/canonical_crop_succeeded/canonical_crop_fallback/feature_ms`，`ocr_fast_family_calibration.csv` 可读取 family 级阈值和禁用原因。
+- 未把 smoke 生成的 `ocr_fast_templates.v6.json` 复制到 `Data/ocr_fast_templates.json`。
+
+仍需执行：
+
+- 在你确认目标环境后采集 `local-1280x960-current` 三轮 `MaxItems=120 --collect-visual-profile` shadow，全 pass 后再跑 v6 cross validation。
+- 对 `local-1280x720-current`、高分辨率清晰、本地最低画质、云绝区零当前环境重复采集与 family 校准。
+- 每个通过 profile/family 跑 `MaxItems=30`、`MaxItems=120`、全量扫描；目标 `>=3.6/s`，失败、重复、`IncompleteRoi`、漏行均为 0。
+
 ## 2026-07-01 1.0.30 多环境自适配与稳定提速
 
 已执行：

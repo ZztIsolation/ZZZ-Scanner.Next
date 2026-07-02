@@ -29,12 +29,22 @@ ZZZ Scanner Next 是旧版命令行扫描器的独立重写版，目标是做成
 `--scan-benchmark` 只读取扫描输出目录，不启动 GUI、不申请管理员权限、不操作游戏窗口。传入 baseline 目录时会额外输出关键速度指标的百分比变化。
 
 - Fast OCR 校准：
-  `ZZZ-Scanner.Next.exe --ocr-fast-calibrate <shadow-parent> --output <index.json>`
+  `ZZZ-Scanner.Next.exe --ocr-fast-calibrate <shadow-parent> --output <index.json> --feature v6`
 
-`--ocr-fast-calibrate` 读取多轮 `--ocr-shadow-dataset` 输出，生成 v3 模板索引和字段级策略。少于两轮 shadow 数据时会生成安全禁用的 index，不会自动启用 assist。
+`--ocr-fast-calibrate` 读取多轮 `--ocr-shadow-dataset` 输出，生成模板索引和字段级策略。1.0.31 推荐 `--feature v6`：先做文字核心 canonical crop，再生成灰度、横向差分、纵向差分和边缘梯度 hash。少于两轮 shadow 数据时会生成安全禁用的 index，不会自动启用 assist。
 
-- Fast OCR v4 特征评估：
+- Fast OCR 特征评估：
   `ZZZ-Scanner.Next.exe --ocr-fast-feature-eval <shadow-parent>`
+
+- 多视觉 profile 校准：
+  `ZZZ-Scanner.Next.exe --ocr-fast-calibrate-visual-profiles <shadow-parent> --output <index.json> --feature v6`
+
+- 多 index 合并：
+  `ZZZ-Scanner.Next.exe --ocr-fast-merge-indexes <output.json> <index1.json> <index2.json> [...]`
+
+1.0.34 内置已验证的本地三挡分辨率与云绝区零大窗口/普通窗口/全屏 Fast OCR v6 模板：`local-1280x720-current`、`local-1600x900-current`、`local-1920x1080-current`、`cloud-1592x896-current`、`cloud-1440x808-current`、`cloud-1920x1080-current`。`--profile-routing strict` 是默认 assist 路由：只有 exact profile 模板会参与导出，未知分辨率或未训练 profile 自动回退 PP-OCR。`family`、`compatible`、`auto` 仍保留为显式实验，不作为默认全局 fallback。`--ocr-fast-merge-indexes` 只合并 v6 canonical index，保留 profile-specific policies，并对 global/family policy 采用更严格的阈值。1.0.35 起网页 WebSocket `scan_req` 可显式传入 `processName`；云绝区零应传 `Zenless Zone Zero Cloud` 并配合 `visualProfileClient=cloud`。
+
+1.0.32 收紧 `selection_changed_stable_full_roi`：滚动后首格、retry/fallback/recover 场景、以及 selection 变化时间没有明确正值时，不允许只凭选中态变化接受详情面板。同排相邻格的弱 panel change 或点击后 25ms 内的过早 panel change 也不会开启接受门，而是记录 `PANEL_WEAK_CHANGE_BLOCKED` 并触发 stale retry。benchmark 输出 `selection_only_accept_count`、`post_scroll_selection_only_blocked_count`、`weak_panel_change_blocked_count` 和 `fast_exact_profile_accept_count`。
 
 - 已验证高速模式：
   `ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode`
