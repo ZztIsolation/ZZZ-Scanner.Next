@@ -493,8 +493,7 @@ public static class FastOcrEvaluator
             var minAcceptRate = field.Equals("name", StringComparison.OrdinalIgnoreCase)
                 ? NameAssistMinAcceptRate
                 : DefaultAssistMinAcceptRate;
-            var eligibleField = FastOcrTemplateIndex.IsDefaultAssistField(field)
-                || field.Equals("name", StringComparison.OrdinalIgnoreCase);
+            var eligibleField = FastOcrTemplateIndex.IsDefaultAssistField(field);
             var enabled = hasCrossValidation
                 && eligibleField
                 && selected.FalseAccepts == 0
@@ -545,8 +544,7 @@ public static class FastOcrEvaluator
                 var minAcceptRate = field.Equals("name", StringComparison.OrdinalIgnoreCase)
                     ? NameAssistMinAcceptRate
                     : DefaultAssistMinAcceptRate;
-                var eligibleField = FastOcrTemplateIndex.IsDefaultAssistField(field)
-                    || field.Equals("name", StringComparison.OrdinalIgnoreCase);
+                var eligibleField = FastOcrTemplateIndex.IsDefaultAssistField(field);
                 var enabled = hasCrossValidation
                     && eligibleField
                     && selected.FalseAccepts == 0
@@ -618,8 +616,7 @@ public static class FastOcrEvaluator
                 var minAcceptRate = field.Equals("name", StringComparison.OrdinalIgnoreCase)
                     ? NameAssistMinAcceptRate
                     : DefaultAssistMinAcceptRate;
-                var eligibleField = FastOcrTemplateIndex.IsDefaultAssistField(field)
-                    || field.Equals("name", StringComparison.OrdinalIgnoreCase);
+                var eligibleField = FastOcrTemplateIndex.IsDefaultAssistField(field);
                 var enabled = hasCrossValidation
                     && eligibleField
                     && selected.FalseAccepts == 0

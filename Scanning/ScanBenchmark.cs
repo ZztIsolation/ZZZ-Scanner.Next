@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Text.Json;
+using ZZZScannerNext.Cleaning;
 using ZZZScannerNext.Core;
 
 namespace ZZZScannerNext.Scanning;
@@ -157,6 +158,9 @@ public static class ScanBenchmark
         WriteSuiteStats("scroll_ms_avg", reports.Select(report => report.ScrollDuration.Average));
         Write("suite", "failed_sum", reports.Sum(report => report.LastFailed ?? 0));
         Write("suite", "export_duplicate_items_sum", reports.Sum(report => report.ExportDuplicateItemCount));
+        Write("suite", "slot_out_of_range_sum", reports.Sum(report => report.SlotOutOfRangeCount));
+        Write("suite", "slot_mainstat_violation_sum", reports.Sum(report => report.SlotMainStatViolationCount));
+        Write("suite", "slot_fixed_value_violation_sum", reports.Sum(report => report.SlotFixedValueViolationCount));
         Write("suite", "incomplete_roi_sum", reports.Sum(report => report.IncompleteRoiCount));
         Write("suite", "row_scroll_overshot_sum", reports.Sum(report => report.RowScrollOvershotCount));
         Write("suite", "overlap_conflict_sum", reports.Sum(report => report.OverlapConflictCount));
@@ -258,6 +262,9 @@ public static class ScanBenchmark
             ExportItemCount = exportStats.ItemCount,
             ExportDuplicateGroupCount = exportStats.DuplicateGroupCount,
             ExportDuplicateItemCount = exportStats.DuplicateItemCount,
+            SlotOutOfRangeCount = exportStats.SlotOutOfRangeCount,
+            SlotMainStatViolationCount = exportStats.SlotMainStatViolationCount,
+            SlotFixedValueViolationCount = exportStats.SlotFixedValueViolationCount,
             ErrorFileCount = Directory.EnumerateFiles(scanDirectory, "*.error.txt").Count(),
             Non15FileCount = Directory.EnumerateFiles(scanDirectory, "*.non15.txt").Count(),
             CellTimingCount = cellTimings.Count,
@@ -815,33 +822,57 @@ public static class ScanBenchmark
     {
         if (!File.Exists(exportFile))
         {
-            return new ExportStats(null, 0, 0);
+            return new ExportStats(null, 0, 0, 0, 0, 0);
         }
 
         try
         {
+            var rules = WikiData.Load().StatRules;
             using var document = JsonDocument.Parse(File.ReadAllText(exportFile));
             if (document.RootElement.ValueKind != JsonValueKind.Array)
             {
-                return new ExportStats(null, 0, 0);
+                return new ExportStats(null, 0, 0, 0, 0, 0);
             }
 
             var itemCount = 0;
             var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
+            var slotOutOfRange = 0;
+            var slotMainStatViolation = 0;
+            var slotFixedValueViolation = 0;
             foreach (var item in document.RootElement.EnumerateArray())
             {
                 itemCount++;
                 var fingerprint = ExportFingerprint(item);
                 fingerprints[fingerprint] = fingerprints.TryGetValue(fingerprint, out var count) ? count + 1 : 1;
+                var export = item.Deserialize<DriveDiscExport>(JsonDefaults.Read);
+                if (export is not null)
+                {
+                    var issues = DriveDiscSlotSafety.Validate(export, rules);
+                    if (issues.Any(issue => issue.Code == DriveDiscSlotSafety.SlotOutOfRange))
+                    {
+                        slotOutOfRange++;
+                    }
+
+                    if (issues.Any(issue => issue.Code == DriveDiscSlotSafety.SlotMainStatViolation
+                        || issue.Code == DriveDiscSlotSafety.MissingMainStat))
+                    {
+                        slotMainStatViolation++;
+                    }
+
+                    if (issues.Any(issue => issue.Code == DriveDiscSlotSafety.SlotFixedValueViolation))
+                    {
+                        slotFixedValueViolation++;
+                    }
+                }
             }
 
             var duplicateGroups = fingerprints.Values.Count(count => count > 1);
             var duplicateItems = fingerprints.Values.Where(count => count > 1).Sum();
-            return new ExportStats(itemCount, duplicateGroups, duplicateItems);
+            return new ExportStats(itemCount, duplicateGroups, duplicateItems, slotOutOfRange, slotMainStatViolation, slotFixedValueViolation);
         }
         catch
         {
-            return new ExportStats(null, 0, 0);
+            return new ExportStats(null, 0, 0, 0, 0, 0);
         }
     }
 
@@ -1012,6 +1043,10 @@ public static class ScanBenchmark
         Write(prefix, "export_matches_completed", ExportMatchesCompleted(report));
         Write(prefix, "export_duplicate_groups", report.ExportDuplicateGroupCount);
         Write(prefix, "export_duplicate_items", report.ExportDuplicateItemCount);
+        Write(prefix, "slot_out_of_range_count", report.SlotOutOfRangeCount);
+        Write(prefix, "slot_mainstat_violation_count", report.SlotMainStatViolationCount);
+        Write(prefix, "slot_fixed_value_violation_count", report.SlotFixedValueViolationCount);
+        Write(prefix, "slot_safety_pass", report.SlotSafetyPass.ToString(CultureInfo.InvariantCulture).ToLowerInvariant());
         Write(prefix, "error_files", report.ErrorFileCount);
         Write(prefix, "non15_files", report.Non15FileCount);
         Write(prefix, "last_visited", report.LastVisited);
@@ -1185,6 +1220,7 @@ public static class ScanBenchmark
         Write("acceptance", "no_error_files", report.ErrorFileCount == 0 ? "pass" : "fail");
         Write("acceptance", "export_consistency", ExportMatchesCompleted(report) is false ? "risk" : "pass");
         Write("acceptance", "no_export_duplicates", report.ExportDuplicateItemCount == 0 ? "pass" : "fail");
+        Write("acceptance", "slot_safety", report.SlotSafetyPass ? "pass" : "fail");
         Write("acceptance", "backlog_not_saturated", IsBacklogSaturated(report) ? "risk" : "pass");
         Write("acceptance", "no_unsafe_visual_row2", report.UnsafeVisualRow2ClickCount == 0 ? "pass" : "fail");
         Write("acceptance", "overlap_rows_complete", string.Equals(report.Traversal, "overlap-signature-page", StringComparison.OrdinalIgnoreCase) && report.OverlapRowScannedCount > 0 && report.LastQueued == report.ExportItemCount ? "pass" : "skip");
@@ -1371,6 +1407,7 @@ public static class ScanBenchmark
         return report.LastFailed == 0
             && report.ErrorFileCount == 0
             && report.ExportDuplicateItemCount == 0
+            && report.SlotSafetyPass
             && report.IncompleteRoiCount == 0
             && report.QuickAcceptCount == 0
             && report.RowScrollOvershotCount == 0
@@ -1448,6 +1485,12 @@ public static class ScanBenchmark
         public int? ExportItemCount { get; set; }
         public int ExportDuplicateGroupCount { get; set; }
         public int ExportDuplicateItemCount { get; set; }
+        public int SlotOutOfRangeCount { get; set; }
+        public int SlotMainStatViolationCount { get; set; }
+        public int SlotFixedValueViolationCount { get; set; }
+        public bool SlotSafetyPass => SlotOutOfRangeCount == 0
+            && SlotMainStatViolationCount == 0
+            && SlotFixedValueViolationCount == 0;
         public int ErrorFileCount { get; set; }
         public int Non15FileCount { get; set; }
         public int CellTimingCount { get; set; }
@@ -1578,7 +1621,13 @@ public static class ScanBenchmark
 
     private readonly record struct StartSettings(int Workers, int BatchSize, int QueueCapacity, int IntraOpThreads);
 
-    private readonly record struct ExportStats(int? ItemCount, int DuplicateGroupCount, int DuplicateItemCount);
+    private readonly record struct ExportStats(
+        int? ItemCount,
+        int DuplicateGroupCount,
+        int DuplicateItemCount,
+        int SlotOutOfRangeCount,
+        int SlotMainStatViolationCount,
+        int SlotFixedValueViolationCount);
 
     private readonly record struct OverlapTraversalSummary(int? TotalRows, int ScannedRows, int MissingRows, bool FullScanComplete);
 

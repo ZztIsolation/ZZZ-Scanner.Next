@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 1.0.36 槽位安全热修：Fast OCR assist 运行时强制禁用 `name` 字段，`name` 仍保留 shadow/eval/training 但正式导出始终回退 PP-OCR；校准器也不再允许 `name` 自动进入 assist，避免套装名模板误接受导致槽位污染。
+- 1.0.36 新增导出前槽位硬校验与 benchmark 验收指标：`slot_out_of_range_count`、`slot_mainstat_violation_count`、`slot_fixed_value_violation_count`、`slot_safety_pass`。旧坏样本 `runtime\1.0.34\Scans\2026-07-02-18-34-09-134-pf38-77d5` 回放会正确判定 `slot_safety_pass=false`，其中 `slot_mainstat_violation_count=18`、`slot_fixed_value_violation_count=19`。
+- 1.0.36 模板 `Data\ocr_fast_templates.json` 已把所有 `name` policy 的 `AssistEnabled` 置为 false，保留 8275 个 v6 模板样本；模板 SHA-256 为 `814e28114378756e7c541c0efe6cfa2469e1e723d0498ba8e73edea58266a076`。
+- 1.0.36 已发布到 `publish 1.0.36`，并为网页重新生成不含 `Scans` 的分发包 `dist\ZZZ-Scanner.Next-win-x64-1.0.36-web.zip`，大小 `47231570` 字节，SHA-256 为 `d885c0aef6da61cfcbf994ad2b4e712a31efe8bd87631260fe4f87ea8711c63d`；`dotnet build ZZZ-Scanner.Next.csproj -c Release` 通过，0 warning / 0 error。120 件本地实扫 `publish 1.0.36\Scans\2026-07-09-16-07-11-507-p2784-e284` 验收通过：`Completed=120`、`Failed=0`、重复导出 0、`IncompleteRoi=0`、`slot_safety_pass=true`、`profile_route=exact:7`。
 - 1.0.35 增加网页 WebSocket `scan_req.processName` 支持：网页端选择“云绝区零”时可传入 `Zenless Zone Zero Cloud`，扫描器会覆盖默认 `ZenlessZoneZero` 进程名，并与 `visualProfileClient=cloud` 一起命中 1.0.34 已内置的云端 exact profile。未传 `processName` 时仍保持本地端默认行为。
 - 1.0.35 已用 framework-dependent publish 重新生成 `publish 1.0.35`，排除 `Scans` 后压缩为网页分发包，大小 `47228425` 字节，SHA-256 为 `2a10aa3dc92e50c7ea930d75eda82fef741eff16e8c39f2839240b6fc36b0255`；`dotnet build ZZZ-Scanner.Next.csproj -c Release` 通过，0 warning / 0 error。
 - 1.0.34 将“本地三挡 + 云绝区零大窗口 + 云绝区零普通窗口 + 云绝区零全屏”的 v6 Fast OCR 合并模板提升为正式 `Data/ocr_fast_templates.json`，覆盖 `local-1280x720-current`、`local-1600x900-current`、`local-1920x1080-current`、`cloud-1592x896-current`、`cloud-1440x808-current`、`cloud-1920x1080-current`；模板 `Version=6`、`Feature=canonical-ahash-dhash-vhash-edge-16x16-v6`、`templates=8275`、`ProfileFieldPolicies=42`、`FamilyFieldPolicies=14`。正式模板已清空训练用 `SourceImage` 本机路径，SHA-256 为 `481a7d08e02c514bce3188f6cf04a6126404417e3c1788ed940df8f6ad12c26a`。

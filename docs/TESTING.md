@@ -1,5 +1,31 @@
 # Testing
 
+## 2026-07-09 1.0.36 槽位安全热修
+
+已执行：
+
+```powershell
+dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
+dotnet run --project ZZZ-Scanner.Next.csproj -c Release -- --scan-benchmark "C:\Users\ZZT\AppData\Local\ZZZScannerNext\runtime\1.0.34\Scans\2026-07-02-18-34-09-134-pf38-77d5"
+dotnet run --project ZZZ-Scanner.Next.csproj -c Release -- --scan-benchmark ".\publish 1.0.32\Scans\2026-07-01-23-07-28-119-p8018-0736"
+dotnet publish ZZZ-Scanner.Next.csproj -c Release -r win-x64 --self-contained false -p:NuGetAudit=false -o "publish 1.0.36"
+.\scripts\publish-slim.ps1 -Version 1.0.36
+.\publish 1.0.36\ZZZ-Scanner.Next.exe --scan-benchmark "C:\Users\ZZT\AppData\Local\ZZZScannerNext\runtime\1.0.34\Scans\2026-07-02-18-34-09-134-pf38-77d5"
+.\publish 1.0.36\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.32\Scans\2026-07-01-23-07-28-119-p8018-0736"
+.\publish 1.0.36\ZZZ-Scanner.Next.exe --scan-benchmark ".\publish 1.0.36\Scans\2026-07-09-16-07-11-507-p2784-e284"
+Get-FileHash -Algorithm SHA256 ".\Data\ocr_fast_templates.json"
+Get-FileHash -Algorithm SHA256 ".\dist\ZZZ-Scanner.Next-win-x64-1.0.36-web.zip"
+```
+
+结果：
+
+- Release build 通过，0 warning / 0 error。
+- 旧坏样本 `runtime\1.0.34\Scans\2026-07-02-18-34-09-134-pf38-77d5` 被新 benchmark 正确判定为 `slot_safety_pass=false`，`slot_mainstat_violation_count=18`、`slot_fixed_value_violation_count=19`。
+- 干净对照样本 `publish 1.0.32\Scans\2026-07-01-23-07-28-119-p8018-0736` 为 `slot_safety_pass=true`，三类槽位违规计数均为 0。
+- 本地 120 件实扫 `publish 1.0.36\Scans\2026-07-09-16-07-11-507-p2784-e284` 验收通过：`Completed=120`、`Failed=0`、重复导出 0、`IncompleteRoi=0`、`slot_safety_pass=true`、`profile_route=exact:7`。
+- 发布目录与 zip 内置模板均确认 `name` assist policy 数量为 0；模板 SHA-256 `814e28114378756e7c541c0efe6cfa2469e1e723d0498ba8e73edea58266a076`。
+- 已生成 `publish 1.0.36` 和网页分发包 `dist\ZZZ-Scanner.Next-win-x64-1.0.36-web.zip`；zip 不包含 `Scans`，大小 `47231570` 字节，SHA-256 `d885c0aef6da61cfcbf994ad2b4e712a31efe8bd87631260fe4f87ea8711c63d`。
+
 ## 2026-07-02 1.0.34 本地三挡 + 云绝区零大窗口/普通窗口/全屏 v6 模板内置
 
 已执行：

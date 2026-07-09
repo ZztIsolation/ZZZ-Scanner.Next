@@ -74,7 +74,7 @@ public sealed class DriveDiscCleaner
 
                     if (IsSetEffectText(text) || IsSetEffectText(result[i + 1].Text))
                     {
-                        return export;
+                        return ValidateSlotSafety(export);
                     }
 
                     var subKey = CleanSubStat(text);
@@ -83,6 +83,17 @@ public sealed class DriveDiscCleaner
                     i++;
                     break;
             }
+        }
+
+        return ValidateSlotSafety(export);
+    }
+
+    private DriveDiscExport ValidateSlotSafety(DriveDiscExport export)
+    {
+        var issues = DriveDiscSlotSafety.ValidateAndRepair(export, _wikiData.StatRules);
+        if (issues.Count > 0)
+        {
+            throw new InvalidDataException($"槽位安全校验失败：{DriveDiscSlotSafety.FormatIssues(issues)} OCR={export.RawOcr}");
         }
 
         return export;

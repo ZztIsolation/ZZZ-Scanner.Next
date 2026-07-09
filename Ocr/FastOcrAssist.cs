@@ -95,6 +95,13 @@ public sealed class FastOcrAssistEngine
         for (var roiIndex = 0; roiIndex < rois.Count; roiIndex++)
         {
             var fieldKey = FieldKey(roiIndex);
+            if (fieldKey.Equals("name", StringComparison.OrdinalIgnoreCase))
+            {
+                AddPpOcr();
+                decisions.Add(FastOcrAssistDecision.PpOcr(itemIndex, roiIndex, fieldKey, rarity, "slot_safety_name_ppocr", source: "fallback"));
+                continue;
+            }
+
             if (disabledByHealth)
             {
                 AddPpOcr();

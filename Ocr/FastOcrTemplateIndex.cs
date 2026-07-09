@@ -119,6 +119,7 @@ public sealed class FastOcrTemplateIndex
                 .Concat(index.FamilyFieldPolicies.Select(pair => new KeyValuePair<string, FastOcrFieldPolicy>(FieldFromPolicyKey(pair.Key), pair.Value)))
                 .Where(pair => pair.Value.AssistEnabled && pair.Value.TemplateCount > 0)
                 .Select(pair => pair.Key)
+                .Where(IsDefaultAssistField)
                 .Where(field => !string.IsNullOrWhiteSpace(field))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(field => field, StringComparer.OrdinalIgnoreCase)
@@ -324,6 +325,7 @@ public sealed class FastOcrTemplateIndex
         if (!string.IsNullOrWhiteSpace(normalizedProfileId)
             && ProfileFieldPolicies.TryGetValue(ProfilePolicyKey(normalizedProfileId, fieldKey), out var profilePolicy))
         {
+            DisableNameAssist(fieldKey, profilePolicy);
             return profilePolicy;
         }
 
@@ -331,13 +333,16 @@ public sealed class FastOcrTemplateIndex
         if (!string.IsNullOrWhiteSpace(familyId)
             && FamilyFieldPolicies.TryGetValue(ProfilePolicyKey(familyId, fieldKey), out var familyPolicy))
         {
+            DisableNameAssist(fieldKey, familyPolicy);
             return familyPolicy;
         }
 
         var policies = FieldPolicies ?? new Dictionary<string, FastOcrFieldPolicy>(StringComparer.OrdinalIgnoreCase);
-        return policies.TryGetValue(fieldKey, out var policy)
+        var selectedPolicy = policies.TryGetValue(fieldKey, out var policy)
             ? policy
             : FastOcrFieldPolicy.Default(fieldKey);
+        DisableNameAssist(fieldKey, selectedPolicy);
+        return selectedPolicy;
     }
 
     private IReadOnlyList<FastOcrTemplate> TemplatesForField(string fieldKey)
@@ -515,6 +520,7 @@ public sealed class FastOcrTemplateIndex
                 .Where(label => !string.IsNullOrWhiteSpace(label))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Count();
+            DisableNameAssist(field, policy);
             FieldPolicies[field] = policy;
         }
 
@@ -541,6 +547,7 @@ public sealed class FastOcrTemplateIndex
                     .Where(label => !string.IsNullOrWhiteSpace(label))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .Count();
+                DisableNameAssist(field, policy);
                 ProfileFieldPolicies[key] = policy;
             }
         }
@@ -568,6 +575,7 @@ public sealed class FastOcrTemplateIndex
                     .Where(label => !string.IsNullOrWhiteSpace(label))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .Count();
+                DisableNameAssist(field, policy);
                 FamilyFieldPolicies[key] = policy;
             }
         }
@@ -587,6 +595,14 @@ public sealed class FastOcrTemplateIndex
     public static string ProfilePolicyKey(string visualProfileId, string fieldKey)
     {
         return $"{NormalizeProfileId(visualProfileId)}|{fieldKey}";
+    }
+
+    private static void DisableNameAssist(string fieldKey, FastOcrFieldPolicy policy)
+    {
+        if (fieldKey.Equals("name", StringComparison.OrdinalIgnoreCase))
+        {
+            policy.AssistEnabled = false;
+        }
     }
 
     private static string FieldFromPolicyKey(string policyKey)
