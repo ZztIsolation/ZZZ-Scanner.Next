@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 重写根目录用户手册：`README.md` 提供完整英文说明，新增 `README.zh-CN.md` 提供完整中文说明；两版均覆盖支持系统与不支持范围、Helper 自动选择 FDD/自包含包、手动安装、扫描操作、权限与 UAC、输出文件、结构化故障排查、已知限制、命令行和发布门禁。
 - 1.0.37 移除 OpenCvSharp：所有 ROI 使用 `System.Drawing.Rectangle`，PP-OCR 预处理改为基于 `Bitmap.LockBits` 的裁剪、半像素双线性缩放和 BGR/NCHW tensor 写入；保留 PP-OCRv5 模型、ONNX Runtime、Fast OCR、DXGI 与 GDI 回退。
 - 1.0.37 发布脚本同时生成 framework-dependent 与 self-contained 两个 x64 包，并生成 schema v2 manifest、SHA-256、展开大小和体积报告；发布门禁为 FDD 25 MiB、自包含 90 MiB、NativeAOT Helper 10 MiB。
 - 两种包均随附 ONNX Runtime 所需的 VC143 本地依赖。CI 要求从受控 Visual Studio Redistributable 布局复制；缺少该布局时发布会失败，避免在正式构建中静默遗漏或使用来源不明的 DLL。
