@@ -1,9 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
-using OpenCvSharp;
 using ZZZScannerNext.Scanning;
-using CvRect = OpenCvSharp.Rect;
 
 namespace ZZZScannerNext.Ocr;
 
@@ -80,12 +78,12 @@ public sealed class FastOcrAssistEngine
         }
     }
 
-    public FastOcrAssistPlan Plan(int itemIndex, string rarity, Bitmap image, IReadOnlyList<CvRect> rois)
+    public FastOcrAssistPlan Plan(int itemIndex, string rarity, Bitmap image, IReadOnlyList<Rectangle> rois)
     {
         var results = new OcrResult[rois.Count];
         var hasResult = new bool[rois.Count];
         var ppOcrIndices = new List<int>();
-        var ppOcrRois = new List<CvRect>();
+        var ppOcrRois = new List<Rectangle>();
         var decisions = new List<FastOcrAssistDecision>();
         var fastMatchMs = 0.0;
         var fastAccepted = 0;
@@ -225,7 +223,7 @@ public sealed class FastOcrAssistPlan
         OcrResult[] results,
         bool[] hasResult,
         int[] ppOcrIndices,
-        CvRect[] ppOcrRois,
+        Rectangle[] ppOcrRois,
         IReadOnlyList<FastOcrAssistDecision> decisions,
         double fastMatchMs,
         int fastAcceptedCount,
@@ -244,7 +242,7 @@ public sealed class FastOcrAssistPlan
     public OcrResult[] Results { get; }
     public bool[] HasResult { get; }
     public int[] PpOcrIndices { get; }
-    public CvRect[] PpOcrRois { get; }
+    public Rectangle[] PpOcrRois { get; }
     public IReadOnlyList<FastOcrAssistDecision> Decisions { get; }
     public double FastMatchMs { get; }
     public int FastAcceptedCount { get; }

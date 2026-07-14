@@ -2,9 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using OpenCvSharp;
 using ZZZScannerNext.Scanning;
-using CvRect = OpenCvSharp.Rect;
 
 namespace ZZZScannerNext.Ocr;
 
@@ -67,7 +65,7 @@ public sealed class FastOcrShadowRecorder : IDisposable
         int itemIndex,
         string rarity,
         Bitmap image,
-        IReadOnlyList<CvRect> rois,
+        IReadOnlyList<Rectangle> rois,
         IReadOnlyList<OcrResult> ocr,
         DriveDiscExport export)
     {

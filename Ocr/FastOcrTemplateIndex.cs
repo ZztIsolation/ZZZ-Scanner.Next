@@ -3,10 +3,8 @@ using System.Drawing.Imaging;
 using System.Globalization;
 using System.Numerics;
 using System.Text.Json;
-using OpenCvSharp;
 using ZZZScannerNext.Core;
 using ZZZScannerNext.Scanning;
-using CvRect = OpenCvSharp.Rect;
 
 namespace ZZZScannerNext.Ocr;
 
@@ -199,17 +197,17 @@ public sealed class FastOcrTemplateIndex
         return index;
     }
 
-    public FastOcrMatch Match(string fieldKey, Bitmap source, CvRect roi)
+    public FastOcrMatch Match(string fieldKey, Bitmap source, Rectangle roi)
     {
         return Match(fieldKey, source, roi, "");
     }
 
-    public FastOcrMatch Match(string fieldKey, Bitmap source, CvRect roi, string visualProfileId)
+    public FastOcrMatch Match(string fieldKey, Bitmap source, Rectangle roi, string visualProfileId)
     {
         return Match(fieldKey, source, roi, visualProfileId, ProfileRoutingMode.Auto);
     }
 
-    public FastOcrMatch Match(string fieldKey, Bitmap source, CvRect roi, string visualProfileId, ProfileRoutingMode routingMode)
+    public FastOcrMatch Match(string fieldKey, Bitmap source, Rectangle roi, string visualProfileId, ProfileRoutingMode routingMode)
     {
         var normalizedProfileId = NormalizeProfileId(visualProfileId);
         var route = ResolveTemplateRoute(fieldKey, normalizedProfileId, routingMode);
@@ -219,8 +217,7 @@ public sealed class FastOcrTemplateIndex
             return FastOcrMatch.Empty(fieldKey, route.Reason);
         }
 
-        var sourceRect = new Rectangle(roi.X, roi.Y, roi.Width, roi.Height);
-        var feature = FastOcrImageFeature.FromBitmap(source, sourceRect, Feature);
+        var feature = FastOcrImageFeature.FromBitmap(source, roi, Feature);
         FastOcrTemplate? best = null;
         var bestDistance = int.MaxValue;
         FastOcrTemplate? secondDifferentLabel = null;

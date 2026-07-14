@@ -25,6 +25,27 @@
 - `mouse_event`
 - `Graphics.CopyFromScreen`
 
+## Helper Trust Boundary
+
+网页先向 `ZZZ-Scanner-Helper` 的 loopback HTTP 服务申请一次性令牌，再通过带令牌的 WebSocket 连接 Helper。
+旧版直连 scanner WebSocket 只接受项目白名单中的浏览器 `Origin`；所有 WebSocket 消息都有 256 KiB 上限，
+scanner host 通过全局锁保证同一时间只运行一个扫描任务。
+
+Helper 只允许通过 HTTPS 下载远程 manifest/扫描器包，本地开发可使用 loopback HTTP。
+schema v2 manifest 同时描述 framework-dependent 和 self-contained 包；Helper 检查 OS build、x64 架构、
+目录写权限、磁盘空间与 `Microsoft.WindowsDesktop.App 8.x`，确定存在桌面运行库时选择 FDD，缺失或不确定时
+选择 self-contained。schema v1 继续兼容一个发布周期。manifest 在参与文件系统操作前必须通过 schema、
+最低 Helper 版本、scanner 版本、SHA-256、压缩/展开大小和单文件 EXE 入口校验；
+所有安装、临时目录和入口路径都必须位于 `%LOCALAPPDATA%\ZZZScannerNext` 对应根目录内。
+
+缓存包的 SHA-256 验证通过后，Helper 会把 ZIP 内每个文件与已安装 runtime 逐一比较。
+`Scans` 和 `StabilitySuites` 作为运行时输出目录不参与“额外文件”拒绝规则；其它缺失、篡改或额外文件会触发重新安装。
+浏览器会话结束时，Helper 会关闭内部 WebSocket 并终止本次会话创建的 scanner 子进程。
+
+Helper 协议 v2 用固定错误码和结构化 `scan_error` 返回阶段、用户可读说明、补救建议、可重试标记、动作和
+诊断编号。网页可调用 `repair_scanner`、`restart_scanner_elevated`、`open_log_folder` 和 `get_diagnostics`；
+端口占用或协议注册失败等尚未建立浏览器连接的错误由原生 Windows 对话框显示错误码和日志位置。
+
 ## Resolution Strategy
 
 `scan_profiles.json` 中保留 1920x1080 点位，但运行时会转换成比例坐标，再乘以当前游戏客户区尺寸。这样同一 UI 比例下可跨分辨率运行。
@@ -37,7 +58,9 @@
 
 ## OCR Strategy
 
-详情面板文字位置是已知的，所以本系统不跑文字检测模型，只跑识别模型。每个 ROI 会按高度缩放到 48px，并合成 batch tensor，一次送入 `PP-OCRv5_mobile_rec_infer.onnx`。
+详情面板文字位置是已知的，所以本系统不跑文字检测模型，只跑识别模型。每个 ROI 通过
+`Bitmap.LockBits` 直接裁剪、双线性缩放并按 BGR/NCHW 写入归一化 tensor，再一次送入
+`PP-OCRv5_mobile_rec_infer.onnx`。该托管预处理路径不再依赖 OpenCV。
 
 这比全屏 OCR 快很多，也避免扫描游戏内无关文字。
 

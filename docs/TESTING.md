@@ -1,5 +1,55 @@
 # Testing
 
+## 2026-07-14 1.0.37 Windows 双包、OCR 等价与自诊断发布
+
+已执行：
+
+```powershell
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+.\scripts\publish-slim.ps1 -Version 1.0.37
+.\dist\publish-scanner-1.0.37-fdd\ZZZ-Scanner.Next.exe --scan-benchmark <existing-466-item-scan>
+.\dist\publish-scanner-1.0.37-self-contained\ZZZ-Scanner.Next.exe --scan-benchmark <existing-466-item-scan>
+```
+
+结果：
+
+- 12 项自动回归全部通过。除既有安全、manifest v1、路径、runtime 完整性、WebSocket、Fast Mode、profile 和版本测试外，新增 schema v2 双包选择、OpenCV 冻结张量基准和真实 ROI OCR 输出等价门禁。
+- 托管 `Bitmap.LockBits` 预处理使用与 OpenCV 4.11 x64 优化路径相同的 11-bit 定点双线性系数和阶段舍入；固定张量最大误差不超过 `1e-5`。
+- 6 个真实 ROI 覆盖名称、等级、主词条、主词条值、副词条和副词条值；新旧识别文本完全一致，置信度最大差约 `0.000285`，低于 `0.005` 门禁。
+- 发布脚本成功生成 FDD `21785638` 字节（SHA-256 `6ead4f1401ea057c706b4ec94ab41d66499240f95c8d6a9051fe71027d9e5404`）、self-contained `84835543` 字节（SHA-256 `bdef1a3d3d0ecf9917b2618fb46cd04cea6443dbd8b399d9793c6f375a993129`）和 NativeAOT Helper `7823872` 字节（SHA-256 `8735147fb1d3061ad410ba162cebf841be815834699faa341aae342e422f2186`），均低于 25/90/10 MiB 门禁；连续两次完整发布的 ZIP SHA 完全一致。
+- 发布包无 OpenCvSharp、PDB 和扫描输出，两个包的 PP-OCRv5 模型 SHA-256 一致。PE 导入表闭包检查扫描 FDD 23 个、自包含 271 个 PE 文件，所有非系统依赖均为 app-local；Helper 也使用同一门禁。
+- 本机没有 Visual Studio VC Redist 布局，因此本地验证包明确记录 `system32-fallback` 和 VC 文件版本/SHA；正式 Windows workflow 使用 `-RequireVCRedistLayout`，缺少受控 VC143 布局会阻止发布。
+- FDD 与自包含程序都成功回放同一份 466 件扫描：`export_items=466`、重复导出 0、`error_files=0`、`slot_safety_pass=true`、`profile_route=exact:7`、`overlap_hard_stop_count=0`。样本按既有规则在首个非 15 级盘停止，因此 `full_scan_complete=false` 是预期结果。
+- 三个可执行文件的 Authenticode 状态均为 `NotSigned`，符合本期不签名的已知边界。
+- 本轮未执行全套干净虚拟机矩阵和新的 30/120 件游戏实扫；这两项仍是正式公开发布前的人工验收门禁，不能由当前开发机的自动测试替代。
+
+## 2026-07-14 fixing 分支安全与一致性回归
+
+已执行：
+
+```powershell
+dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
+dotnet build Launcher\ZZZ-Scanner.Helper.csproj -c Release -p:NuGetAudit=false
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+$env:ZZZ_SCANNER_TEST_PACKAGE = Join-Path $env:LOCALAPPDATA 'ZZZScannerNext\packages\scanner-1.0.36.zip'
+$env:ZZZ_SCANNER_TEST_RUNTIME = Join-Path $env:LOCALAPPDATA 'ZZZScannerNext\runtime\1.0.36'
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+$env:VSCMD_SKIP_SENDTELEMETRY = '1'
+dotnet publish Launcher\ZZZ-Scanner.Helper.csproj -c Release -r win-x64 --self-contained true -p:NuGetAudit=false -o artifacts\verify-helper-aot
+.\scripts\publish-slim.ps1 -Version 9.8.7 -OutputRoot artifacts\publish-script-verification
+dotnet run --project ZZZ-Scanner.Next.csproj -c Release --no-build -- --scan-benchmark "C:\Users\ZZT\AppData\Local\ZZZScannerNext\runtime\1.0.36\Scans\2026-07-09-18-19-25-040-p35e8-08b6"
+```
+
+结果：
+
+- 主程序和 Helper Release build 均通过，0 warning / 0 error。
+- 9 项可移植自动回归全部通过：HTTPS/loopback 下载限制、manifest 校验、runtime 路径包含、安装文件完整性、浏览器 Origin、实际 WebSocket Origin/token 握手、Fast Mode 默认值、profile 严格匹配、程序集版本。
+- 设置可选的 package/runtime 环境变量后，第 10 项测试会逐文件校验本机现有 1.0.36 runtime；当前缓存 ZIP 与安装目录通过完整性检查，包括允许保留 `Scans` 输出目录。
+- NativeAOT Helper 发布通过，验证新增校验代码和 source-generated JSON 在裁剪/AOT 下可用。
+- 隔离发布生成 `ZZZ-Scanner.Next-win-x64-9.8.7.zip`，EXE `FileVersion=9.8.7.0`、`ProductVersion=9.8.7+<commit>`，证明脚本版本参数已进入程序集；非法版本 `..\evil` 在执行发布或目录清理前被拒绝。
+- 既有 1.0.36 默认有效全量样本 benchmark 回放成功：`export_items=466`、重复导出 0、错误文件 0、`IncompleteRoi=0`、`slot_safety_pass=true`、`profile_route=exact:7`、`overlap_hard_stop_count=0`。该样本在第 467 个非 15 级驱动盘处停止，因此 `full_scan_complete=false` 和后续未扫行属于原有网页导入规则。
+- 本轮未执行游戏实扫；扫描遍历、OCR 模型、清洗和导出算法未修改，仍需在正式发版前沿用 30/120/默认有效全量实机验收。
+
 ## 2026-07-09 1.0.36 槽位安全热修
 
 已执行：

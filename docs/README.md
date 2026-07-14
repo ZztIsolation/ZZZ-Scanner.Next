@@ -5,7 +5,7 @@ ZZZ Scanner Next 是旧版命令行扫描器的独立重写版，目标是做成
 ## 当前能力
 
 - WinForms GUI：检测窗口、预览详情区、开始/停止扫描、查看实时结果和日志。
-- 默认申请管理员权限：`app.manifest` 使用 `requireAdministrator`，程序入口也会尝试自提升。
+- 默认使用当前用户权限：`app.manifest` 使用 `asInvoker`；仅当游戏进程完整性级别更高时返回结构化的 `elevation_required`，由网页按需请求 Helper 通过 UAC 重启扫描器。
 - 非侵入式扫描：只使用窗口前置、鼠标点击、滚轮和屏幕截图，不读取或注入游戏进程。
 - 快速扫描：扫描线程负责点击和截图，多个 OCR worker 异步消费队列。
 - 数据驱动：驱动盘名称、词条候选、词条数值、扫描点位都在 `Data/*.json`。

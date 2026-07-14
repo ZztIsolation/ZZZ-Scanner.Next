@@ -69,6 +69,18 @@ public enum ProfileRoutingMode
     Auto
 }
 
+public static class ScanModeDefaults
+{
+    public static ScrollAcceptMode ScrollAccept(bool fastMode) =>
+        fastMode ? ScrollAcceptMode.EarlyOneRow : ScrollAcceptMode.Safe;
+
+    public static PanelAcceptMode PanelAccept(bool fastMode) =>
+        fastMode ? PanelAcceptMode.AdaptiveEarlyFullRoi : PanelAcceptMode.Safe;
+
+    public static OverlapConflictMode OverlapConflict(bool fastMode) =>
+        fastMode ? OverlapConflictMode.Recover : OverlapConflictMode.Recheck;
+}
+
 public sealed class ScanOptions
 {
     public const string DefaultProfileName = "ZZZ背包驱动盘-16比9";

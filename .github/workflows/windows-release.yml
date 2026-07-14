@@ -1,0 +1,64 @@
+name: Build Windows release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Scanner version in major.minor.patch format
+        required: true
+        type: string
+      model_url:
+        description: HTTPS URL for PP-OCRv5_mobile_rec_infer.onnx
+        required: true
+        type: string
+      model_sha256:
+        description: Expected lowercase or uppercase SHA-256 for the OCR model
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Download and verify OCR model
+        shell: pwsh
+        env:
+          MODEL_URL: ${{ inputs.model_url }}
+          MODEL_SHA256: ${{ inputs.model_sha256 }}
+        run: |
+          New-Item -ItemType Directory -Force Resources/models | Out-Null
+          Invoke-WebRequest -Uri $env:MODEL_URL -OutFile Resources/models/PP-OCRv5_mobile_rec_infer.onnx
+          $actual = (Get-FileHash -Algorithm SHA256 Resources/models/PP-OCRv5_mobile_rec_infer.onnx).Hash
+          if ($actual -ne $env:MODEL_SHA256) {
+            throw "OCR model SHA-256 mismatch. Expected $env:MODEL_SHA256, got $actual."
+          }
+
+      - name: Run scanner and helper regression tests
+        shell: pwsh
+        run: dotnet run --project Tests/ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+
+      - name: Publish dual Windows packages
+        shell: pwsh
+        env:
+          SCANNER_VERSION: ${{ inputs.version }}
+        run: ./scripts/publish-slim.ps1 -Version $env:SCANNER_VERSION -RequireVCRedistLayout
+
+      - name: Upload release payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: zzz-scanner-${{ inputs.version }}-windows
+          if-no-files-found: error
+          path: |
+            dist/ZZZ-Scanner.Next-win-x64-fdd.zip
+            dist/ZZZ-Scanner.Next-win-x64-self-contained.zip
+            dist/publish-helper/ZZZ-Scanner-Helper.exe
+            dist/scanner-manifest-${{ inputs.version }}.json
+            dist/publish-report-${{ inputs.version }}.json

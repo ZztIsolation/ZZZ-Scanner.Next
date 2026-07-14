@@ -1,8 +1,7 @@
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using OpenCvSharp;
-using System.Buffers;
 using System.Diagnostics;
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
 namespace ZZZScannerNext.Ocr;
@@ -32,7 +31,7 @@ public sealed class PaddleOcrRecognizer : IDisposable
         _session = new InferenceSession(modelFile, sessionOptions);
     }
 
-    public IReadOnlyList<OcrResult> Recognize(Mat source, IReadOnlyList<Rect> rois)
+    public IReadOnlyList<OcrResult> Recognize(Bitmap source, IReadOnlyList<Rectangle> rois)
     {
         return RecognizeBatch([new OcrBatchInput(source, rois)]).First();
     }
@@ -63,11 +62,19 @@ public sealed class PaddleOcrRecognizer : IDisposable
         var maxWidth = 0;
         var runs = 0;
         var decodedByFlatIndex = new OcrResult[flat.Length];
+        var pixelSources = new Dictionary<Bitmap, PaddleOcrPreprocessor.BitmapPixels>(ReferenceEqualityComparer.Instance);
+        foreach (var source in flat.Select(item => item.Source))
+        {
+            if (!pixelSources.ContainsKey(source))
+            {
+                pixelSources.Add(source, PaddleOcrPreprocessor.Read(source));
+            }
+        }
 
         foreach (var bucket in BuildBuckets(flat))
         {
             var prepStart = Stopwatch.GetTimestamp();
-            var inputValues = CreateInput(bucket.Rois, out var bucketMaxWidth);
+            var inputValues = CreateInput(bucket.Rois, pixelSources, out var bucketMaxWidth);
             prepTicks += Stopwatch.GetTimestamp() - prepStart;
             maxWidth = Math.Max(maxWidth, bucketMaxWidth);
 
@@ -147,7 +154,10 @@ public sealed class PaddleOcrRecognizer : IDisposable
             .ToArray();
     }
 
-    private IReadOnlyCollection<NamedOnnxValue> CreateInput(IReadOnlyList<FlatRoi> flatRois, out int maxWidth)
+    private IReadOnlyCollection<NamedOnnxValue> CreateInput(
+        IReadOnlyList<FlatRoi> flatRois,
+        IReadOnlyDictionary<Bitmap, PaddleOcrPreprocessor.BitmapPixels> pixelSources,
+        out int maxWidth)
     {
         maxWidth = flatRois.Max(x => ResizedWidth(x.Roi.Width, x.Roi.Height));
         var tensor = new DenseTensor<float>(new[] { flatRois.Count, ChannelCount, MaxHeight, maxWidth });
@@ -157,122 +167,24 @@ public sealed class PaddleOcrRecognizer : IDisposable
         var channelStride = dim[2] * dim[3];
         var heightStride = dim[3];
         var span = tensor.Buffer.Span;
-        var bgrSources = new Dictionary<Mat, Mat>();
 
-        try
+        for (var b = 0; b < flatRois.Count; b++)
         {
-            for (var b = 0; b < flatRois.Count; b++)
-            {
-                var (source, roi) = flatRois[b];
-                var newWidth = ResizedWidth(roi.Width, roi.Height);
-                var bgrSource = GetBgrSource(source, bgrSources);
-                using var roiMat = new Mat(bgrSource, roi);
-                using var resized = new Mat();
-                using var normalized = new Mat();
-
-                Cv2.Resize(roiMat, resized, new OpenCvSharp.Size(newWidth, MaxHeight));
-                resized.ConvertTo(normalized, MatType.CV_32FC3, Alpha);
-                CopyInterleavedBgrToTensor(normalized, span, b * batchStride, channelStride, heightStride);
-            }
-        }
-        finally
-        {
-            foreach (var mat in bgrSources.Values)
-            {
-                mat.Dispose();
-            }
+            var (source, roi) = flatRois[b];
+            var newWidth = ResizedWidth(roi.Width, roi.Height);
+            PaddleOcrPreprocessor.CopyResizedBgrToTensor(
+                pixelSources[source],
+                roi,
+                span,
+                b * batchStride,
+                channelStride,
+                heightStride,
+                newWidth,
+                MaxHeight,
+                Alpha);
         }
 
         return new[] { NamedOnnxValue.CreateFromTensor(InputName, tensor) };
-    }
-
-    private static Mat GetBgrSource(Mat source, Dictionary<Mat, Mat> cache)
-    {
-        if (source.Channels() == 3)
-        {
-            return source;
-        }
-
-        if (cache.TryGetValue(source, out var cached))
-        {
-            return cached;
-        }
-
-        var dest = new Mat();
-        if (source.Channels() == 4)
-        {
-            Cv2.CvtColor(source, dest, ColorConversionCodes.BGRA2BGR);
-        }
-        else if (source.Channels() == 1)
-        {
-            Cv2.CvtColor(source, dest, ColorConversionCodes.GRAY2BGR);
-        }
-        else
-        {
-            source.CopyTo(dest);
-        }
-
-        cache[source] = dest;
-        return dest;
-    }
-
-    private static void CopyInterleavedBgrToTensor(Mat image, Span<float> target, int batchOffset, int channelStride, int heightStride)
-    {
-        var width = image.Cols;
-        var height = image.Rows;
-        var length = width * height * ChannelCount;
-
-        if (image.IsContinuous())
-        {
-            var buffer = ArrayPool<float>.Shared.Rent(length);
-            try
-            {
-                Marshal.Copy(image.Data, buffer, 0, length);
-                CopyInterleavedBgr(buffer.AsSpan(0, length), target, batchOffset, channelStride, heightStride, width, height);
-            }
-            finally
-            {
-                ArrayPool<float>.Shared.Return(buffer);
-            }
-
-            return;
-        }
-
-        for (var y = 0; y < height; y++)
-        {
-            for (var x = 0; x < width; x++)
-            {
-                var pixel = image.At<Vec3f>(y, x);
-                var offset = batchOffset + y * heightStride + x;
-                target[offset] = pixel.Item0;
-                target[offset + channelStride] = pixel.Item1;
-                target[offset + channelStride * 2] = pixel.Item2;
-            }
-        }
-    }
-
-    private static void CopyInterleavedBgr(
-        ReadOnlySpan<float> source,
-        Span<float> target,
-        int batchOffset,
-        int channelStride,
-        int heightStride,
-        int width,
-        int height)
-    {
-        for (var y = 0; y < height; y++)
-        {
-            var rowSource = y * width * ChannelCount;
-            var rowTarget = batchOffset + y * heightStride;
-            for (var x = 0; x < width; x++)
-            {
-                var src = rowSource + x * ChannelCount;
-                var dst = rowTarget + x;
-                target[dst] = source[src];
-                target[dst + channelStride] = source[src + 1];
-                target[dst + channelStride * 2] = source[src + 2];
-            }
-        }
     }
 
     private IReadOnlyList<OcrResult> Decode(IDisposableReadOnlyCollection<DisposableNamedOnnxValue> outputs)
@@ -339,7 +251,7 @@ public sealed class PaddleOcrRecognizer : IDisposable
         return list;
     }
 
-    public readonly record struct OcrBatchInput(Mat Source, IReadOnlyList<Rect> Rois);
+    public readonly record struct OcrBatchInput(Bitmap Source, IReadOnlyList<Rectangle> Rois);
 
     public sealed record OcrBatchRecognition(
         IReadOnlyList<IReadOnlyList<OcrResult>> Results,
@@ -354,7 +266,7 @@ public sealed class PaddleOcrRecognizer : IDisposable
         double DecodeMs,
         double TotalMs);
 
-    private readonly record struct FlatRoi(Mat Source, Rect Roi);
+    private readonly record struct FlatRoi(Bitmap Source, Rectangle Roi);
 
     private readonly record struct IndexedFlatRoi(int Index, FlatRoi Roi);
 
@@ -364,4 +276,183 @@ public sealed class PaddleOcrRecognizer : IDisposable
     {
         return ticks * 1000.0 / Stopwatch.Frequency;
     }
+}
+
+internal static class PaddleOcrPreprocessor
+{
+    private const int ChannelCount = 3;
+    private const int ResizeCoefficientBits = 11;
+    private const int ResizeCoefficientScale = 1 << ResizeCoefficientBits;
+    private const int ResizeHorizontalShift = 4;
+    private const int ResizeVerticalShift = 16;
+    private const int ResizeFinalShift = 2;
+    private const int ResizeFinalRoundingDelta = 1 << (ResizeFinalShift - 1);
+
+    internal sealed record BitmapPixels(int Width, int Height, int BytesPerPixel, byte[] Data)
+    {
+        public byte Channel(int x, int y, int channel)
+        {
+            return Data[((y * Width) + x) * BytesPerPixel + channel];
+        }
+    }
+
+    public static BitmapPixels Read(Bitmap source)
+    {
+        Bitmap? converted = null;
+        var bitmap = source;
+        var pixelFormat = source.PixelFormat;
+        var bytesPerPixel = Image.GetPixelFormatSize(pixelFormat) / 8;
+        if (bytesPerPixel is not (3 or 4)
+            || (pixelFormat & PixelFormat.Indexed) != 0)
+        {
+            converted = new Bitmap(source.Width, source.Height, PixelFormat.Format32bppArgb);
+            using (var graphics = Graphics.FromImage(converted))
+            {
+                graphics.DrawImageUnscaled(source, 0, 0);
+            }
+
+            bitmap = converted;
+            pixelFormat = PixelFormat.Format32bppArgb;
+            bytesPerPixel = 4;
+        }
+
+        var bounds = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
+        var bitmapData = bitmap.LockBits(bounds, ImageLockMode.ReadOnly, pixelFormat);
+        try
+        {
+            var rowBytes = bitmap.Width * bytesPerPixel;
+            var pixels = new byte[rowBytes * bitmap.Height];
+            for (var y = 0; y < bitmap.Height; y++)
+            {
+                var row = bitmapData.Stride >= 0
+                    ? IntPtr.Add(bitmapData.Scan0, y * bitmapData.Stride)
+                    : IntPtr.Add(bitmapData.Scan0, (bitmap.Height - 1 - y) * -bitmapData.Stride);
+                Marshal.Copy(row, pixels, y * rowBytes, rowBytes);
+            }
+
+            return new BitmapPixels(bitmap.Width, bitmap.Height, bytesPerPixel, pixels);
+        }
+        finally
+        {
+            bitmap.UnlockBits(bitmapData);
+            converted?.Dispose();
+        }
+    }
+
+    public static void CopyResizedBgrToTensor(
+        BitmapPixels source,
+        Rectangle roi,
+        Span<float> target,
+        int batchOffset,
+        int channelStride,
+        int heightStride,
+        int destinationWidth,
+        int destinationHeight,
+        double alpha)
+    {
+        ValidateRoi(source, roi);
+        if (destinationWidth <= 0 || destinationHeight <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(destinationWidth), "OCR destination dimensions must be positive.");
+        }
+
+        var xScale = roi.Width / (double)destinationWidth;
+        var yScale = roi.Height / (double)destinationHeight;
+        var xSamples = BuildSamples(roi.X, roi.Width, destinationWidth, xScale);
+        var ySamples = BuildSamples(roi.Y, roi.Height, destinationHeight, yScale);
+
+        for (var y = 0; y < destinationHeight; y++)
+        {
+            var sy = ySamples[y];
+            var rowTarget = batchOffset + y * heightStride;
+            for (var x = 0; x < destinationWidth; x++)
+            {
+                var sx = xSamples[x];
+                var targetIndex = rowTarget + x;
+                for (var channel = 0; channel < ChannelCount; channel++)
+                {
+                    var top = (source.Channel(sx.Low, sy.Low, channel) * sx.LowWeight)
+                        + (source.Channel(sx.High, sy.Low, channel) * sx.HighWeight);
+                    var bottom = (source.Channel(sx.Low, sy.High, channel) * sx.LowWeight)
+                        + (source.Channel(sx.High, sy.High, channel) * sx.HighWeight);
+                    // Match OpenCV's optimized 8-bit INTER_LINEAR fixed-point stages.
+                    var weighted = (((top >> ResizeHorizontalShift) * sy.LowWeight) >> ResizeVerticalShift)
+                        + (((bottom >> ResizeHorizontalShift) * sy.HighWeight) >> ResizeVerticalShift);
+                    var rounded = Math.Clamp(
+                        (weighted + ResizeFinalRoundingDelta) >> ResizeFinalShift,
+                        0,
+                        255);
+                    target[targetIndex + channel * channelStride] = (float)(rounded * alpha);
+                }
+            }
+        }
+    }
+
+    internal static float[] CreateTensorForTesting(Bitmap source, Rectangle roi, int destinationWidth, int destinationHeight)
+    {
+        var pixels = Read(source);
+        var channelStride = destinationWidth * destinationHeight;
+        var tensor = new float[channelStride * ChannelCount];
+        CopyResizedBgrToTensor(
+            pixels,
+            roi,
+            tensor,
+            0,
+            channelStride,
+            destinationWidth,
+            destinationWidth,
+            destinationHeight,
+            1.0 / 255.0);
+        return tensor;
+    }
+
+    private static Sample[] BuildSamples(int origin, int sourceLength, int destinationLength, double scale)
+    {
+        var samples = new Sample[destinationLength];
+        var maximum = sourceLength - 1;
+        for (var index = 0; index < destinationLength; index++)
+        {
+            var coordinate = ((index + 0.5) * scale) - 0.5;
+            var lowRelative = (int)Math.Floor(coordinate);
+            var highWeight = coordinate - lowRelative;
+            if (lowRelative < 0)
+            {
+                lowRelative = 0;
+                highWeight = 0;
+            }
+            else if (lowRelative >= maximum)
+            {
+                lowRelative = maximum;
+                highWeight = 0;
+            }
+
+            var highRelative = Math.Min(maximum, lowRelative + 1);
+            var highCoefficient = Math.Clamp(
+                (int)Math.Round(highWeight * ResizeCoefficientScale, MidpointRounding.ToEven),
+                0,
+                ResizeCoefficientScale);
+            samples[index] = new Sample(
+                origin + lowRelative,
+                origin + highRelative,
+                ResizeCoefficientScale - highCoefficient,
+                highCoefficient);
+        }
+
+        return samples;
+    }
+
+    private static void ValidateRoi(BitmapPixels source, Rectangle roi)
+    {
+        if (roi.Width <= 0
+            || roi.Height <= 0
+            || roi.Left < 0
+            || roi.Top < 0
+            || roi.Right > source.Width
+            || roi.Bottom > source.Height)
+        {
+            throw new ArgumentOutOfRangeException(nameof(roi), $"OCR ROI {roi} is outside bitmap bounds {source.Width}x{source.Height}.");
+        }
+    }
+
+    private readonly record struct Sample(int Low, int High, int LowWeight, int HighWeight);
 }

@@ -5,7 +5,16 @@ namespace ZZZScannerNext.Core;
 
 public static class AppInfo
 {
-    public const string Version = "1.0.36";
+    public static string Version
+    {
+        get
+        {
+            var version = Assembly.GetExecutingAssembly().GetName().Version;
+            return version is null
+                ? "unknown"
+                : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
+        }
+    }
 
     public static string ExecutablePath => Environment.ProcessPath ?? AppContext.BaseDirectory;
 
