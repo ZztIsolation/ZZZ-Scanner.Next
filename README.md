@@ -163,19 +163,35 @@ calculator receives the exact required byte count.
 
 ~~~text
 %LOCALAPPDATA%\ZZZScannerNext\
+  helper\
+    ZZZ-Scanner-Helper.exe
   packages\
-    scanner-<version>-<packageId>.zip
+    temporary downloads only
   runtime\
     <version>\
       <packageId>\
+  outputs\
+    newest successful and failed sessions
   logs\
     helper-YYYYMMDD.log
 ~~~
 
-FDD and self-contained runtimes use separate package IDs. Before reuse, the
-Helper verifies the cached ZIP and every installed application file. Missing,
-changed, or unexpected files trigger repair. Runtime output directories such as
-<code>Scans</code> and <code>StabilitySuites</code> are preserved.
+Helper 1.2.0 installs itself into the fixed current-user helper directory and
+registers the browser protocol to that path. Future Helper releases update this
+managed file transactionally; Helper 1.1.0 requires one final manual download.
+
+Manifest schema v3 lists the size and SHA-256 of every runtime file. The Helper
+therefore deletes the package ZIP after a verified install and still validates
+the installed tree before reuse. A newly downloaded runtime does not become
+active until its child WebSocket handshake succeeds. The activation receipt is
+then replaced and every inactive runtime is removed. During an update, the old
+and new runtimes coexist briefly so a failed launch cannot destroy the working
+version.
+
+Managed scan outputs are version-independent. Cleanup migrates legacy
+<code>runtime/**/Scans</code> sessions and retains only the newest successful
+session and newest failed session. The calculator Settings page reports exact
+usage and can repeat this cleanup without uninstalling the active Scanner.
 
 ## Manual installation
 
@@ -315,7 +331,7 @@ resource metrics, and visual profile metadata.
 
 The GUI's **打开产物文件夹 / Open Output Folder** button opens the latest result.
 In Helper mode, results are under
-<code>%LOCALAPPDATA%\ZZZScannerNext\runtime\&lt;version&gt;\&lt;packageId&gt;\Scans</code>.
+<code>%LOCALAPPDATA%\ZZZScannerNext\outputs</code>.
 
 Review diagnostics before sharing. Screenshots contain visible game UI, and
 logs can contain local paths and machine-specific information.
@@ -345,7 +361,7 @@ enterprise policy, the x64/OS requirement, and whether another Helper owns port
 
 ### Calculator says Helper is missing or outdated
 
-1. Download Helper 1.1.0 or later.
+1. Download Helper 1.2.0 or later.
 2. Close old Helper processes.
 3. Replace the old EXE.
 4. run the new EXE once from its permanent location;
@@ -509,7 +525,7 @@ dotnet restore
 dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
 dotnet build Launcher\ZZZ-Scanner.Helper.csproj -c Release -p:NuGetAudit=false
 dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
-.\scripts\publish-slim.ps1 -Version 1.0.37
+.\scripts\publish-slim.ps1 -Version 1.0.38
 ~~~
 
 Outputs:

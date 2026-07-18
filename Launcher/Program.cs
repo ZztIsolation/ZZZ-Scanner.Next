@@ -18,8 +18,8 @@ namespace ZZZScannerHelper;
 internal static partial class Program
 {
     private const string ServiceName = "zzz-scanner-helper";
-    private const string HelperVersion = "1.1.0";
-    private const int ProtocolVersion = 2;
+    private const string HelperVersion = "1.2.0";
+    private const int ProtocolVersion = 3;
     private const int HelperPort = 22355;
     private const string ProtocolName = "zzz-scanner";
     private const string ManifestPath = "/downloads/zzz-scanner/manifest.json";
@@ -36,10 +36,15 @@ internal static partial class Program
     {
         try
         {
-            return await RunAsync(args);
+            var lifecycle = await HelperInstallationManager.PrepareAsync(args);
+            return lifecycle.Exit ? 0 : await RunAsync(lifecycle.Arguments);
         }
         catch (Exception ex)
         {
+            if (HelperInstallationManager.TryRollbackPendingUpdate())
+            {
+                return 1;
+            }
             var error = HelperErrors.FromException(ex, "startup");
             ShowStartupError(error);
             return 1;
@@ -160,15 +165,27 @@ internal static partial class Program
         private readonly HttpListener _listener = new();
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> _tokens = new(StringComparer.Ordinal);
         private readonly SemaphoreSlim _ensureGate = new(1, 1);
+        private readonly HelperStorageManager _storage = new();
         private ScannerManifest? _manifest;
         private ScannerPackage? _selectedPackage;
         private HelperEnvironmentSnapshot? _environment;
         private string? _entryPath;
+        private string? _activeVersion;
+        private string? _activePackageId;
+        private string? _activePackageMode;
         private string? _launchOrigin;
         private bool _disposed;
 
         public HelperServer(string? launchOrigin)
         {
+            var active = _storage.LoadActiveRuntime();
+            if (active is not null)
+            {
+                _activeVersion = active.Version;
+                _activePackageId = active.PackageId;
+                _activePackageMode = active.PackageMode;
+                _entryPath = active.EntryPath;
+            }
             if (IsAllowedOrigin(launchOrigin))
             {
                 _launchOrigin = launchOrigin;
@@ -179,6 +196,7 @@ internal static partial class Program
         {
             _listener.Prefixes.Add($"http://127.0.0.1:{HelperPort}/");
             _listener.Start();
+            HelperInstallationManager.CompletePendingUpdate();
             while (!token.IsCancellationRequested)
             {
                 var context = await _listener.GetContextAsync().WaitAsync(token);
@@ -296,13 +314,45 @@ internal static partial class Program
         {
             return new ScannerState
             {
-                Version = _manifest?.ScannerVersion,
+                Version = _activeVersion ?? _manifest?.ScannerVersion,
                 Installed = !string.IsNullOrWhiteSpace(_entryPath) && File.Exists(_entryPath),
                 Entry = _entryPath,
-                PackageId = _selectedPackage?.Id,
-                PackageMode = _selectedPackage?.Mode,
+                PackageId = _activePackageId ?? _selectedPackage?.Id,
+                PackageMode = _activePackageMode ?? _selectedPackage?.Mode,
                 DesktopRuntimeAvailable = _environment?.DesktopRuntimeAvailable
             };
+        }
+
+        public HelperStorageSnapshot CurrentStorageInfo()
+        {
+            return _storage.Inspect(_activeVersion, _activePackageId);
+        }
+
+        public HelperStorageCleanupResult CleanupStorage()
+        {
+            return _storage.Cleanup(_activeVersion, _activePackageId);
+        }
+
+        public void MarkScannerActive()
+        {
+            if (_manifest is null || _selectedPackage is null)
+            {
+                throw new InvalidOperationException("Scanner manifest and package selection are unavailable.");
+            }
+            var active = _storage.SaveActiveRuntime(
+                _manifest.ScannerVersion,
+                _selectedPackage.Id,
+                _selectedPackage.Mode,
+                _selectedPackage.Entry);
+            _activeVersion = active.Version;
+            _activePackageId = active.PackageId;
+            _activePackageMode = active.PackageMode;
+            _entryPath = active.EntryPath;
+        }
+
+        public Uri ResolveHelperManifestUrl()
+        {
+            return new Uri(ResolveManifestUrl(), "helper-manifest.json");
         }
 
         public async Task EnsureScannerAsync(
@@ -386,13 +436,20 @@ internal static partial class Program
                     }
                 }
 
-                if (File.Exists(entryPath) && File.Exists(packagePath))
+                if (File.Exists(entryPath) && (manifest.SchemaVersion >= 3 || File.Exists(packagePath)))
                 {
                     try
                     {
-                        await VerifyPackageSizeAsync(packagePath, package.Size);
-                        await VerifySha256Async(packagePath, package.Sha256, token);
-                        await HelperSecurity.VerifyInstalledRuntimeAsync(packagePath, installDir, package.Entry, token);
+                        if (manifest.SchemaVersion >= 3)
+                        {
+                            await HelperSecurity.VerifyInstalledRuntimeAsync(package, installDir, token);
+                        }
+                        else
+                        {
+                            await VerifyPackageSizeAsync(packagePath, package.Size);
+                            await VerifySha256Async(packagePath, package.Sha256, token);
+                            await HelperSecurity.VerifyInstalledRuntimeAsync(packagePath, installDir, package.Entry, token);
+                        }
                         _entryPath = entryPath;
                         await report(PackageProgress("ready", "扫描器已是最新版本。", manifest.ScannerVersion, package), token);
                         return;
@@ -465,7 +522,14 @@ internal static partial class Program
                 try
                 {
                     ExtractZipSafe(packagePath, tempDir);
-                    await HelperSecurity.VerifyInstalledRuntimeAsync(packagePath, tempDir, package.Entry, token);
+                    if (manifest.SchemaVersion >= 3)
+                    {
+                        await HelperSecurity.VerifyInstalledRuntimeAsync(package, tempDir, token);
+                    }
+                    else
+                    {
+                        await HelperSecurity.VerifyInstalledRuntimeAsync(packagePath, tempDir, package.Entry, token);
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not HelperFailureException)
                 {
@@ -485,6 +549,10 @@ internal static partial class Program
                 }
 
                 Directory.Move(tempDir, installDir);
+                if (manifest.SchemaVersion >= 3)
+                {
+                    SafeDelete(packagePath);
+                }
                 _entryPath = entryPath;
                 await report(PackageProgress("ready", "扫描器准备完成。", manifest.ScannerVersion, package), token);
             }
@@ -850,21 +918,21 @@ internal static partial class Program
 
         private static string RuntimeRootDirectory()
         {
-            var path = Path.Combine(LocalDataRoot(), "runtime");
+            var path = Path.Combine(HelperStorageManager.DefaultDataRoot(), "runtime");
             Directory.CreateDirectory(path);
             return path;
         }
 
         private static string PackageCacheDirectory()
         {
-            var path = Path.Combine(LocalDataRoot(), "packages");
+            var path = Path.Combine(HelperStorageManager.DefaultDataRoot(), "packages");
             Directory.CreateDirectory(path);
             return path;
         }
 
         private static string LocalDataRoot()
         {
-            var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ZZZScannerNext");
+            var root = HelperStorageManager.DefaultDataRoot();
             Directory.CreateDirectory(root);
             return root;
         }
@@ -1006,6 +1074,50 @@ internal static partial class Program
                     }, token);
                     break;
 
+                case "get_storage_info":
+                    await SendAsync("storage_info", new StorageInfoResponse
+                    {
+                        RequestId = RequestId(envelope.Data),
+                        Storage = _server.CurrentStorageInfo()
+                    }, token);
+                    break;
+
+                case "cleanup_storage":
+                    var cleanup = _server.CleanupStorage();
+                    await SendAsync("storage_cleanup_result", new StorageCleanupResponse
+                    {
+                        RequestId = RequestId(envelope.Data),
+                        Result = cleanup
+                    }, token);
+                    break;
+
+                case "update_helper":
+                    var updateRequestId = RequestId(envelope.Data);
+                    var preparation = await HelperUpdateManager.PrepareAsync(
+                        _server.ResolveHelperManifestUrl(),
+                        HelperVersion,
+                        async (progress, ct) =>
+                        {
+                            progress.RequestId = updateRequestId;
+                            await SendAsync("helper_update_progress", progress, ct);
+                        },
+                        token);
+                    await SendAsync("helper_update_result", new HelperUpdateResponse
+                    {
+                        RequestId = updateRequestId,
+                        UpdateAvailable = preparation.UpdateAvailable,
+                        CurrentVersion = preparation.CurrentVersion,
+                        AvailableVersion = preparation.AvailableVersion,
+                        Restarting = preparation.UpdateAvailable
+                    }, token);
+                    if (preparation.UpdateAvailable)
+                    {
+                        HelperInstallationManager.LaunchPreparedUpdate(preparation.ExecutablePath);
+                        await Task.Delay(250, CancellationToken.None);
+                        Environment.Exit(0);
+                    }
+                    break;
+
                 case "scan_req":
                     await EnsureScannerProcessAsync(token);
                     if (_scanner is not null)
@@ -1078,7 +1190,24 @@ internal static partial class Program
                     ForwardScannerMessageAsync,
                     token);
             }
+            _server.MarkScannerActive();
             await SendAsync("scanner_ready", _server.CurrentScannerState(), token);
+            try
+            {
+                _server.CleanupStorage();
+            }
+            catch (Exception ex)
+            {
+                HelperLog.Write($"AUTOMATIC_CLEANUP_FAILED error={ex.Message}");
+            }
+        }
+
+        private static string RequestId(JsonElement data)
+        {
+            return data.ValueKind == JsonValueKind.Object
+                && data.TryGetProperty("requestId", out var requestId)
+                ? requestId.GetString() ?? ""
+                : "";
         }
 
         private static void OpenLogFolder()
@@ -1161,7 +1290,7 @@ internal static partial class Program
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = entryPath,
-                    Arguments = $"--ws-child {port} --child-token {childToken} --no-browser",
+                    Arguments = $"--ws-child {port} --child-token {childToken} --no-browser --output-root \"{Path.Combine(HelperStorageManager.DefaultDataRoot(), "outputs")}\"",
                     WorkingDirectory = Path.GetDirectoryName(entryPath),
                     UseShellExecute = true,
                     WindowStyle = ProcessWindowStyle.Hidden
@@ -1509,6 +1638,18 @@ internal static partial class Program
         public ScannerState Scanner { get; set; } = new();
     }
 
+    private sealed class StorageInfoResponse
+    {
+        public string RequestId { get; set; } = "";
+        public HelperStorageSnapshot Storage { get; set; } = new();
+    }
+
+    private sealed class StorageCleanupResponse
+    {
+        public string RequestId { get; set; } = "";
+        public HelperStorageCleanupResult Result { get; set; } = new();
+    }
+
     private sealed class PongMessage
     {
         public DateTimeOffset Time { get; set; }
@@ -1531,6 +1672,12 @@ internal static partial class Program
     [JsonSerializable(typeof(HelperErrorMessage))]
     [JsonSerializable(typeof(HelperErrorAction))]
     [JsonSerializable(typeof(HelperDiagnosticsResponse))]
+    [JsonSerializable(typeof(HelperStorageSnapshot))]
+    [JsonSerializable(typeof(HelperStorageCleanupResult))]
+    [JsonSerializable(typeof(StorageInfoResponse))]
+    [JsonSerializable(typeof(StorageCleanupResponse))]
+    [JsonSerializable(typeof(HelperUpdateProgress))]
+    [JsonSerializable(typeof(HelperUpdateResponse))]
     [JsonSerializable(typeof(PongMessage))]
     [JsonSourceGenerationOptions(
         PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,

@@ -14,6 +14,12 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        var outputRoot = ReadOption(args, "--output-root");
+        if (!string.IsNullOrWhiteSpace(outputRoot))
+        {
+            Environment.SetEnvironmentVariable("ZZZ_SCANNER_OUTPUT_ROOT", Path.GetFullPath(outputRoot));
+        }
+
         if (TryRunCommandLine(args, out var exitCode))
         {
             return exitCode;

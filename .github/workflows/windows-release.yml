@@ -61,4 +61,5 @@ jobs:
             dist/ZZZ-Scanner.Next-win-x64-self-contained.zip
             dist/publish-helper/ZZZ-Scanner-Helper.exe
             dist/scanner-manifest-${{ inputs.version }}.json
+            dist/helper-manifest.json
             dist/publish-report-${{ inputs.version }}.json

@@ -379,10 +379,7 @@ internal static class HelperLog
 {
     private static readonly object Sync = new();
 
-    public static string DirectoryPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "ZZZScannerNext",
-        "logs");
+    public static string DirectoryPath => Path.Combine(HelperStorageManager.DefaultDataRoot(), "logs");
 
     public static string RecordException(string code, string phase, Exception exception)
     {

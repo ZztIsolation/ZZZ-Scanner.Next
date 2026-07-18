@@ -6,7 +6,7 @@ namespace ZZZScannerHelper;
 
 internal static class HelperSecurity
 {
-    public const int SupportedManifestSchemaVersion = 2;
+    public const int SupportedManifestSchemaVersion = 3;
 
     private static readonly string[] RuntimeOutputDirectories = ["Scans", "StabilitySuites"];
 
@@ -14,10 +14,10 @@ internal static class HelperSecurity
     {
         EnsureTrustedDownloadUri(manifestUri, "manifest");
 
-        if (manifest.SchemaVersion is not (1 or SupportedManifestSchemaVersion))
+        if (manifest.SchemaVersion is not (1 or 2 or SupportedManifestSchemaVersion))
         {
             throw new InvalidDataException(
-                $"Unsupported scanner manifest schema {manifest.SchemaVersion}; expected 1 or {SupportedManifestSchemaVersion}.");
+                $"Unsupported scanner manifest schema {manifest.SchemaVersion}; expected 1, 2 or {SupportedManifestSchemaVersion}.");
         }
 
         if (!Version.TryParse(manifest.LauncherMinVersion, out var minimumHelperVersion))
@@ -59,6 +59,10 @@ internal static class HelperSecurity
         foreach (var package in manifest.Packages)
         {
             ValidatePackage(package);
+            if (manifest.SchemaVersion >= 3)
+            {
+                ValidatePackageFiles(package);
+            }
             if (!packageIds.Add(package.Id))
             {
                 throw new InvalidDataException($"Scanner manifest contains duplicate package id: {package.Id}.");
@@ -222,6 +226,98 @@ internal static class HelperSecurity
         }
     }
 
+    public static async Task VerifyInstalledRuntimeAsync(
+        ScannerPackage package,
+        string installDirectory,
+        CancellationToken token)
+    {
+        ValidatePackageFiles(package);
+        var expectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in package.Files)
+        {
+            token.ThrowIfCancellationRequested();
+            var relativePath = NormalizeRelativePath(file.Path);
+            if (!expectedFiles.Add(relativePath))
+            {
+                throw new InvalidDataException($"Scanner manifest contains duplicate file path: {file.Path}");
+            }
+
+            var installedPath = ResolvePathWithinRoot(installDirectory, relativePath);
+            if (!File.Exists(installedPath))
+            {
+                throw new InvalidDataException($"Scanner runtime file is missing: {relativePath}");
+            }
+
+            if (new FileInfo(installedPath).Length != file.Size)
+            {
+                throw new InvalidDataException($"Scanner runtime file size mismatch: {relativePath}");
+            }
+
+            await using var installedStream = File.OpenRead(installedPath);
+            var installedHash = await SHA256.HashDataAsync(installedStream, token);
+            var expectedHash = Convert.FromHexString(file.Sha256);
+            if (!CryptographicOperations.FixedTimeEquals(expectedHash, installedHash))
+            {
+                throw new InvalidDataException($"Scanner runtime file checksum mismatch: {relativePath}");
+            }
+        }
+
+        var normalizedEntry = NormalizeRelativePath(package.Entry);
+        if (!expectedFiles.Contains(normalizedEntry))
+        {
+            throw new InvalidDataException($"Scanner package does not contain the declared entry: {package.Entry}");
+        }
+
+        foreach (var installedPath in Directory.EnumerateFiles(installDirectory, "*", SearchOption.AllDirectories))
+        {
+            token.ThrowIfCancellationRequested();
+            var relativePath = NormalizeRelativePath(Path.GetRelativePath(installDirectory, installedPath));
+            if (!expectedFiles.Contains(relativePath) && !IsRuntimeOutput(relativePath))
+            {
+                throw new InvalidDataException($"Scanner runtime contains an unexpected file: {relativePath}");
+            }
+        }
+    }
+
+    private static void ValidatePackageFiles(ScannerPackage package)
+    {
+        if (package.Files.Count == 0)
+        {
+            throw new InvalidDataException("Scanner manifest v3 package must contain a file manifest.");
+        }
+
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        long totalSize = 0;
+        foreach (var file in package.Files)
+        {
+            var relativePath = NormalizeRelativePath(file.Path);
+            if (string.IsNullOrWhiteSpace(relativePath)
+                || Path.IsPathRooted(file.Path)
+                || relativePath.Split('/').Any(segment => segment is "" or "." or "..")
+                || !paths.Add(relativePath))
+            {
+                throw new InvalidDataException($"Scanner package file path is invalid or duplicated: {file.Path}");
+            }
+            if (file.Size < 0 || !IsSha256(file.Sha256))
+            {
+                throw new InvalidDataException($"Scanner package file metadata is invalid: {file.Path}");
+            }
+            totalSize = checked(totalSize + file.Size);
+        }
+
+        if (totalSize != package.ExpandedSize)
+        {
+            throw new InvalidDataException("Scanner package expandedSize does not match its file manifest.");
+        }
+    }
+
+    private static bool IsSha256(string value)
+    {
+        return !string.IsNullOrWhiteSpace(value)
+            && value.Length == 64
+            && value.All(Uri.IsHexDigit);
+    }
+
     private static bool IsSafeVersionSegment(string value)
     {
         if (string.IsNullOrWhiteSpace(value)
@@ -330,6 +426,14 @@ internal sealed class ScannerPackage
     public long Size { get; set; }
     public long ExpandedSize { get; set; }
     public string Entry { get; set; } = "ZZZ-Scanner.Next.exe";
+    public List<ScannerPackageFile> Files { get; set; } = [];
+}
+
+internal sealed class ScannerPackageFile
+{
+    public string Path { get; set; } = "";
+    public long Size { get; set; }
+    public string Sha256 { get; set; } = "";
 }
 
 internal sealed class ScannerFramework

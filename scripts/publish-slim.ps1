@@ -26,6 +26,15 @@ if (-not [System.Version]::TryParse($Version, [ref]$parsedVersion) -or $Version.
 }
 
 $assemblyVersion = "$($parsedVersion.Major).$($parsedVersion.Minor).$($parsedVersion.Build).0"
+[xml]$helperProject = Get-Content (Join-Path $repoRoot "Launcher\ZZZ-Scanner.Helper.csproj")
+$helperVersion = $helperProject.Project.PropertyGroup |
+    ForEach-Object { [string]$_.Version } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Select-Object -First 1
+$parsedHelperVersion = $null
+if (-not [System.Version]::TryParse($helperVersion, [ref]$parsedHelperVersion)) {
+    throw "Helper project Version is invalid: $helperVersion"
+}
 $distRoot = if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     Join-Path $repoRoot "dist"
 }
@@ -42,6 +51,7 @@ $selfContainedOut = Join-Path $distRoot "publish-scanner-$Version-self-contained
 $fddZip = Join-Path $distRoot "ZZZ-Scanner.Next-win-x64-fdd.zip"
 $selfContainedZip = Join-Path $distRoot "ZZZ-Scanner.Next-win-x64-self-contained.zip"
 $manifestPath = Join-Path $distRoot "scanner-manifest-$Version.json"
+$helperManifestPath = Join-Path $distRoot "helper-manifest.json"
 $reportPath = Join-Path $distRoot "publish-report-$Version.json"
 
 function Remove-OutputPath([string]$Path) {
@@ -361,7 +371,7 @@ function Assert-MaxSize([string]$Path, [int]$MaxMiB, [string]$Label, [string]$Pu
 }
 
 New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
-foreach ($path in @($helperOut, $fddOut, $selfContainedOut, $fddZip, $selfContainedZip, $manifestPath, $reportPath)) {
+foreach ($path in @($helperOut, $fddOut, $selfContainedOut, $fddZip, $selfContainedZip, $manifestPath, $helperManifestPath, $reportPath)) {
     Remove-OutputPath $path
 }
 
@@ -431,6 +441,13 @@ function New-PackageManifest([string]$Id, [string]$Mode, [string]$ZipPath, [stri
         size = (Get-Item $ZipPath).Length
         expandedSize = Get-ExpandedSize $PublishDirectory
         entry = "ZZZ-Scanner.Next.exe"
+        files = @(Get-ChildItem $PublishDirectory -File -Recurse | Sort-Object FullName | ForEach-Object {
+            [ordered]@{
+                path = [System.IO.Path]::GetRelativePath($PublishDirectory, $_.FullName).Replace('\', '/')
+                size = $_.Length
+                sha256 = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+            }
+        })
     }
     if ($null -ne $Framework) {
         $package.framework = $Framework
@@ -439,8 +456,8 @@ function New-PackageManifest([string]$Id, [string]$Mode, [string]$ZipPath, [stri
 }
 
 $manifest = [ordered]@{
-    schemaVersion = 2
-    launcherMinVersion = "1.1.0"
+    schemaVersion = 3
+    launcherMinVersion = "1.2.0"
     scannerVersion = $Version
     support = [ordered]@{
         os = "windows"
@@ -456,7 +473,19 @@ $manifest = [ordered]@{
         (New-PackageManifest "win-x64-self-contained" "self-contained" $selfContainedZip $selfContainedOut $null)
     )
 }
-$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+$manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+
+$helperExe = Join-Path $helperOut "ZZZ-Scanner-Helper.exe"
+$helperManifest = [ordered]@{
+    schemaVersion = 1
+    version = $helperVersion
+    packageUrls = @(
+        "https://github.com/ZztIsolation/zzz_calculator/releases/download/scanner-$Version/ZZZ-Scanner-Helper.exe"
+    )
+    sha256 = (Get-FileHash -Algorithm SHA256 $helperExe).Hash.ToLowerInvariant()
+    size = (Get-Item $helperExe).Length
+}
+$helperManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $helperManifestPath -Encoding UTF8
 
 $report = [ordered]@{
     version = $Version
@@ -472,12 +501,14 @@ $report = [ordered]@{
     }
     modelSha256 = $fddModelHash.ToLowerInvariant()
     helper = [ordered]@{
-        path = (Join-Path $helperOut "ZZZ-Scanner-Helper.exe")
-        size = (Get-Item (Join-Path $helperOut "ZZZ-Scanner-Helper.exe")).Length
+        path = $helperExe
+        version = $helperVersion
+        size = (Get-Item $helperExe).Length
+        sha256 = $helperManifest.sha256
     }
     packages = $manifest.packages
 }
-$report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+$report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $reportPath -Encoding UTF8
 
 Write-Host "helper_exe=$($report.helper.path)"
 Write-Host "helper_size=$($report.helper.size)"
@@ -486,4 +517,5 @@ Write-Host "fdd_zip_size=$($manifest.packages[0].size)"
 Write-Host "self_contained_zip=$selfContainedZip"
 Write-Host "self_contained_zip_size=$($manifest.packages[1].size)"
 Write-Host "manifest=$manifestPath"
+Write-Host "helper_manifest=$helperManifestPath"
 Write-Host "report=$reportPath"

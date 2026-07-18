@@ -21,8 +21,11 @@ internal static class Program
             ("trusted download URIs", TestTrustedDownloadUrisAsync),
             ("manifest validation", TestManifestValidationAsync),
             ("manifest v2 package selection", TestManifestV2PackageSelectionAsync),
+            ("manifest v3 file verification", TestManifestV3FileVerificationAsync),
             ("runtime path containment", TestRuntimePathContainmentAsync),
             ("installed runtime verification", TestInstalledRuntimeVerificationAsync),
+            ("single-version storage cleanup", TestSingleVersionStorageCleanupAsync),
+            ("managed output root", TestManagedOutputRootAsync),
             ("managed OCR preprocessing", TestManagedOcrPreprocessingAsync),
             ("OCR output equivalence", TestOcrOutputEquivalenceAsync),
             ("browser origin allowlist", TestBrowserOriginAllowlistAsync),
@@ -124,6 +127,104 @@ internal static class Program
         AssertThrows<InvalidDataException>(() => HelperSecurity.ResolvePathWithinRoot(root, "..\\outside"));
         AssertThrows<InvalidDataException>(() => HelperSecurity.ResolvePathWithinRoot(root, Path.GetPathRoot(root)!));
         return Task.CompletedTask;
+    }
+
+    private static async Task TestManifestV3FileVerificationAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "zzz-scanner-v3-test", Guid.NewGuid().ToString("N"));
+        var runtime = Path.Combine(root, "runtime");
+        Directory.CreateDirectory(Path.Combine(runtime, "Data"));
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(runtime, "ZZZ-Scanner.Next.exe"), "scanner-v3");
+            await File.WriteAllTextAsync(Path.Combine(runtime, "Data", "config.json"), "{}");
+            var package = PackageFromDirectory(runtime);
+            var manifest = ValidV2Manifest();
+            manifest.SchemaVersion = 3;
+            manifest.LauncherMinVersion = "1.2.0";
+            manifest.Packages = [package, CloneAsSelfContained(package)];
+            HelperSecurity.ValidateManifest(manifest, new Uri("https://example.com/manifest.json"), new Version(1, 2, 0));
+            await HelperSecurity.VerifyInstalledRuntimeAsync(package, runtime, CancellationToken.None);
+
+            await File.WriteAllTextAsync(Path.Combine(runtime, "Data", "config.json"), "tampered");
+            await AssertThrowsAsync<InvalidDataException>(() =>
+                HelperSecurity.VerifyInstalledRuntimeAsync(package, runtime, CancellationToken.None));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task TestSingleVersionStorageCleanupAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "zzz-scanner-storage-test", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var manager = new HelperStorageManager(root);
+            var active = Path.Combine(manager.RuntimeRoot, "1.0.38", "win-x64-fdd");
+            Directory.CreateDirectory(active);
+            File.WriteAllText(Path.Combine(active, "ZZZ-Scanner.Next.exe"), "active");
+            manager.SaveActiveRuntime("1.0.38", "win-x64-fdd", ScannerPackageModes.FrameworkDependent, "ZZZ-Scanner.Next.exe");
+            var persisted = new HelperStorageManager(root).LoadActiveRuntime();
+            AssertTrue(persisted is not null);
+            AssertEqual("1.0.38", persisted!.Version);
+            AssertEqual("win-x64-fdd", persisted.PackageId);
+
+            var oldScans = Path.Combine(manager.RuntimeRoot, "1.0.37", "win-x64-fdd", "Scans");
+            var success = Path.Combine(oldScans, "2026-01-01-success");
+            var failed = Path.Combine(oldScans, "2026-01-02-failed");
+            Directory.CreateDirectory(success);
+            Directory.CreateDirectory(failed);
+            File.WriteAllText(Path.Combine(success, "export.json"), "[]");
+            File.WriteAllText(Path.Combine(failed, "scan.log"), "failed");
+            Directory.SetLastWriteTimeUtc(success, DateTime.UtcNow.AddMinutes(-2));
+            Directory.SetLastWriteTimeUtc(failed, DateTime.UtcNow.AddMinutes(-1));
+
+            Directory.CreateDirectory(manager.PackageRoot);
+            File.WriteAllText(Path.Combine(manager.PackageRoot, "scanner-1.0.37.zip"), "old-package");
+            File.WriteAllText(Path.Combine(manager.PackageRoot, "scanner-1.0.38.zip"), "current-package");
+            var rootTemporary = Path.Combine(root, "staging.tmp");
+            Directory.CreateDirectory(rootTemporary);
+            File.WriteAllText(Path.Combine(rootTemporary, "runtime.download"), "partial-download");
+
+            var before = manager.Inspect("1.0.38", "win-x64-fdd");
+            AssertTrue(before.ReclaimableBytes >= "partial-download".Length);
+
+            var result = manager.Cleanup("1.0.38", "win-x64-fdd");
+            AssertTrue(Directory.Exists(active));
+            AssertTrue(!Directory.Exists(Path.Combine(manager.RuntimeRoot, "1.0.37")));
+            AssertTrue(!Directory.Exists(rootTemporary));
+            AssertEqual(0, Directory.EnumerateFiles(manager.PackageRoot).Count());
+            var outputs = Directory.EnumerateDirectories(manager.OutputRoot).ToList();
+            AssertEqual(2, outputs.Count);
+            AssertEqual(1, outputs.Count(path => File.Exists(Path.Combine(path, "export.json"))));
+            AssertTrue(result.ReclaimedBytes > 0);
+            AssertEqual(0, result.Errors.Count);
+            return Task.CompletedTask;
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task TestManagedOutputRootAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "zzz-scanner-output-test", Guid.NewGuid().ToString("N"));
+        var previous = Environment.GetEnvironmentVariable("ZZZ_SCANNER_OUTPUT_ROOT");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZZZ_SCANNER_OUTPUT_ROOT", root);
+            var output = AppPaths.CreateScanDirectory();
+            AssertTrue(Path.GetFullPath(output).StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase));
+            return Task.CompletedTask;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZZZ_SCANNER_OUTPUT_ROOT", previous);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     private static async Task TestInstalledRuntimeVerificationAsync()
@@ -449,6 +550,50 @@ internal static class Program
                     Entry = "ZZZ-Scanner.Next.exe"
                 }
             ]
+        };
+    }
+
+    private static ScannerPackage PackageFromDirectory(string directory)
+    {
+        var files = Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
+            .Select(path => new ScannerPackageFile
+            {
+                Path = Path.GetRelativePath(directory, path).Replace('\\', '/'),
+                Size = new FileInfo(path).Length,
+                Sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant()
+            })
+            .ToList();
+        return new ScannerPackage
+        {
+            Id = "win-x64-fdd",
+            Mode = ScannerPackageModes.FrameworkDependent,
+            Framework = new ScannerFramework { Name = "Microsoft.WindowsDesktop.App", Major = 8, MinVersion = "8.0.0" },
+            PackageUrls = ["https://example.com/scanner.zip"],
+            Sha256 = new string('a', 64),
+            Size = 10,
+            ExpandedSize = files.Sum(file => file.Size),
+            Entry = "ZZZ-Scanner.Next.exe",
+            Files = files,
+        };
+    }
+
+    private static ScannerPackage CloneAsSelfContained(ScannerPackage source)
+    {
+        return new ScannerPackage
+        {
+            Id = "win-x64-self-contained",
+            Mode = ScannerPackageModes.SelfContained,
+            PackageUrls = source.PackageUrls.ToList(),
+            Sha256 = new string('b', 64),
+            Size = source.Size,
+            ExpandedSize = source.ExpandedSize,
+            Entry = source.Entry,
+            Files = source.Files.Select(file => new ScannerPackageFile
+            {
+                Path = file.Path,
+                Size = file.Size,
+                Sha256 = file.Sha256,
+            }).ToList(),
         };
     }
 

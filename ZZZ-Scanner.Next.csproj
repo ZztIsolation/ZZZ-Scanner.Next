@@ -10,9 +10,9 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
-    <Version>1.0.37</Version>
-    <AssemblyVersion>1.0.37.0</AssemblyVersion>
-    <FileVersion>1.0.37.0</FileVersion>
+    <Version>1.0.38</Version>
+    <AssemblyVersion>1.0.38.0</AssemblyVersion>
+    <FileVersion>1.0.38.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>

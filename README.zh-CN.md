@@ -178,22 +178,31 @@ Helper 默认使用以下目录：
 
 ~~~text
 %LOCALAPPDATA%\ZZZScannerNext\
+  helper\
+    ZZZ-Scanner-Helper.exe
   packages\
-    scanner-<version>-<packageId>.zip
+    仅保留下载中的临时文件
   runtime\
     <version>\
       <packageId>\
+  outputs\
+    最近一次成功与最近一次失败产物
   logs\
     helper-YYYYMMDD.log
 ~~~
 
-FDD 与自包含包使用不同的 <code>packageId</code>，不会互相覆盖。启动缓存版本
-之前，Helper 会校验缓存 ZIP 和已安装目录中的每个程序文件。缺失文件、内容被
-修改或出现意外文件时会触发修复。
+Helper 1.2.0 会安装到固定的当前用户 helper 目录，并把浏览器协议注册到这个
+路径。后续 Helper 在该路径内执行事务式自更新；Helper 1.1.0 因为尚无更新协议，
+需要最后一次手动下载。
 
-下载、校验和解压都在临时路径完成。只有整个包验证通过后，Helper 才会原子替换
-正式运行目录。扫描输出目录，例如 <code>Scans</code> 和
-<code>StabilitySuites</code>，会在修复或同版本替换时保留。
+schema v3 manifest 列出每个 runtime 文件的大小和 SHA-256，因此 Helper 在安装
+并完整校验后即可删除 ZIP，后续复用时仍能逐文件验真。新 runtime 只有完成子进程
+WebSocket 握手后才会写入活动版本收据，随后删除所有非活动 runtime。更新过程中
+会短暂并存新旧两版，避免新版本无法启动时破坏当前可用版本。
+
+托管扫描产物不再放进版本目录。首次清理会迁移旧
+<code>runtime/**/Scans</code>，之后只保留最近一次成功和最近一次失败产物。计算器
+设置页会显示精确占用，并可重复执行清理而不卸载当前 Scanner。
 
 当计算器提示缓存损坏时，优先使用“修复扫描器”。这会重新下载当前选中的包并
 完整校验，不需要用户猜测应该手动删除哪个 DLL。
@@ -345,7 +354,7 @@ Scans\YYYY-MM-DD-HH-mm-ss-fff-p<process>-<random>\
 通过 Helper 运行时，结果位于：
 
 ~~~text
-%LOCALAPPDATA%\ZZZScannerNext\runtime\<version>\<packageId>\Scans
+%LOCALAPPDATA%\ZZZScannerNext\outputs
 ~~~
 
 分享诊断文件前请先检查内容。截图会包含当时可见的游戏界面，日志可能包含本机
@@ -383,7 +392,7 @@ Windows 不允许低完整性级别进程控制高完整性级别进程。如果
 
 ### 计算器提示未安装 Helper 或版本过旧
 
-1. 下载 Helper 1.1.0 或更高版本。
+1. 下载 Helper 1.2.0 或更高版本。
 2. 关闭旧 Helper 进程。
 3. 用新文件替换旧 EXE。
 4. 从准备长期保存的位置运行新 EXE 一次。
@@ -604,7 +613,7 @@ dotnet restore
 dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
 dotnet build Launcher\ZZZ-Scanner.Helper.csproj -c Release -p:NuGetAudit=false
 dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
-.\scripts\publish-slim.ps1 -Version 1.0.37
+.\scripts\publish-slim.ps1 -Version 1.0.38
 ~~~
 
 发布输出：

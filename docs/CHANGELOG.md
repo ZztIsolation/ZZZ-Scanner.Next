@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- 1.0.38 / Helper 1.2.0 将长期驻留文件收敛为一个托管 Helper 和一个已完成握手的活动 OCR runtime。Helper 首次确认后安装到 `%LOCALAPPDATA%\ZZZScannerNext\helper`，协议注册固定指向托管路径；下载引导副本在哈希一致且托管进程接管后删除。
+- Helper 协议升级到 v3，新增带 `requestId` 的 `get_storage_info`、`cleanup_storage` 和 `update_helper`。存储统计区分 Helper、runtime、安装包、扫描产物、日志及可释放空间；清理失败路径写入待清理收据并在下次启动重试。
+- scanner manifest 升级到 schema v3，每个包新增逐文件路径、大小和 SHA-256。Helper 在验证 ZIP、临时解压目录和文件清单后删除 ZIP；后续无需保留压缩包也能检查缺失、篡改和意外文件。
+- 活动版本只在 scanner 子进程完成 WebSocket 握手后写入原子收据。下载、解压或启动失败均保留旧活动版本；新版本接管后才删除其他版本和包 ID，避免升级失败造成不可用。
+- 网页托管扫描把输出根目录迁移到 `%LOCALAPPDATA%\ZZZScannerNext\outputs`。首次清理从历史 `runtime/**/Scans` 中迁移最近一次成功和最近一次失败产物，删除其余历史 runtime、ZIP、`.tmp` 与 `.download`。
+- 新增独立 `helper-manifest.json` 和事务式 Helper 自更新：HTTPS、大小及 SHA-256 校验通过后由新进程替换固定文件，启动成功删除备份，启动失败由旧版恢复。Helper 1.1.0 需要一次手动过渡，之后不再重复下载 EXE。
+- 1.0.38 最终本地发布门禁通过：FDD `21785760` 字节、SHA-256 `d63b89fbe07fba77fe641daa33b2aa8f5427f4b93fc95003fefe8c9750f7b78d`；自包含包 `84835665` 字节、SHA-256 `39be4d44d2b756db66f36b8308b055495e59ce4174cdb615399ceba293613bf4`；Helper 1.2.0 `8096768` 字节、SHA-256 `249e2fc2a6226e096ba8094cce5f984d7ff1130344431ced0a74155465937d9b`。
+
 - 重写根目录用户手册：`README.md` 提供完整英文说明，新增 `README.zh-CN.md` 提供完整中文说明；两版均覆盖支持系统与不支持范围、Helper 自动选择 FDD/自包含包、手动安装、扫描操作、权限与 UAC、输出文件、结构化故障排查、已知限制、命令行和发布门禁。
 - 1.0.37 移除 OpenCvSharp：所有 ROI 使用 `System.Drawing.Rectangle`，PP-OCR 预处理改为基于 `Bitmap.LockBits` 的裁剪、半像素双线性缩放和 BGR/NCHW tensor 写入；保留 PP-OCRv5 模型、ONNX Runtime、Fast OCR、DXGI 与 GDI 回退。
 - 1.0.37 发布脚本同时生成 framework-dependent 与 self-contained 两个 x64 包，并生成 schema v2 manifest、SHA-256、展开大小和体积报告；发布门禁为 FDD 25 MiB、自包含 90 MiB、NativeAOT Helper 10 MiB。
