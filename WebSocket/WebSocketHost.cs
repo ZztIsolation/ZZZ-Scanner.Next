@@ -11,8 +11,11 @@ namespace ZZZScannerNext.WebSocket;
 
 public sealed class WebSocketHost : IDisposable
 {
+    private const int MaxMessageBytes = 256 * 1024;
+
     private readonly ScanController _controller;
     private readonly HttpListener _listener = new();
+    private readonly SemaphoreSlim _scanGate = new(1, 1);
     private readonly int _port;
     private readonly string? _connectionToken;
     private bool _disposed;
@@ -47,10 +50,11 @@ public sealed class WebSocketHost : IDisposable
     {
         try
         {
-            AddCorsHeaders(context.Response);
+            var origin = context.Request.Headers["Origin"];
+            AddCorsHeaders(context.Response, origin);
             if (context.Request.HttpMethod.Equals("OPTIONS", StringComparison.OrdinalIgnoreCase))
             {
-                context.Response.StatusCode = 204;
+                context.Response.StatusCode = IsAllowedBrowserOrigin(origin) ? 204 : 403;
                 context.Response.Close();
                 return;
             }
@@ -67,7 +71,8 @@ public sealed class WebSocketHost : IDisposable
             }
 
             var path = context.Request.Url?.AbsolutePath.TrimEnd('/') ?? "";
-            if (!IsAllowedWebSocketPath(path))
+            if (!IsAllowedWebSocketPath(path)
+                || (_connectionToken is null && !IsAllowedBrowserOrigin(origin)))
             {
                 context.Response.StatusCode = 403;
                 context.Response.Close();
@@ -142,14 +147,57 @@ public sealed class WebSocketHost : IDisposable
                 case "scan_req":
                     if (scanTask is { IsCompleted: false })
                     {
-                        await SendAsync(socket, sendGate, "scan_error", new { message = "已有扫描任务正在进行。" }, socketCts.Token);
+                        await SendAsync(socket, sendGate, "scan_error", new
+                        {
+                            code = "scan_busy",
+                            phase = "scan",
+                            title = "已有扫描任务",
+                            message = "已有扫描任务正在进行。",
+                            remedy = "请等待当前任务完成，或先停止当前扫描。",
+                            retryable = true,
+                            actions = Array.Empty<object>()
+                        }, socketCts.Token);
+                        break;
+                    }
+
+                    ScanRequestPayload payload;
+                    try
+                    {
+                        payload = envelope.Data.Deserialize<ScanRequestPayload>(JsonDefaults.Read) ?? new ScanRequestPayload();
+                    }
+                    catch (JsonException)
+                    {
+                        await SendAsync(socket, sendGate, "scan_error", new
+                        {
+                            code = "scan_request_invalid",
+                            phase = "scan",
+                            title = "扫描请求无效",
+                            message = "扫描请求格式无效。",
+                            remedy = "请刷新 calculator 页面后重试。",
+                            retryable = true,
+                            actions = new[] { new { kind = "retry_scan", label = "重新扫描" } }
+                        }, socketCts.Token);
+                        break;
+                    }
+
+                    if (!await _scanGate.WaitAsync(0, socketCts.Token))
+                    {
+                        await SendAsync(socket, sendGate, "scan_error", new
+                        {
+                            code = "scan_busy",
+                            phase = "scan",
+                            title = "扫描器正被占用",
+                            message = "另一个连接正在执行扫描任务。",
+                            remedy = "请关闭其他 calculator 页面，或等待当前扫描完成。",
+                            retryable = true,
+                            actions = Array.Empty<object>()
+                        }, socketCts.Token);
                         break;
                     }
 
                     scanCts?.Dispose();
                     scanCts = CancellationTokenSource.CreateLinkedTokenSource(socketCts.Token);
-                    var payload = envelope.Data.Deserialize<ScanRequestPayload>(JsonDefaults.Read) ?? new ScanRequestPayload();
-                    scanTask = Task.Run(() => RunScanAsync(socket, sendGate, payload, scanCts.Token), scanCts.Token);
+                    scanTask = RunScanWithGateAsync(socket, sendGate, payload, scanCts.Token);
                     break;
 
                 case "scan_stop":
@@ -165,6 +213,22 @@ public sealed class WebSocketHost : IDisposable
         }
 
         scanCts?.Dispose();
+    }
+
+    private async Task RunScanWithGateAsync(
+        System.Net.WebSockets.WebSocket socket,
+        SemaphoreSlim sendGate,
+        ScanRequestPayload payload,
+        CancellationToken token)
+    {
+        try
+        {
+            await RunScanAsync(socket, sendGate, payload, token);
+        }
+        finally
+        {
+            _scanGate.Release();
+        }
     }
 
     private async Task RunScanAsync(System.Net.WebSockets.WebSocket socket, SemaphoreSlim sendGate, ScanRequestPayload payload, CancellationToken token)
@@ -190,11 +254,51 @@ public sealed class WebSocketHost : IDisposable
         }
         catch (OperationCanceledException)
         {
-            await SendAsync(socket, sendGate, "scan_error", new { message = "扫描已停止。", scanner = AppInfo.DiagnosticPayload() }, CancellationToken.None);
+            await SendAsync(socket, sendGate, "scan_error", new
+            {
+                code = "scan_cancelled",
+                phase = "scan",
+                title = "扫描已停止",
+                message = "扫描已停止。",
+                remedy = "可以调整选项后重新开始扫描。",
+                retryable = true,
+                actions = new[] { new { kind = "retry_scan", label = "重新扫描" } },
+                scanner = AppInfo.DiagnosticPayload()
+            }, CancellationToken.None);
+        }
+        catch (ScannerElevationRequiredException ex)
+        {
+            await SendAsync(socket, sendGate, "scan_error", new
+            {
+                code = "elevation_required",
+                phase = "scan",
+                title = "需要管理员权限",
+                message = ex.Message,
+                remedy = "请以管理员权限重启扫描器；只有这一次启动会请求 UAC。",
+                retryable = true,
+                actions = new[]
+                {
+                    new { kind = "restart_elevated", label = "以管理员权限重启" },
+                    new { kind = "open_logs", label = "打开日志目录" }
+                },
+                scanner = AppInfo.DiagnosticPayload()
+            }, CancellationToken.None);
         }
         catch (Exception ex)
         {
-            await SendAsync(socket, sendGate, "scan_error", new { message = ex.Message, error = ex.ToString(), scanner = AppInfo.DiagnosticPayload() }, CancellationToken.None);
+            var gameNotFound = ex.Message.Contains("未找到游戏窗口进程", StringComparison.Ordinal);
+            await SendAsync(socket, sendGate, "scan_error", new
+            {
+                code = gameNotFound ? "game_not_found" : "scan_failed",
+                phase = "scan",
+                title = gameNotFound ? "未找到绝区零窗口" : "扫描失败",
+                message = ex.Message,
+                remedy = gameNotFound ? "请启动游戏并进入驱动盘背包后重试。" : "请重试；如果问题持续，请打开 Helper 日志。",
+                retryable = true,
+                actions = new[] { new { kind = "retry_scan", label = "重新扫描" } },
+                error = ex.ToString(),
+                scanner = AppInfo.DiagnosticPayload()
+            }, CancellationToken.None);
         }
     }
 
@@ -213,10 +317,10 @@ public sealed class WebSocketHost : IDisposable
             CaptureMode = ParseCaptureMode(payload.CaptureMode),
             PanelStabilityMode = ParsePanelStabilityMode(payload.PanelStabilityMode, payload.FastMode),
             ScrollAcceptMode = string.IsNullOrWhiteSpace(payload.ScrollAcceptMode) && payload.FastMode
-                ? ScrollAcceptMode.EarlyOneRow
+                ? ScanModeDefaults.ScrollAccept(true)
                 : ParseScrollAcceptMode(payload.ScrollAcceptMode),
             PanelAcceptMode = string.IsNullOrWhiteSpace(payload.PanelAcceptMode) && payload.FastMode
-                ? PanelAcceptMode.AdaptiveEarlyFullRoi
+                ? ScanModeDefaults.PanelAccept(true)
                 : ParsePanelAcceptMode(payload.PanelAcceptMode),
             PostScrollPanelAcceptMode = ParsePostScrollPanelAcceptMode(payload.PostScrollPanelAcceptMode),
             PanelFloorMode = ParsePanelFloorMode(payload.PanelFloorMode),
@@ -225,7 +329,7 @@ public sealed class WebSocketHost : IDisposable
             PostScrollPanelMinAcceptFloorMs = Math.Clamp(payload.PostScrollPanelMinAcceptFloorMs <= 0 ? 110 : payload.PostScrollPanelMinAcceptFloorMs, 100, 120),
             ScrollTickDelayOverrideMs = payload.ScrollTickDelayMs <= 0 ? 0 : Math.Clamp(payload.ScrollTickDelayMs, 50, 80),
             OverlapConflictMode = string.IsNullOrWhiteSpace(payload.OverlapConflictMode) && payload.FastMode
-                ? OverlapConflictMode.Recover
+                ? ScanModeDefaults.OverlapConflict(true)
                 : ParseOverlapConflictMode(payload.OverlapConflictMode),
             VisualProfileId = string.IsNullOrWhiteSpace(payload.VisualProfileId) ? "auto" : payload.VisualProfileId,
             VisualQualityLabel = string.IsNullOrWhiteSpace(payload.VisualProfileQuality) ? "current" : payload.VisualProfileQuality,
@@ -421,7 +525,25 @@ public sealed class WebSocketHost : IDisposable
             var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
             if (result.MessageType == WebSocketMessageType.Close)
             {
+                if (socket.State == WebSocketState.CloseReceived)
+                {
+                    await socket.CloseOutputAsync(
+                        result.CloseStatus ?? WebSocketCloseStatus.NormalClosure,
+                        result.CloseStatusDescription,
+                        CancellationToken.None);
+                }
+
                 return null;
+            }
+
+            if (result.MessageType != WebSocketMessageType.Text)
+            {
+                throw new InvalidDataException("Scanner WebSocket accepts text messages only.");
+            }
+
+            if (stream.Length + result.Count > MaxMessageBytes)
+            {
+                throw new InvalidDataException($"Scanner WebSocket message exceeds {MaxMessageBytes} bytes.");
             }
 
             stream.Write(buffer, 0, result.Count);
@@ -465,11 +587,33 @@ public sealed class WebSocketHost : IDisposable
         response.Close();
     }
 
-    private static void AddCorsHeaders(HttpListenerResponse response)
+    internal static bool IsAllowedBrowserOrigin(string? origin)
     {
-        response.Headers["Access-Control-Allow-Origin"] = "*";
+        if (string.IsNullOrWhiteSpace(origin))
+        {
+            return false;
+        }
+
+        return origin.Equals("http://localhost:8787", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("http://127.0.0.1:8787", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://zzzcaculator.top", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://zzzcaculator.top:8443", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://www.zzzcaculator.top", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://www.zzzcaculator.top:8443", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://zztisolation.github.io", StringComparison.OrdinalIgnoreCase)
+            || origin.Equals("https://jahooyoung.github.io", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AddCorsHeaders(HttpListenerResponse response, string? origin)
+    {
+        if (IsAllowedBrowserOrigin(origin))
+        {
+            response.Headers["Access-Control-Allow-Origin"] = origin;
+        }
+
         response.Headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS";
         response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
+        response.Headers["Access-Control-Allow-Private-Network"] = "true";
     }
 
     private static void TryOpenBrowser(string url)

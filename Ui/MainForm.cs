@@ -316,20 +316,21 @@ public sealed class MainForm : Form
 
         if (!_fastMode.Checked)
         {
+            _scrollAcceptModeCombo.SelectedItem = ScanModeDefaults.ScrollAccept(false) == ScrollAcceptMode.Safe
+                ? "safe"
+                : "early-one-row";
+            _panelAcceptModeCombo.SelectedItem = ScanModeDefaults.PanelAccept(false) == PanelAcceptMode.Safe
+                ? "safe"
+                : "adaptive-early-full-roi";
             return;
         }
 
-        if (_scrollAcceptModeCombo.SelectedItem is null
-            || string.Equals(_scrollAcceptModeCombo.SelectedItem.ToString(), "safe", StringComparison.OrdinalIgnoreCase))
-        {
-            _scrollAcceptModeCombo.SelectedItem = "early-one-row";
-        }
-
-        if (_panelAcceptModeCombo.SelectedItem is null
-            || string.Equals(_panelAcceptModeCombo.SelectedItem.ToString(), "safe", StringComparison.OrdinalIgnoreCase))
-        {
-            _panelAcceptModeCombo.SelectedItem = "adaptive-early-full-roi";
-        }
+        _scrollAcceptModeCombo.SelectedItem = ScanModeDefaults.ScrollAccept(true) == ScrollAcceptMode.EarlyOneRow
+            ? "early-one-row"
+            : "safe";
+        _panelAcceptModeCombo.SelectedItem = ScanModeDefaults.PanelAccept(true) == PanelAcceptMode.AdaptiveEarlyFullRoi
+            ? "adaptive-early-full-roi"
+            : "safe";
     }
 
     private async Task StartScanAsync()
@@ -399,6 +400,7 @@ public sealed class MainForm : Form
             PanelAcceptMode = SelectedPanelAcceptMode(),
             PostScrollPanelAcceptMode = SelectedPostScrollPanelAcceptMode(),
             PanelMinAcceptFloorMs = (int)_panelMinAcceptFloorMs.Value,
+            OverlapConflictMode = ScanModeDefaults.OverlapConflict(_fastMode.Checked),
             ProfileRouting = ProfileRoutingMode.Strict,
             VisualProfileClient = VisualProfileClientKind.Auto,
             OcrBatchSize = (int)_ocrBatchSize.Value,
@@ -454,12 +456,12 @@ public sealed class MainForm : Form
     {
         var defaultProfileName = ScanOptions.DefaultProfileName;
         if (!string.IsNullOrWhiteSpace(requestedProfileName)
-            && _profiles.Profiles.Any(profile => string.Equals(profile.Name, requestedProfileName, StringComparison.OrdinalIgnoreCase)))
+            && _profiles.Find(requestedProfileName) is not null)
         {
             return requestedProfileName;
         }
 
-        if (_profiles.Profiles.Any(profile => string.Equals(profile.Name, defaultProfileName, StringComparison.OrdinalIgnoreCase)))
+        if (_profiles.Find(defaultProfileName) is not null)
         {
             return defaultProfileName;
         }

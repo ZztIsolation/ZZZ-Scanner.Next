@@ -371,7 +371,7 @@ public static class FastOcrEvaluator
             else
             {
                 using var bitmap = new Bitmap(row.ResolvedImageFile);
-                match = index.Match(row.FieldKey, bitmap, new OpenCvSharp.Rect(0, 0, bitmap.Width, bitmap.Height), row.VisualProfileId, routingMode);
+                match = index.Match(row.FieldKey, bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height), row.VisualProfileId, routingMode);
             }
             sw.Stop();
 

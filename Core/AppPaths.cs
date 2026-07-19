@@ -4,6 +4,8 @@ namespace ZZZScannerNext.Core;
 
 public static class AppPaths
 {
+    private const string OutputRootEnvironmentVariable = "ZZZ_SCANNER_OUTPUT_ROOT";
+
     public static string BaseDirectory => AppContext.BaseDirectory;
 
     public static string DataDirectory => Path.Combine(BaseDirectory, "Data");
@@ -14,7 +16,10 @@ public static class AppPaths
 
     public static string CreateScanDirectory()
     {
-        var root = Path.Combine(BaseDirectory, "Scans");
+        var configuredRoot = Environment.GetEnvironmentVariable(OutputRootEnvironmentVariable);
+        var root = string.IsNullOrWhiteSpace(configuredRoot)
+            ? Path.Combine(BaseDirectory, "Scans")
+            : Path.GetFullPath(configuredRoot);
         Directory.CreateDirectory(root);
         var suffix = RandomNumberGenerator.GetHexString(4).ToLowerInvariant();
         var dir = Path.Combine(root, $"{DateTime.Now:yyyy-MM-dd-HH-mm-ss-fff}-p{Environment.ProcessId:x}-{suffix}");

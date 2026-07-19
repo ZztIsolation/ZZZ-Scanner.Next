@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Globalization;
-using System.Security.Principal;
 using System.Text.Json;
 using ZZZScannerNext.Cleaning;
 using ZZZScannerNext.Core;
@@ -15,18 +14,18 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        var outputRoot = ReadOption(args, "--output-root");
+        if (!string.IsNullOrWhiteSpace(outputRoot))
+        {
+            Environment.SetEnvironmentVariable("ZZZ_SCANNER_OUTPUT_ROOT", Path.GetFullPath(outputRoot));
+        }
+
         if (TryRunCommandLine(args, out var exitCode))
         {
             return exitCode;
         }
 
         NativeMethods.TryEnablePerMonitorDpiAwareness();
-
-        if (!IsAdministrator())
-        {
-            TryRelaunchAsAdministrator();
-            return 0;
-        }
 
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
@@ -209,12 +208,6 @@ static class Program
 
     private static int RunCaptureStabilitySuite(string[] args)
     {
-        if (!IsAdministrator())
-        {
-            TryRelaunchAsAdministrator(args);
-            return 0;
-        }
-
         NativeMethods.TryEnablePerMonitorDpiAwareness();
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
@@ -403,12 +396,6 @@ static class Program
 
     private static int RunScanOnce(string[] args)
     {
-        if (!IsAdministrator())
-        {
-            TryRelaunchAsAdministrator(args);
-            return 0;
-        }
-
         NativeMethods.TryEnablePerMonitorDpiAwareness();
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         ApplicationConfiguration.Initialize();
@@ -733,17 +720,17 @@ static class Program
 
             if (string.IsNullOrWhiteSpace(scrollAcceptMode))
             {
-                command.ScrollAcceptMode = ScrollAcceptMode.EarlyOneRow;
+                command.ScrollAcceptMode = ScanModeDefaults.ScrollAccept(true);
             }
 
             if (string.IsNullOrWhiteSpace(panelAcceptMode))
             {
-                command.PanelAcceptMode = PanelAcceptMode.AdaptiveEarlyFullRoi;
+                command.PanelAcceptMode = ScanModeDefaults.PanelAccept(true);
             }
 
             if (string.IsNullOrWhiteSpace(overlapConflictMode))
             {
-                command.OverlapConflictMode = OverlapConflictMode.Recover;
+                command.OverlapConflictMode = ScanModeDefaults.OverlapConflict(true);
             }
         }
 
@@ -878,12 +865,6 @@ static class Program
 
     private static int RunWebSocketHost(int port, string? connectionToken, bool openBrowser)
     {
-        if (!IsAdministrator())
-        {
-            Console.Error.WriteLine("WebSocket scanner host must run as administrator so mouse input can reach the game window.");
-            return 5;
-        }
-
         NativeMethods.TryEnablePerMonitorDpiAwareness();
         var profiles = ScanProfileFile.Load();
         var wikiData = WikiData.Load();
@@ -1176,54 +1157,6 @@ static class Program
         catch
         {
         }
-    }
-
-    private static bool IsAdministrator()
-    {
-        using var identity = WindowsIdentity.GetCurrent();
-        var principal = new WindowsPrincipal(identity);
-        return principal.IsInRole(WindowsBuiltInRole.Administrator);
-    }
-
-    private static void TryRelaunchAsAdministrator(params string[] args)
-    {
-        try
-        {
-            var executable = Environment.ProcessPath;
-            if (string.IsNullOrWhiteSpace(executable))
-            {
-                return;
-            }
-
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = executable,
-                UseShellExecute = true,
-                Verb = "runas",
-                WorkingDirectory = AppContext.BaseDirectory,
-                Arguments = string.Join(" ", args.Select(QuoteArgument))
-            });
-        }
-        catch
-        {
-            MessageBox.Show("需要管理员权限才能向游戏窗口发送鼠标输入。", "ZZZ Scanner Next",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-    }
-
-    private static string QuoteArgument(string argument)
-    {
-        if (argument.Length == 0)
-        {
-            return "\"\"";
-        }
-
-        if (!argument.Any(char.IsWhiteSpace) && !argument.Contains('"'))
-        {
-            return argument;
-        }
-
-        return "\"" + argument.Replace("\"", "\\\"") + "\"";
     }
 
     private sealed record CaptureSuiteCase(string Name, string CaptureMode, string[] ExtraArgs);

@@ -52,6 +52,12 @@ public sealed class GameWindow : IDisposable
 
         using (process)
         {
+            if (NativeMethods.RequiresElevationForProcess(process.Id))
+            {
+                throw new ScannerElevationRequiredException(
+                    $"游戏进程 {processName} 的权限高于当前扫描器，普通权限无法可靠截图或发送输入。");
+            }
+
             return new GameWindow(process.MainWindowHandle, GetClientMetrics(process.MainWindowHandle));
         }
     }
@@ -235,4 +241,12 @@ public sealed class GameWindow : IDisposable
     }
 
     private readonly record struct ClientMetrics(Rectangle ScreenRect, float Scale);
+}
+
+public sealed class ScannerElevationRequiredException : InvalidOperationException
+{
+    public ScannerElevationRequiredException(string message)
+        : base(message)
+    {
+    }
 }

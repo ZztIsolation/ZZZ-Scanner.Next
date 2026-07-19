@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Helper 1.2.1 修复 1.1.x 升级死路：下载引导程序先校验 22355 端口确为 ZZZ Scanner Helper，再要求唯一进程的名称、文件版本与健康检查版本一致。用户确认后才关闭该旧进程、等待端口释放、安装和校验固定路径副本、注册协议并启动托管 Helper；未知服务、多候选、版本不匹配、取消、终止失败或端口释放超时均不结束进程。
+- 网页在读取 Helper 版本和协议后才允许请求 Scanner manifest。1.1.x 只显示“下载并更新 Helper”和“重新检测”；协议 v3 的旧版本自动调用 `update_helper`，断线期间保持扫描流程并在重连后继续准备 OCR。自动更新失败同时提供重试和手动下载。
+- 发布脚本从 Helper 项目版本生成 `launcherMinVersion`，Helper Release tag 与 Scanner tag 解耦，并支持 `-HelperOnly` 只生成 Helper 资产。Helper 1.2.1 为 `8137728` 字节、SHA-256 `d3c88f1f7556e9bab15f7129e253d2c5527b0f5009a84d52a7a0acd354f326ae`；Scanner 1.0.38 两个既有包未重建或替换，哈希保持不变。
+
+- 1.0.38 / Helper 1.2.0 将长期驻留文件收敛为一个托管 Helper 和一个已完成握手的活动 OCR runtime。Helper 首次确认后安装到 `%LOCALAPPDATA%\ZZZScannerNext\helper`，协议注册固定指向托管路径；下载引导副本在哈希一致且托管进程接管后删除。
+- Helper 协议升级到 v3，新增带 `requestId` 的 `get_storage_info`、`cleanup_storage` 和 `update_helper`。存储统计区分 Helper、runtime、安装包、扫描产物、日志及可释放空间；清理失败路径写入待清理收据并在下次启动重试。
+- scanner manifest 升级到 schema v3，每个包新增逐文件路径、大小和 SHA-256。Helper 在验证 ZIP、临时解压目录和文件清单后删除 ZIP；后续无需保留压缩包也能检查缺失、篡改和意外文件。
+- 活动版本只在 scanner 子进程完成 WebSocket 握手后写入原子收据。下载、解压或启动失败均保留旧活动版本；新版本接管后才删除其他版本和包 ID，避免升级失败造成不可用。
+- 网页托管扫描把输出根目录迁移到 `%LOCALAPPDATA%\ZZZScannerNext\outputs`。首次清理从历史 `runtime/**/Scans` 中迁移最近一次成功和最近一次失败产物，删除其余历史 runtime、ZIP、`.tmp` 与 `.download`。
+- 新增独立 `helper-manifest.json` 和事务式 Helper 自更新：HTTPS、大小及 SHA-256 校验通过后由新进程替换固定文件，启动成功删除备份，启动失败由旧版恢复。Helper 1.1.0 需要一次手动过渡，之后不再重复下载 EXE。
+- 1.0.38 最终本地发布门禁通过：FDD `21785760` 字节、SHA-256 `d63b89fbe07fba77fe641daa33b2aa8f5427f4b93fc95003fefe8c9750f7b78d`；自包含包 `84835665` 字节、SHA-256 `39be4d44d2b756db66f36b8308b055495e59ce4174cdb615399ceba293613bf4`；Helper 1.2.0 `8096768` 字节、SHA-256 `249e2fc2a6226e096ba8094cce5f984d7ff1130344431ced0a74155465937d9b`。
+
+- 重写根目录用户手册：`README.md` 提供完整英文说明，新增 `README.zh-CN.md` 提供完整中文说明；两版均覆盖支持系统与不支持范围、Helper 自动选择 FDD/自包含包、手动安装、扫描操作、权限与 UAC、输出文件、结构化故障排查、已知限制、命令行和发布门禁。
+- 1.0.37 移除 OpenCvSharp：所有 ROI 使用 `System.Drawing.Rectangle`，PP-OCR 预处理改为基于 `Bitmap.LockBits` 的裁剪、半像素双线性缩放和 BGR/NCHW tensor 写入；保留 PP-OCRv5 模型、ONNX Runtime、Fast OCR、DXGI 与 GDI 回退。
+- 1.0.37 发布脚本同时生成 framework-dependent 与 self-contained 两个 x64 包，并生成 schema v2 manifest、SHA-256、展开大小和体积报告；发布门禁为 FDD 25 MiB、自包含 90 MiB、NativeAOT Helper 10 MiB。
+- 两种包均随附 ONNX Runtime 所需的 VC143 本地依赖。CI 要求从受控 Visual Studio Redistributable 布局复制；缺少该布局时发布会失败，避免在正式构建中静默遗漏或使用来源不明的 DLL。
+- Helper 1.1.0/协议 v2 支持 Win10 Build 17763+ 与 Win11 x64 环境检查、.NET 8 Desktop Runtime 多来源探测、双包自动选择、按包 ID 隔离缓存、空间预检、FDD 一次性自包含回退和滚动诊断日志；schema v1 保持兼容。
+- Helper 新增结构化错误与 `repair_scanner`、`restart_scanner_elevated`、`open_log_folder`、`get_diagnostics` 命令。scanner 改为 `asInvoker`，只在目标游戏权限更高时返回 `elevation_required`；用户取消 UAC 会识别为 Windows 错误 1223。
+- 1.0.37 最终产物：FDD `21785638` 字节、SHA-256 `6ead4f1401ea057c706b4ec94ab41d66499240f95c8d6a9051fe71027d9e5404`；self-contained `84835543` 字节、SHA-256 `bdef1a3d3d0ecf9917b2618fb46cd04cea6443dbd8b399d9793c6f375a993129`；Helper `7823872` 字节、SHA-256 `8735147fb1d3061ad410ba162cebf841be815834699faa341aae342e422f2186`。ZIP 使用路径排序与固定时间戳，连续两次完整发布 SHA 保持一致。
+- 修复 Helper 更新信任边界：移除公网 HTTP/IP 回退，远程 manifest、包地址及重定向必须使用 HTTPS；loopback HTTP 仅用于本地开发。manifest 新增 schema、最低 Helper 版本、版本号、SHA-256、包大小和入口文件校验。
+- 修复 manifest 路径逃逸风险：scanner 版本、入口、安装目录、临时目录和缓存包路径均执行根目录包含检查；未知或非法字段会在下载、删除和提权启动前失败。
+- Helper 不再仅凭 EXE 存在复用 runtime：缓存 ZIP 必须重新通过大小/SHA-256 校验，已安装文件必须与 ZIP 逐文件一致；损坏、篡改或非输出目录中的额外文件会触发自动修复。
+- 修复 legacy scanner WebSocket 可被任意网页连接的问题：无令牌直连必须来自白名单 Origin，CORS 不再返回通配符；WebSocket 消息限制为 256 KiB，并增加跨连接全局扫描互斥。
+- 修复浏览器断开后提权 scanner 子进程残留：`BrowserSession` 结束时会释放内部 WebSocket、结束子进程；子进程连接失败路径也会完整清理。
+- scanner host 与 Helper 收到 WebSocket Close 后会返回标准关闭确认，避免客户端 `CloseAsync` 悬挂并延迟会话/子进程清理。
+- 统一 Fast Mode 默认值：GUI、CLI 和 WebSocket 共用 `ScanModeDefaults`，高速模式使用 `early-one-row + adaptive-early-full-roi + recover`，关闭后恢复 `safe + safe + recheck`。
+- 修复发布版本漂移：`publish-slim.ps1 -Version` 会写入程序集/文件版本并校验生成的 EXE；支持从 csproj 读取默认版本和使用 `-OutputRoot` 隔离验证发布。`AppInfo.Version` 改为读取程序集版本。
+- profile 查找改为不区分大小写的严格匹配；未知 profile 或空 profile 文件会明确失败，不再静默使用第一个 profile 操作游戏窗口。
+- 新增无第三方测试依赖的 `Tests/ZZZ-Scanner.Next.RegressionTests.csproj`，覆盖下载协议、manifest/path traversal、runtime 完整性、实际 WebSocket Origin/token 握手、Fast Mode、profile 和程序集版本回归。
 - 1.0.36 槽位安全热修：Fast OCR assist 运行时强制禁用 `name` 字段，`name` 仍保留 shadow/eval/training 但正式导出始终回退 PP-OCR；校准器也不再允许 `name` 自动进入 assist，避免套装名模板误接受导致槽位污染。
 - 1.0.36 新增导出前槽位硬校验与 benchmark 验收指标：`slot_out_of_range_count`、`slot_mainstat_violation_count`、`slot_fixed_value_violation_count`、`slot_safety_pass`。旧坏样本 `runtime\1.0.34\Scans\2026-07-02-18-34-09-134-pf38-77d5` 回放会正确判定 `slot_safety_pass=false`，其中 `slot_mainstat_violation_count=18`、`slot_fixed_value_violation_count=19`。
 - 1.0.36 模板 `Data\ocr_fast_templates.json` 已把所有 `name` policy 的 `AssistEnabled` 置为 false，保留 8275 个 v6 模板样本；模板 SHA-256 为 `814e28114378756e7c541c0efe6cfa2469e1e723d0498ba8e73edea58266a076`。

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
@@ -9,6 +10,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
 namespace ZZZScannerHelper;
@@ -16,13 +18,14 @@ namespace ZZZScannerHelper;
 internal static partial class Program
 {
     private const string ServiceName = "zzz-scanner-helper";
-    private const string HelperVersion = "1.0.2";
-    private const int ProtocolVersion = 1;
+    internal const string HelperVersion = "1.2.1";
+    private const int ProtocolVersion = 3;
     private const int HelperPort = 22355;
     private const string ProtocolName = "zzz-scanner";
     private const string ManifestPath = "/downloads/zzz-scanner/manifest.json";
     private const int PackageDownloadMaxAttempts = 5;
     private const int DownloadProgressIntervalMs = 300;
+    private const int MaxWebSocketMessageBytes = 256 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true,
@@ -31,8 +34,42 @@ internal static partial class Program
 
     public static async Task<int> Main(string[] args)
     {
+        try
+        {
+            var lifecycle = await HelperInstallationManager.PrepareAsync(args);
+            return lifecycle.Exit ? 0 : await RunAsync(lifecycle.Arguments);
+        }
+        catch (Exception ex)
+        {
+            if (HelperInstallationManager.TryRollbackPendingUpdate())
+            {
+                return 1;
+            }
+            var error = HelperErrors.FromException(ex, "startup");
+            ShowStartupError(error);
+            return 1;
+        }
+    }
+
+    private static async Task<int> RunAsync(string[] args)
+    {
         var launchOrigin = TryReadLaunchOrigin(args);
-        RegisterProtocol();
+        try
+        {
+            RegisterProtocol();
+        }
+        catch (Exception ex)
+        {
+            var warning = new HelperFailureException(
+                "protocol_registration_failed",
+                "startup",
+                "无法注册扫描助手启动协议",
+                ex.Message,
+                "请检查当前用户注册表权限；仍可手动运行 Helper 后回到网页重连。",
+                retryable: true,
+                innerException: ex);
+            ShowStartupError(HelperErrors.FromException(warning, "startup"));
+        }
 
         using var mutex = new Mutex(initiallyOwned: true, "Local\\ZZZScannerHelper", out var ownsMutex);
         if (!ownsMutex)
@@ -51,6 +88,22 @@ internal static partial class Program
         await server.RunAsync(cts.Token);
         return 0;
     }
+
+    private static void ShowStartupError(HelperErrorMessage error)
+    {
+        var text = $"{error.Message}\n\n处理方法：{error.Remedy}\n诊断编号：{error.DiagnosticId}\n日志：{HelperLog.DirectoryPath}";
+        try
+        {
+            MessageBox(IntPtr.Zero, text, error.Title, 0x10);
+        }
+        catch
+        {
+            Console.Error.WriteLine(text);
+        }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "MessageBoxW")]
+    private static extern int MessageBox(IntPtr hWnd, string text, string caption, uint type);
 
     private static string? TryReadLaunchOrigin(string[] args)
     {
@@ -85,26 +138,54 @@ internal static partial class Program
             return;
         }
 
-        using var root = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{ProtocolName}");
-        root?.SetValue("", "URL:ZZZ Scanner Protocol");
-        root?.SetValue("URL Protocol", "");
-        using var command = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{ProtocolName}\shell\open\command");
-        command?.SetValue("", $"\"{exe}\" \"%1\"");
+        try
+        {
+            using var root = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{ProtocolName}");
+            root?.SetValue("", "URL:ZZZ Scanner Protocol");
+            root?.SetValue("URL Protocol", "");
+            using var command = Registry.CurrentUser.CreateSubKey($@"Software\Classes\{ProtocolName}\shell\open\command");
+            command?.SetValue("", $"\"{exe}\" \"%1\"");
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            throw new HelperFailureException(
+                "protocol_registration_failed",
+                "startup",
+                "无法注册扫描助手启动协议",
+                "Windows 不允许 Helper 注册 zzz-scanner 启动协议。",
+                "可以手动运行 Helper；如需网页自动唤起，请检查账户注册表策略。",
+                retryable: false,
+                innerException: ex);
+        }
     }
 
     private sealed class HelperServer : IDisposable
     {
         private readonly HttpClient _http = new();
         private readonly HttpListener _listener = new();
-        private readonly Dictionary<string, DateTimeOffset> _tokens = new(StringComparer.Ordinal);
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> _tokens = new(StringComparer.Ordinal);
         private readonly SemaphoreSlim _ensureGate = new(1, 1);
+        private readonly HelperStorageManager _storage = new();
         private ScannerManifest? _manifest;
+        private ScannerPackage? _selectedPackage;
+        private HelperEnvironmentSnapshot? _environment;
         private string? _entryPath;
+        private string? _activeVersion;
+        private string? _activePackageId;
+        private string? _activePackageMode;
         private string? _launchOrigin;
         private bool _disposed;
 
         public HelperServer(string? launchOrigin)
         {
+            var active = _storage.LoadActiveRuntime();
+            if (active is not null)
+            {
+                _activeVersion = active.Version;
+                _activePackageId = active.PackageId;
+                _activePackageMode = active.PackageMode;
+                _entryPath = active.EntryPath;
+            }
             if (IsAllowedOrigin(launchOrigin))
             {
                 _launchOrigin = launchOrigin;
@@ -115,6 +196,7 @@ internal static partial class Program
         {
             _listener.Prefixes.Add($"http://127.0.0.1:{HelperPort}/");
             _listener.Start();
+            HelperInstallationManager.CompletePendingUpdate();
             while (!token.IsCancellationRequested)
             {
                 var context = await _listener.GetContextAsync().WaitAsync(token);
@@ -190,23 +272,30 @@ internal static partial class Program
 
             _launchOrigin = origin;
             var tokenValue = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
-            _tokens[tokenValue] = DateTimeOffset.Now.AddMinutes(5);
+            var now = DateTimeOffset.Now;
+            foreach (var expiredToken in _tokens.Where(pair => pair.Value < now).Select(pair => pair.Key))
+            {
+                _tokens.TryRemove(expiredToken, out _);
+            }
+
+            _tokens[tokenValue] = now.AddMinutes(5);
             await SendJsonAsync(context.Response, 200, new TokenResponse { Token = tokenValue }, token);
         }
 
         private async Task HandleWebSocketAsync(HttpListenerContext context, CancellationToken token)
         {
             var tokenValue = context.Request.Url?.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
-            if (string.IsNullOrWhiteSpace(tokenValue) || !_tokens.TryGetValue(tokenValue, out var expires) || expires < DateTimeOffset.Now)
+            if (string.IsNullOrWhiteSpace(tokenValue)
+                || !_tokens.TryRemove(tokenValue, out var expires)
+                || expires < DateTimeOffset.Now)
             {
                 context.Response.StatusCode = 403;
                 context.Response.Close();
                 return;
             }
 
-            _tokens.Remove(tokenValue);
             var wsContext = await context.AcceptWebSocketAsync(null);
-            var session = new BrowserSession(this, wsContext.WebSocket);
+            await using var session = new BrowserSession(this, wsContext.WebSocket);
             await session.RunAsync(token);
         }
 
@@ -225,65 +314,247 @@ internal static partial class Program
         {
             return new ScannerState
             {
-                Version = _manifest?.ScannerVersion,
+                Version = _activeVersion ?? _manifest?.ScannerVersion,
                 Installed = !string.IsNullOrWhiteSpace(_entryPath) && File.Exists(_entryPath),
-                Entry = _entryPath
+                Entry = _entryPath,
+                PackageId = _activePackageId ?? _selectedPackage?.Id,
+                PackageMode = _activePackageMode ?? _selectedPackage?.Mode,
+                DesktopRuntimeAvailable = _environment?.DesktopRuntimeAvailable
             };
         }
 
-        public async Task EnsureScannerAsync(Func<LauncherProgress, CancellationToken, Task> report, CancellationToken token)
+        public HelperStorageSnapshot CurrentStorageInfo()
+        {
+            return _storage.Inspect(_activeVersion, _activePackageId);
+        }
+
+        public HelperStorageCleanupResult CleanupStorage()
+        {
+            return _storage.Cleanup(_activeVersion, _activePackageId);
+        }
+
+        public void MarkScannerActive()
+        {
+            if (_manifest is null || _selectedPackage is null)
+            {
+                throw new InvalidOperationException("Scanner manifest and package selection are unavailable.");
+            }
+            var active = _storage.SaveActiveRuntime(
+                _manifest.ScannerVersion,
+                _selectedPackage.Id,
+                _selectedPackage.Mode,
+                _selectedPackage.Entry);
+            _activeVersion = active.Version;
+            _activePackageId = active.PackageId;
+            _activePackageMode = active.PackageMode;
+            _entryPath = active.EntryPath;
+        }
+
+        public Uri ResolveHelperManifestUrl()
+        {
+            return new Uri(ResolveManifestUrl(), "helper-manifest.json");
+        }
+
+        public async Task EnsureScannerAsync(
+            Func<LauncherProgress, CancellationToken, Task> report,
+            CancellationToken token,
+            bool forceRepair = false,
+            bool forceSelfContained = false)
         {
             await _ensureGate.WaitAsync(token);
             try
             {
                 await report(new LauncherProgress { Stage = "manifest", Message = "正在获取扫描器版本清单..." }, token);
                 var manifestUrl = ResolveManifestUrl();
-                var manifest = await DownloadManifestAsync(manifestUrl, token)
-                    ?? throw new InvalidOperationException("Scanner manifest is empty.");
+                ScannerManifest manifest;
+                try
+                {
+                    manifest = await DownloadManifestAsync(manifestUrl, token)
+                        ?? throw new InvalidDataException("Scanner manifest is empty.");
+                    HelperSecurity.ValidateManifest(manifest, manifestUrl, Version.Parse(HelperVersion));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException and not HelperFailureException)
+                {
+                    throw new HelperFailureException(
+                        ex is HttpRequestException ? "manifest_unreachable" : "manifest_invalid",
+                        "manifest",
+                        ex is HttpRequestException ? "无法获取扫描器版本信息" : "扫描器版本信息无效",
+                        ex.Message,
+                        ex is HttpRequestException ? "请检查网络后重试。" : "请更新 Helper；如果问题持续，请打开日志。",
+                        retryable: true,
+                        innerException: ex);
+                }
+
                 _manifest = manifest;
 
-                var installDir = RuntimeDirectory(manifest.ScannerVersion);
-                var entryPath = Path.Combine(installDir, manifest.Entry);
-                if (File.Exists(entryPath))
+                var environment = HelperPlatform.Inspect(manifest);
+                _environment = environment;
+                var runtimeRoot = RuntimeRootDirectory();
+                var packageRoot = PackageCacheDirectory();
+                HelperPlatform.EnsureWritableDirectory(runtimeRoot);
+                HelperPlatform.EnsureWritableDirectory(packageRoot);
+                var selection = forceSelfContained && manifest.SchemaVersion == 2
+                    ? new PackageSelection(
+                        manifest.Packages.Single(package => package.Mode.Equals(ScannerPackageModes.SelfContained, StringComparison.OrdinalIgnoreCase)),
+                        "desktop-runtime-disappeared")
+                    : HelperPlatform.SelectPackage(manifest, environment);
+                var package = selection.Package;
+                _selectedPackage = package;
+                var installRelative = Path.Combine(manifest.ScannerVersion, package.Id);
+                var installDir = HelperSecurity.ResolvePathWithinRoot(runtimeRoot, installRelative);
+                var entryPath = HelperSecurity.ResolvePathWithinRoot(installDir, package.Entry);
+                var packagePath = HelperSecurity.ResolvePathWithinRoot(
+                    packageRoot,
+                    $"scanner-{manifest.ScannerVersion}-{package.Id}.zip");
+
+                var selectionMessage = selection.Reason == "desktop-runtime-missing"
+                    ? "未检测到 .NET 8 Desktop Runtime，正在使用兼容包，无需安装 .NET。"
+                    : selection.Reason == "desktop-runtime-disappeared"
+                        ? ".NET 8 在启动前不可用，正在自动切换兼容包。"
+                    : selection.Reason == "desktop-runtime-available"
+                        ? "已检测到 .NET 8 Desktop Runtime，使用精简包。"
+                        : "正在使用兼容的旧版扫描器包。";
+                await report(new LauncherProgress
                 {
-                    _entryPath = entryPath;
-                    await report(new LauncherProgress { Stage = "ready", Message = "扫描器已是最新版本。", Version = manifest.ScannerVersion }, token);
-                    return;
+                    Stage = "select",
+                    Message = selectionMessage,
+                    Version = manifest.ScannerVersion,
+                    PackageId = package.Id,
+                    PackageMode = package.Mode,
+                    SelectionReason = selection.Reason,
+                    TotalBytes = package.Size,
+                    RequiredBytes = checked(package.Size + package.ExpandedSize + 100L * 1024 * 1024)
+                }, token);
+
+                if (forceRepair)
+                {
+                    SafeDelete(packagePath);
+                    SafeDelete(packagePath + ".download");
+                    if (Directory.Exists(installDir))
+                    {
+                        Directory.Delete(installDir, recursive: true);
+                    }
+                }
+
+                if (File.Exists(entryPath) && (manifest.SchemaVersion >= 3 || File.Exists(packagePath)))
+                {
+                    try
+                    {
+                        if (manifest.SchemaVersion >= 3)
+                        {
+                            await HelperSecurity.VerifyInstalledRuntimeAsync(package, installDir, token);
+                        }
+                        else
+                        {
+                            await VerifyPackageSizeAsync(packagePath, package.Size);
+                            await VerifySha256Async(packagePath, package.Sha256, token);
+                            await HelperSecurity.VerifyInstalledRuntimeAsync(packagePath, installDir, package.Entry, token);
+                        }
+                        _entryPath = entryPath;
+                        await report(PackageProgress("ready", "扫描器已是最新版本。", manifest.ScannerVersion, package), token);
+                        return;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        await report(new LauncherProgress
+                        {
+                            Stage = "repair",
+                            Message = $"扫描器完整性校验失败，正在自动修复：{ex.Message}",
+                            Version = manifest.ScannerVersion,
+                            PackageId = package.Id,
+                            PackageMode = package.Mode
+                        }, token);
+                    }
                 }
 
                 Directory.CreateDirectory(installDir);
-                var packagePath = Path.Combine(PackageCacheDirectory(), $"scanner-{manifest.ScannerVersion}.zip");
-
-                await report(new LauncherProgress
+                var packageReady = false;
+                if (File.Exists(packagePath))
                 {
-                    Stage = "download",
-                    Message = "正在下载 OCR 扫描器...",
-                    Version = manifest.ScannerVersion,
-                    TotalBytes = manifest.Size
-                }, token);
-                await DownloadAndVerifyPackageAsync(manifestUrl, manifest, packagePath, report, token);
+                    try
+                    {
+                        await VerifyPackageSizeAsync(packagePath, package.Size);
+                        await VerifySha256Async(packagePath, package.Sha256, token);
+                        packageReady = true;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        SafeDelete(packagePath);
+                        await report(new LauncherProgress
+                        {
+                            Stage = "download",
+                            Message = $"本地安装包校验失败，正在重新下载：{ex.Message}",
+                            Version = manifest.ScannerVersion,
+                            PackageId = package.Id,
+                            PackageMode = package.Mode,
+                            TotalBytes = package.Size
+                        }, token);
+                    }
+                }
 
-                await report(new LauncherProgress { Stage = "checksum", Message = "正在校验扫描器文件...", Version = manifest.ScannerVersion }, token);
-                await VerifyPackageSizeAsync(packagePath, manifest.Size);
-                await VerifySha256Async(packagePath, manifest.Sha256, token);
+                if (!packageReady)
+                {
+                    HelperPlatform.EnsureDiskSpace(package, packageRoot);
+                    await report(new LauncherProgress
+                    {
+                        Stage = "download",
+                        Message = "正在下载 OCR 扫描器...",
+                        Version = manifest.ScannerVersion,
+                        PackageId = package.Id,
+                        PackageMode = package.Mode,
+                        TotalBytes = package.Size
+                    }, token);
+                    await DownloadAndVerifyPackageAsync(manifestUrl, manifest.ScannerVersion, package, packagePath, report, token);
+                }
 
-                var tempDir = installDir + ".tmp";
+                await report(PackageProgress("checksum", "正在校验扫描器文件...", manifest.ScannerVersion, package), token);
+                await VerifyPackageSizeAsync(packagePath, package.Size);
+                await VerifySha256Async(packagePath, package.Sha256, token);
+
+                var tempDir = HelperSecurity.ResolvePathWithinRoot(runtimeRoot, installRelative + ".tmp");
                 if (Directory.Exists(tempDir))
                 {
                     Directory.Delete(tempDir, recursive: true);
                 }
 
                 Directory.CreateDirectory(tempDir);
-                await report(new LauncherProgress { Stage = "extract", Message = "正在安装扫描器...", Version = manifest.ScannerVersion }, token);
-                ExtractZipSafe(packagePath, tempDir);
+                await report(PackageProgress("extract", "正在安装扫描器...", manifest.ScannerVersion, package), token);
+                try
+                {
+                    ExtractZipSafe(packagePath, tempDir);
+                    if (manifest.SchemaVersion >= 3)
+                    {
+                        await HelperSecurity.VerifyInstalledRuntimeAsync(package, tempDir, token);
+                    }
+                    else
+                    {
+                        await HelperSecurity.VerifyInstalledRuntimeAsync(packagePath, tempDir, package.Entry, token);
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException and not HelperFailureException)
+                {
+                    throw new HelperFailureException(
+                        ex is InvalidDataException ? "package_corrupt" : "install_failed",
+                        "install",
+                        ex is InvalidDataException ? "扫描器安装包内容损坏" : "扫描器安装失败",
+                        ex.Message,
+                        "请选择重新下载并修复；Helper 会清除临时文件后重新安装。",
+                        retryable: true,
+                        new Dictionary<string, string> { ["packageId"] = package.Id },
+                        ex);
+                }
                 if (Directory.Exists(installDir))
                 {
                     Directory.Delete(installDir, recursive: true);
                 }
 
                 Directory.Move(tempDir, installDir);
+                if (manifest.SchemaVersion >= 3)
+                {
+                    SafeDelete(packagePath);
+                }
                 _entryPath = entryPath;
-                await report(new LauncherProgress { Stage = "ready", Message = "扫描器准备完成。", Version = manifest.ScannerVersion }, token);
+                await report(PackageProgress("ready", "扫描器准备完成。", manifest.ScannerVersion, package), token);
             }
             finally
             {
@@ -301,6 +572,14 @@ internal static partial class Program
             return _entryPath;
         }
 
+        public bool ShouldFallbackToSelfContained()
+        {
+            return _manifest?.SchemaVersion == 2
+                && _selectedPackage?.Mode.Equals(ScannerPackageModes.FrameworkDependent, StringComparison.OrdinalIgnoreCase) == true
+                && _selectedPackage.Framework is not null
+                && !HelperPlatform.HasRequiredFramework(_selectedPackage.Framework);
+        }
+
         private Uri ResolveManifestUrl()
         {
             var baseUrl = Environment.GetEnvironmentVariable("ZZZ_SCANNER_DOWNLOAD_BASE");
@@ -314,7 +593,22 @@ internal static partial class Program
                 baseUrl = "http://localhost:8787";
             }
 
-            return new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), ManifestPath.TrimStart('/'));
+            var manifestUri = new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), ManifestPath.TrimStart('/'));
+            HelperSecurity.EnsureTrustedDownloadUri(manifestUri, "manifest");
+            return manifestUri;
+        }
+
+        private static LauncherProgress PackageProgress(string stage, string message, string version, ScannerPackage package)
+        {
+            return new LauncherProgress
+            {
+                Stage = stage,
+                Message = message,
+                Version = version,
+                PackageId = package.Id,
+                PackageMode = package.Mode,
+                TotalBytes = package.Size
+            };
         }
 
         private string? ResolveDownloadBaseFromLaunchOrigin()
@@ -324,22 +618,13 @@ internal static partial class Program
                 return null;
             }
 
-            if (Uri.TryCreate(_launchOrigin, UriKind.Absolute, out var origin)
-                && origin.Port == 8443
-                && (origin.Host.Equals("zzzcaculator.top", StringComparison.OrdinalIgnoreCase)
-                    || origin.Host.Equals("www.zzzcaculator.top", StringComparison.OrdinalIgnoreCase)))
-            {
-                // Temporary pre-ICP fallback: the HTTPS page is valid for browser-local
-                // access, while the hashed OCR package is fetched from the IP endpoint.
-                return "http://121.199.21.10";
-            }
-
             return _launchOrigin;
         }
 
         private async Task<ScannerManifest?> DownloadManifestAsync(Uri url, CancellationToken token)
         {
             using var response = await _http.GetAsync(url, token);
+            HelperSecurity.EnsureTrustedDownloadUri(response.RequestMessage?.RequestUri ?? url, "manifest redirect");
             response.EnsureSuccessStatusCode();
             await using var stream = await response.Content.ReadAsStreamAsync(token);
             return await JsonSerializer.DeserializeAsync(stream, HelperJsonContext.Default.ScannerManifest, token);
@@ -348,17 +633,14 @@ internal static partial class Program
         private async Task DownloadFileAsync(
             Uri url,
             string destination,
-            long expectedSize,
             string version,
+            ScannerPackage package,
             Func<LauncherProgress, CancellationToken, Task> report,
             CancellationToken token)
         {
+            var expectedSize = package.Size;
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
             var temp = destination + ".download";
-            if (File.Exists(temp))
-            {
-                File.Delete(temp);
-            }
 
             var stopwatch = Stopwatch.StartNew();
             Exception? lastError = null;
@@ -367,7 +649,7 @@ internal static partial class Program
                 var existingBytes = File.Exists(temp) ? new FileInfo(temp).Length : 0L;
                 if (expectedSize > 0 && existingBytes == expectedSize)
                 {
-                    await report(DownloadProgress(version, url, existingBytes, expectedSize, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
+                    await report(DownloadProgress(version, package, url, existingBytes, expectedSize, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
                     MoveCompletedPackage(temp, destination);
                     return;
                 }
@@ -387,11 +669,12 @@ internal static partial class Program
                     }
 
                     using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+                    HelperSecurity.EnsureTrustedDownloadUri(response.RequestMessage?.RequestUri ?? url, "package redirect");
                     if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable
                         && expectedSize > 0
                         && existingBytes == expectedSize)
                     {
-                        await report(DownloadProgress(version, url, existingBytes, expectedSize, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
+                        await report(DownloadProgress(version, package, url, existingBytes, expectedSize, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
                         MoveCompletedPackage(temp, destination);
                         return;
                     }
@@ -405,7 +688,7 @@ internal static partial class Program
                     response.EnsureSuccessStatusCode();
                     var responseLength = response.Content.Headers.ContentLength ?? 0;
                     var totalBytes = expectedSize > 0 ? expectedSize : existingBytes + responseLength;
-                    await report(DownloadProgress(version, url, existingBytes, totalBytes, stopwatch, attempt, "正在下载 OCR 扫描器..."), token);
+                    await report(DownloadProgress(version, package, url, existingBytes, totalBytes, stopwatch, attempt, "正在下载 OCR 扫描器..."), token);
 
                     await using var input = await response.Content.ReadAsStreamAsync(token);
                     await using var output = new FileStream(
@@ -432,13 +715,13 @@ internal static partial class Program
                         if (lastReport.ElapsedMilliseconds >= DownloadProgressIntervalMs
                             || (totalBytes > 0 && downloaded >= totalBytes))
                         {
-                            await report(DownloadProgress(version, url, downloaded, totalBytes, stopwatch, attempt, "正在下载 OCR 扫描器..."), token);
+                            await report(DownloadProgress(version, package, url, downloaded, totalBytes, stopwatch, attempt, "正在下载 OCR 扫描器..."), token);
                             lastReport.Restart();
                         }
                     }
 
                     await output.FlushAsync(token);
-                    await report(DownloadProgress(version, url, downloaded, totalBytes, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
+                    await report(DownloadProgress(version, package, url, downloaded, totalBytes, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
                     MoveCompletedPackage(temp, destination);
                     return;
                 }
@@ -448,7 +731,7 @@ internal static partial class Program
                     var downloaded = File.Exists(temp) ? new FileInfo(temp).Length : 0L;
                     if (expectedSize > 0 && downloaded == expectedSize)
                     {
-                        await report(DownloadProgress(version, url, downloaded, expectedSize, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
+                        await report(DownloadProgress(version, package, url, downloaded, expectedSize, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
                         MoveCompletedPackage(temp, destination);
                         return;
                     }
@@ -460,6 +743,7 @@ internal static partial class Program
 
                     await report(DownloadProgress(
                         version,
+                        package,
                         url,
                         downloaded,
                         expectedSize,
@@ -486,6 +770,7 @@ internal static partial class Program
 
         private static LauncherProgress DownloadProgress(
             string version,
+            ScannerPackage package,
             Uri url,
             long downloaded,
             long total,
@@ -500,6 +785,8 @@ internal static partial class Program
                 Stage = "download",
                 Message = message,
                 Version = version,
+                PackageId = package.Id,
+                PackageMode = package.Mode,
                 Url = url.ToString(),
                 BytesDownloaded = Math.Max(0, downloaded),
                 TotalBytes = total > 0 ? total : null,
@@ -512,12 +799,13 @@ internal static partial class Program
 
         private async Task DownloadAndVerifyPackageAsync(
             Uri manifestUrl,
-            ScannerManifest manifest,
+            string scannerVersion,
+            ScannerPackage package,
             string packagePath,
             Func<LauncherProgress, CancellationToken, Task> report,
             CancellationToken token)
         {
-            var urls = ResolvePackageUrls(manifestUrl, manifest).ToList();
+            var urls = ResolvePackageUrls(manifestUrl, package).ToList();
             if (urls.Count == 0)
             {
                 throw new InvalidOperationException("Scanner package URL is missing.");
@@ -528,9 +816,9 @@ internal static partial class Program
             {
                 try
                 {
-                    await DownloadFileAsync(packageUrl, packagePath, manifest.Size, manifest.ScannerVersion, report, token);
-                    await VerifyPackageSizeAsync(packagePath, manifest.Size);
-                    await VerifySha256Async(packagePath, manifest.Sha256, token);
+                    await DownloadFileAsync(packageUrl, packagePath, scannerVersion, package, report, token);
+                    await VerifyPackageSizeAsync(packagePath, package.Size);
+                    await VerifySha256Async(packagePath, package.Sha256, token);
                     return;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -541,13 +829,20 @@ internal static partial class Program
                 }
             }
 
-            throw new InvalidOperationException($"Scanner package download failed. {string.Join(" | ", errors)}");
+            throw new HelperFailureException(
+                "download_failed",
+                "download",
+                "扫描器下载失败",
+                $"所有下载地址均失败：{string.Join(" | ", errors)}",
+                "请检查网络后重试；Helper 会重新尝试所有备用地址。",
+                retryable: true,
+                new Dictionary<string, string> { ["packageId"] = package.Id });
         }
 
-        private static IEnumerable<Uri> ResolvePackageUrls(Uri manifestUrl, ScannerManifest manifest)
+        private static IEnumerable<Uri> ResolvePackageUrls(Uri manifestUrl, ScannerPackage package)
         {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var rawUrl in manifest.PackageUrls ?? [])
+            foreach (var rawUrl in package.PackageUrls)
             {
                 if (string.IsNullOrWhiteSpace(rawUrl))
                 {
@@ -555,20 +850,13 @@ internal static partial class Program
                 }
 
                 var url = new Uri(manifestUrl, rawUrl.Trim());
+                HelperSecurity.EnsureTrustedDownloadUri(url, "package");
                 if (seen.Add(url.AbsoluteUri))
                 {
                     yield return url;
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(manifest.PackageUrl))
-            {
-                var url = new Uri(manifestUrl, manifest.PackageUrl);
-                if (seen.Add(url.AbsoluteUri))
-                {
-                    yield return url;
-                }
-            }
         }
 
         private static Task VerifyPackageSizeAsync(string packagePath, long expectedSize)
@@ -615,11 +903,7 @@ internal static partial class Program
             using var archive = ZipFile.OpenRead(packagePath);
             foreach (var entry in archive.Entries)
             {
-                var full = Path.GetFullPath(Path.Combine(destination, entry.FullName));
-                if (!full.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException("Scanner package contains an invalid path.");
-                }
+                var full = HelperSecurity.ResolvePathWithinRoot(rootFull, entry.FullName);
 
                 if (string.IsNullOrEmpty(entry.Name))
                 {
@@ -632,21 +916,23 @@ internal static partial class Program
             }
         }
 
-        private static string RuntimeDirectory(string version)
+        private static string RuntimeRootDirectory()
         {
-            return Path.Combine(LocalDataRoot(), "runtime", version);
+            var path = Path.Combine(HelperStorageManager.DefaultDataRoot(), "runtime");
+            Directory.CreateDirectory(path);
+            return path;
         }
 
         private static string PackageCacheDirectory()
         {
-            var path = Path.Combine(LocalDataRoot(), "packages");
+            var path = Path.Combine(HelperStorageManager.DefaultDataRoot(), "packages");
             Directory.CreateDirectory(path);
             return path;
         }
 
         private static string LocalDataRoot()
         {
-            var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ZZZScannerNext");
+            var root = HelperStorageManager.DefaultDataRoot();
             Directory.CreateDirectory(root);
             return root;
         }
@@ -669,10 +955,11 @@ internal static partial class Program
         }
     }
 
-    private sealed class BrowserSession
+    private sealed class BrowserSession : IAsyncDisposable
     {
         private readonly HelperServer _server;
         private readonly System.Net.WebSockets.WebSocket _browser;
+        private readonly SemaphoreSlim _browserSendGate = new(1, 1);
         private ManagedScannerProcess? _scanner;
 
         public BrowserSession(HelperServer server, System.Net.WebSockets.WebSocket browser)
@@ -720,9 +1007,32 @@ internal static partial class Program
                 }
                 catch (Exception ex)
                 {
-                    await SendAsync("scan_error", new ErrorMessage { Message = ex.Message }, CancellationToken.None);
+                    await SendAsync("scan_error", HelperErrors.FromException(ex, "prepare"), CancellationToken.None);
                 }
             }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_scanner is not null)
+            {
+                await _scanner.DisposeAsync();
+                _scanner = null;
+            }
+
+            try
+            {
+                if (_browser.State == WebSocketState.Open)
+                {
+                    await _browser.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+                }
+            }
+            catch
+            {
+            }
+
+            _browser.Dispose();
+            _browserSendGate.Dispose();
         }
 
         private async Task HandleEnvelopeAsync(HelperEnvelope envelope, CancellationToken token)
@@ -735,6 +1045,77 @@ internal static partial class Program
 
                 case "ensure_scanner":
                     await EnsureScannerProcessAsync(token);
+                    break;
+
+                case "repair_scanner":
+                    await EnsureScannerProcessAsync(token, forceRepair: true);
+                    break;
+
+                case "restart_scanner_elevated":
+                    await EnsureScannerProcessAsync(token, elevated: true, forceRestart: true);
+                    break;
+
+                case "open_log_folder":
+                    OpenLogFolder();
+                    await SendAsync("launcher_progress", new LauncherProgress
+                    {
+                        Stage = "logs",
+                        Message = "已打开 Helper 日志目录。"
+                    }, token);
+                    break;
+
+                case "get_diagnostics":
+                    await SendAsync("helper_diagnostics", new HelperDiagnosticsResponse
+                    {
+                        HelperVersion = HelperVersion,
+                        ProtocolVersion = ProtocolVersion,
+                        LogDirectory = HelperLog.DirectoryPath,
+                        Scanner = _server.CurrentScannerState()
+                    }, token);
+                    break;
+
+                case "get_storage_info":
+                    await SendAsync("storage_info", new StorageInfoResponse
+                    {
+                        RequestId = RequestId(envelope.Data),
+                        Storage = _server.CurrentStorageInfo()
+                    }, token);
+                    break;
+
+                case "cleanup_storage":
+                    var cleanup = _server.CleanupStorage();
+                    await SendAsync("storage_cleanup_result", new StorageCleanupResponse
+                    {
+                        RequestId = RequestId(envelope.Data),
+                        Result = cleanup
+                    }, token);
+                    break;
+
+                case "update_helper":
+                    var updateRequestId = RequestId(envelope.Data);
+                    var preparation = await HelperUpdateManager.PrepareAsync(
+                        _server.ResolveHelperManifestUrl(),
+                        HelperVersion,
+                        async (progress, ct) =>
+                        {
+                            progress.RequestId = updateRequestId;
+                            await SendAsync("helper_update_progress", progress, ct);
+                        },
+                        token);
+                    await SendAsync("helper_update_result", new HelperUpdateResponse
+                    {
+                        RequestId = updateRequestId,
+                        UpdateAvailable = preparation.UpdateAvailable,
+                        CurrentVersion = preparation.CurrentVersion,
+                        AvailableVersion = preparation.AvailableVersion,
+                        Restarting = preparation.UpdateAvailable
+                    }, token);
+                    if (preparation.UpdateAvailable)
+                    {
+                        HelperInstallationManager.LaunchPreparedUpdate(preparation.ExecutablePath);
+                        await Task.Delay(250, CancellationToken.None);
+                        Environment.Exit(0);
+                    }
                     break;
 
                 case "scan_req":
@@ -754,20 +1135,90 @@ internal static partial class Program
             }
         }
 
-        private async Task EnsureScannerProcessAsync(CancellationToken token)
+        private async Task EnsureScannerProcessAsync(
+            CancellationToken token,
+            bool forceRepair = false,
+            bool elevated = false,
+            bool forceRestart = false)
         {
-            if (_scanner is { IsConnected: true })
+            if (!forceRestart && !forceRepair && _scanner is { IsConnected: true })
             {
                 await SendAsync("scanner_ready", _server.CurrentScannerState(), token);
                 return;
             }
 
+            if (_scanner is not null)
+            {
+                await _scanner.DisposeAsync();
+                _scanner = null;
+            }
+
             await SendAsync("launcher_progress", new LauncherProgress { Stage = "queue", Message = "正在准备扫描器任务..." }, token);
-            await _server.EnsureScannerAsync((progress, ct) => SendAsync("launcher_progress", progress, ct), token);
+            await _server.EnsureScannerAsync(
+                (progress, ct) => SendAsync("launcher_progress", progress, ct),
+                token,
+                forceRepair);
 
             var childToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
-            _scanner = await ManagedScannerProcess.StartAsync(_server.CurrentEntryPath(), childToken, ForwardScannerMessageAsync, token);
+            try
+            {
+                _scanner = await ManagedScannerProcess.StartAsync(
+                    _server.CurrentEntryPath(),
+                    childToken,
+                    elevated,
+                    ForwardScannerMessageAsync,
+                    token);
+            }
+            catch (HelperFailureException) when (_server.ShouldFallbackToSelfContained())
+            {
+                await SendAsync("launcher_progress", new LauncherProgress
+                {
+                    Stage = "fallback",
+                    Message = ".NET 8 在启动前不可用，正在自动切换兼容包。",
+                    SelectionReason = "desktop-runtime-disappeared"
+                }, token);
+                await _server.EnsureScannerAsync(
+                    (progress, ct) => SendAsync("launcher_progress", progress, ct),
+                    token,
+                    forceRepair: false,
+                    forceSelfContained: true);
+                childToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+                _scanner = await ManagedScannerProcess.StartAsync(
+                    _server.CurrentEntryPath(),
+                    childToken,
+                    elevated,
+                    ForwardScannerMessageAsync,
+                    token);
+            }
+            _server.MarkScannerActive();
             await SendAsync("scanner_ready", _server.CurrentScannerState(), token);
+            try
+            {
+                _server.CleanupStorage();
+            }
+            catch (Exception ex)
+            {
+                HelperLog.Write($"AUTOMATIC_CLEANUP_FAILED error={ex.Message}");
+            }
+        }
+
+        private static string RequestId(JsonElement data)
+        {
+            return data.ValueKind == JsonValueKind.Object
+                && data.TryGetProperty("requestId", out var requestId)
+                ? requestId.GetString() ?? ""
+                : "";
+        }
+
+        private static void OpenLogFolder()
+        {
+            Directory.CreateDirectory(HelperLog.DirectoryPath);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{HelperLog.DirectoryPath}\"",
+                UseShellExecute = true
+            });
         }
 
         private async Task ForwardScannerMessageAsync(string json, CancellationToken token)
@@ -778,7 +1229,7 @@ internal static partial class Program
             }
 
             var bytes = Encoding.UTF8.GetBytes(json);
-            await _browser.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+            await SendBrowserBytesAsync(bytes, token);
         }
 
         private async Task SendAsync(string cmd, object? data, CancellationToken token)
@@ -790,7 +1241,23 @@ internal static partial class Program
 
             var json = JsonSerializer.Serialize(new HelperEnvelope(cmd, data), HelperJsonContext.Default.HelperEnvelope);
             var bytes = Encoding.UTF8.GetBytes(json);
-            await _browser.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+            await SendBrowserBytesAsync(bytes, token);
+        }
+
+        private async Task SendBrowserBytesAsync(byte[] bytes, CancellationToken token)
+        {
+            await _browserSendGate.WaitAsync(token);
+            try
+            {
+                if (_browser.State == WebSocketState.Open)
+                {
+                    await _browser.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+                }
+            }
+            finally
+            {
+                _browserSendGate.Release();
+            }
         }
     }
 
@@ -812,58 +1279,122 @@ internal static partial class Program
         public static async Task<ManagedScannerProcess> StartAsync(
             string entryPath,
             string childToken,
+            bool elevated,
             Func<string, CancellationToken, Task> forward,
             CancellationToken token)
         {
             var port = ReserveTcpPort();
-            var process = Process.Start(new ProcessStartInfo
+            Process process;
+            try
             {
-                FileName = entryPath,
-                Arguments = $"--ws-child {port} --child-token {childToken} --no-browser",
-                WorkingDirectory = Path.GetDirectoryName(entryPath),
-                UseShellExecute = true,
-                Verb = "runas",
-                WindowStyle = ProcessWindowStyle.Hidden
-            }) ?? throw new InvalidOperationException("Cannot start scanner process.");
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = entryPath,
+                    Arguments = $"--ws-child {port} --child-token {childToken} --no-browser --output-root \"{Path.Combine(HelperStorageManager.DefaultDataRoot(), "outputs")}\"",
+                    WorkingDirectory = Path.GetDirectoryName(entryPath),
+                    UseShellExecute = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                if (elevated)
+                {
+                    startInfo.Verb = "runas";
+                }
+
+                process = Process.Start(startInfo)
+                    ?? throw new InvalidOperationException("Cannot start scanner process.");
+            }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+            {
+                throw new HelperFailureException(
+                    "uac_cancelled",
+                    "launch",
+                    "已取消管理员授权",
+                    "你取消了 Windows 管理员权限确认，扫描器没有启动。",
+                    "如游戏以管理员身份运行，请重新选择管理员启动并确认 UAC。",
+                    retryable: true,
+                    innerException: ex);
+            }
+            catch (Exception ex) when (ex is not HelperFailureException)
+            {
+                throw new HelperFailureException(
+                    "child_start_failed",
+                    "launch",
+                    "无法启动 OCR 扫描器",
+                    ex.Message,
+                    "请选择重新下载并修复；如果问题持续，请打开日志。",
+                    retryable: true,
+                    innerException: ex);
+            }
 
             var ws = new ClientWebSocket();
-            var uri = new Uri($"ws://127.0.0.1:{port}/ws/{childToken}");
-            Exception? last = null;
-            for (var attempt = 0; attempt < 80; attempt++)
+            try
             {
-                token.ThrowIfCancellationRequested();
-                try
+                var uri = new Uri($"ws://127.0.0.1:{port}/ws/{childToken}");
+                Exception? last = null;
+                for (var attempt = 0; attempt < 80; attempt++)
                 {
-                    await ws.ConnectAsync(uri, token);
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    last = ex;
-                    await Task.Delay(250, token);
-                }
-            }
-
-            if (ws.State != WebSocketState.Open)
-            {
-                throw new InvalidOperationException($"Cannot connect to scanner child process: {last?.Message}");
-            }
-
-            var pump = Task.Run(async () =>
-            {
-                while (ws.State == WebSocketState.Open && !token.IsCancellationRequested)
-                {
-                    var msg = await ReceiveTextAsync(ws, token);
-                    if (msg is null)
+                    token.ThrowIfCancellationRequested();
+                    if (process.HasExited)
                     {
-                        break;
+                        throw ChildExited(process.ExitCode);
                     }
 
-                    await forward(msg, token);
+                    try
+                    {
+                        await ws.ConnectAsync(uri, token);
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        last = ex;
+                        await Task.Delay(250, token);
+                    }
                 }
-            }, token);
 
-            return new ManagedScannerProcess(ws, process, pump);
+                if (ws.State != WebSocketState.Open)
+                {
+                    throw new HelperFailureException(
+                        "child_handshake_timeout",
+                        "launch",
+                        "扫描器启动超时",
+                        $"扫描器进程已启动，但 20 秒内没有完成本地连接：{last?.Message}",
+                        "请重试；如果问题持续，请打开日志查看启动阶段错误。",
+                        retryable: true);
+                }
+
+                var pump = Task.Run(async () =>
+                {
+                    while (ws.State == WebSocketState.Open && !token.IsCancellationRequested)
+                    {
+                        var msg = await ReceiveTextAsync(ws, token);
+                        if (msg is null)
+                        {
+                            break;
+                        }
+
+                        await forward(msg, token);
+                    }
+                }, token);
+
+                return new ManagedScannerProcess(ws, process, pump);
+            }
+            catch
+            {
+                ws.Dispose();
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
+                }
+                catch
+                {
+                }
+
+                process.Dispose();
+                throw;
+            }
         }
 
         public async Task SendRawAsync(string json, CancellationToken token)
@@ -904,6 +1435,31 @@ internal static partial class Program
 
             try { await _pumpTask; } catch { }
             _process.Dispose();
+        }
+
+        private static HelperFailureException ChildExited(int exitCode)
+        {
+            var unsignedCode = unchecked((uint)exitCode);
+            if (unsignedCode == 0xC0000135)
+            {
+                return new HelperFailureException(
+                    "native_dependency_missing",
+                    "launch",
+                    "扫描器缺少运行组件",
+                    $"扫描器启动时找不到原生 DLL（退出码 0x{unsignedCode:X8}）。",
+                    "请选择重新下载并修复；VC 运行组件应已随包提供。",
+                    retryable: true,
+                    new Dictionary<string, string> { ["exitCode"] = $"0x{unsignedCode:X8}" });
+            }
+
+            return new HelperFailureException(
+                "child_exited",
+                "launch",
+                "扫描器启动后立即退出",
+                $"扫描器尚未连接就退出，退出码为 0x{unsignedCode:X8}。",
+                "请选择重新下载并修复；如果问题持续，请打开日志并提供诊断编号。",
+                retryable: true,
+                new Dictionary<string, string> { ["exitCode"] = $"0x{unsignedCode:X8}" });
         }
 
         private static int ReserveTcpPort()
@@ -974,7 +1530,25 @@ internal static partial class Program
             var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
             if (result.MessageType == WebSocketMessageType.Close)
             {
+                if (socket.State == WebSocketState.CloseReceived)
+                {
+                    await socket.CloseOutputAsync(
+                        result.CloseStatus ?? WebSocketCloseStatus.NormalClosure,
+                        result.CloseStatusDescription,
+                        CancellationToken.None);
+                }
+
                 return null;
+            }
+
+            if (result.MessageType != WebSocketMessageType.Text)
+            {
+                throw new InvalidDataException("Helper WebSocket accepts text messages only.");
+            }
+
+            if (stream.Length + result.Count > MaxWebSocketMessageBytes)
+            {
+                throw new InvalidDataException($"Helper WebSocket message exceeds {MaxWebSocketMessageBytes} bytes.");
             }
 
             stream.Write(buffer, 0, result.Count);
@@ -999,6 +1573,7 @@ internal static partial class Program
             Cmd = cmd;
             Data = data is null ? default : JsonSerializer.SerializeToElement(data, ResolveJsonTypeInfo(data.GetType()));
         }
+
     }
 
     private sealed class TokenRequest
@@ -1009,18 +1584,6 @@ internal static partial class Program
     private sealed class TokenResponse
     {
         public string Token { get; set; } = "";
-    }
-
-    private sealed class ScannerManifest
-    {
-        public int SchemaVersion { get; set; }
-        public string LauncherMinVersion { get; set; } = "";
-        public string ScannerVersion { get; set; } = "";
-        public string PackageUrl { get; set; } = "";
-        public List<string> PackageUrls { get; set; } = [];
-        public string Sha256 { get; set; } = "";
-        public long Size { get; set; }
-        public string Entry { get; set; } = "ZZZ-Scanner.Next.exe";
     }
 
     private sealed class HelperInfoResponse
@@ -1044,6 +1607,9 @@ internal static partial class Program
         public string? Version { get; set; }
         public bool Installed { get; set; }
         public string? Entry { get; set; }
+        public string? PackageId { get; set; }
+        public string? PackageMode { get; set; }
+        public bool? DesktopRuntimeAvailable { get; set; }
     }
 
     private sealed class LauncherProgress
@@ -1058,11 +1624,30 @@ internal static partial class Program
         public double? BytesPerSecond { get; set; }
         public int? Attempt { get; set; }
         public int? MaxAttempts { get; set; }
+        public string? PackageId { get; set; }
+        public string? PackageMode { get; set; }
+        public string? SelectionReason { get; set; }
+        public long? RequiredBytes { get; set; }
     }
 
-    private sealed class ErrorMessage
+    private sealed class HelperDiagnosticsResponse
     {
-        public string Message { get; set; } = "";
+        public string HelperVersion { get; set; } = "";
+        public int ProtocolVersion { get; set; }
+        public string LogDirectory { get; set; } = "";
+        public ScannerState Scanner { get; set; } = new();
+    }
+
+    private sealed class StorageInfoResponse
+    {
+        public string RequestId { get; set; } = "";
+        public HelperStorageSnapshot Storage { get; set; } = new();
+    }
+
+    private sealed class StorageCleanupResponse
+    {
+        public string RequestId { get; set; } = "";
+        public HelperStorageCleanupResult Result { get; set; } = new();
     }
 
     private sealed class PongMessage
@@ -1084,7 +1669,15 @@ internal static partial class Program
     [JsonSerializable(typeof(HelperHello))]
     [JsonSerializable(typeof(ScannerState))]
     [JsonSerializable(typeof(LauncherProgress))]
-    [JsonSerializable(typeof(ErrorMessage))]
+    [JsonSerializable(typeof(HelperErrorMessage))]
+    [JsonSerializable(typeof(HelperErrorAction))]
+    [JsonSerializable(typeof(HelperDiagnosticsResponse))]
+    [JsonSerializable(typeof(HelperStorageSnapshot))]
+    [JsonSerializable(typeof(HelperStorageCleanupResult))]
+    [JsonSerializable(typeof(StorageInfoResponse))]
+    [JsonSerializable(typeof(StorageCleanupResponse))]
+    [JsonSerializable(typeof(HelperUpdateProgress))]
+    [JsonSerializable(typeof(HelperUpdateResponse))]
     [JsonSerializable(typeof(PongMessage))]
     [JsonSourceGenerationOptions(
         PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,

@@ -1,128 +1,578 @@
 # ZZZ Scanner Next
 
-ZZZ Scanner Next 是一个面向《绝区零》驱动盘仓库的 WinForms 扫描与导出工具。它通过窗口前置、鼠标点击、滚轮和屏幕截图完成非侵入式读取，不读取或注入游戏进程。
+English | [简体中文](README.zh-CN.md)
 
-## 下载使用
+ZZZ Scanner Next is a Windows scanner and exporter for the Drive Disc inventory
+in *Zenless Zone Zero*. It reads the visible game UI by bringing the game window
+forward, clicking cells, scrolling the list, taking screenshots, and running
+PP-OCRv5 locally. It does not read game memory, inject code, install a game
+plug-in, or hook the game process.
 
-从 GitHub Releases 下载最新的 `ZZZ-Scanner.Next-win-x64.zip`，解压后运行 `ZZZ-Scanner.Next.exe`。
+The project contains:
 
-程序默认以管理员权限运行，用于稳定操作游戏窗口。首次扫描前请在游戏中打开驱动盘仓库页面。
+- the WinForms scanner;
+- a NativeAOT Helper used by the web calculator;
+- a release pipeline that builds framework-dependent and self-contained
+  Windows packages from the same scanner source.
 
-Release 包内已经包含 OCR 模型文件，普通用户不需要额外下载模型。
+## Contents
 
-## 当前能力
+- [Supported environment](#supported-environment)
+- [Choose an installation method](#choose-an-installation-method)
+- [Recommended: calculator and Helper](#recommended-calculator-and-helper)
+- [Manual installation](#manual-installation)
+- [Prepare the game](#prepare-the-game)
+- [Use the desktop scanner](#use-the-desktop-scanner)
+- [Output files](#output-files)
+- [Permissions and UAC](#permissions-and-uac)
+- [Troubleshooting](#troubleshooting)
+- [Known limitations](#known-limitations)
+- [Command-line use](#command-line-use)
+- [Build from source](#build-from-source)
+- [Security and privacy](#security-and-privacy)
 
-- 可视化 GUI：检测窗口、预览详情区、开始/停止扫描、实时结果和日志。
-- 非侵入式扫描：只使用窗口前置、点击、滚轮和截图。
-- OCR 识别：内置 PP-OCRv5 ONNX 识别模型和字典。
-- 数据驱动：驱动盘名称、词条候选、数值范围、扫描点位均在 `Data/*.json`。
-- 稳定遍历：默认使用 `OverlapSignaturePage`，按可见页重叠补扫和逻辑行签名去重，兼容偶发一次滚动推进两行的情况。
-- 可控范围：支持读取前 N 个、按 S/A/B 品质过滤、临时显示调试截图。
+## Supported environment
 
-## 从源码构建
+| Item | Supported |
+| --- | --- |
+| Operating system | Windows 10 1809 / Build 17763 or later, and Windows 11 |
+| Architecture | x64 Windows and x64 packages |
+| Windows editions | Normal, N, and LTSC editions are release targets |
+| Game client | Local PC client and Cloud Zenless Zone Zero |
+| Game language | Simplified Chinese UI |
+| Primary layout | Current Simplified Chinese Drive Disc inventory, primarily 16:9 |
+| OCR | Bundled PP-OCRv5 ONNX model; recognition runs locally |
 
-需要 Windows 和 .NET 8 SDK。
+Not currently supported:
 
-源码仓库不跟踪较大的 `PP-OCRv5_mobile_rec_infer.onnx` 模型文件。若要从源码运行 OCR，请先从 release 包中复制该文件到 `Resources/models/`。
+- Windows 7, Windows 8/8.1, or Windows 10 older than Build 17763;
+- 32-bit Windows, x86 processes, and ARM64 Windows;
+- non-Chinese game UI languages;
+- mobile or console clients, Wine/Proton, and unknown streaming layouts;
+- inventory UI replacement mods or layouts changed by a future game update.
 
-```powershell
+The Helper checks OS build and architecture before downloading. A manually
+extracted scanner bypasses that preflight, but it does not make an unsupported
+system compatible.
+
+### Verified visual profiles
+
+Strict Fast OCR profiles have been validated for:
+
+- Local client: <code>1280x720</code>, <code>1600x900</code>, and
+  <code>1920x1080</code>.
+- Cloud client: <code>1440x808</code>, <code>1592x896</code>, and
+  <code>1920x1080</code>.
+
+Other 16:9 resolutions may work because coordinates are scaled relative to the
+game client area. Unknown visual profiles fall back to PP-OCR instead of reusing
+a nearby Fast OCR profile. Non-16:9 layouts, custom UI scale, HDR/filter
+changes, and future UI changes are not guaranteed.
+
+## Choose an installation method
+
+### Method A: calculator + Helper
+
+Recommended for most users. The Helper:
+
+- checks Windows, architecture, write permission, and free space;
+- detects the .NET 8 Windows Desktop Runtime;
+- downloads only the package suitable for the computer;
+- verifies package size, SHA-256, ZIP paths, entry point, and installed files;
+- resumes interrupted downloads and tries configured mirrors;
+- repairs corrupt caches and reports structured errors to the calculator.
+
+### Method B: manual package
+
+Use this for the standalone GUI or command-line tools:
+
+| Package | Choose it when | .NET requirement |
+| --- | --- | --- |
+| <code>ZZZ-Scanner.Next-win-x64-fdd.zip</code> | <code>Microsoft.WindowsDesktop.App 8.x</code> x64 is already installed | Must already exist |
+| <code>ZZZ-Scanner.Next-win-x64-self-contained.zip</code> | .NET 8 is absent or you are unsure | None |
+
+Both packages contain the same scanner, model, data, ONNX Runtime, and app-local
+Visual C++ runtime files. The self-contained package is larger because it also
+contains the .NET desktop runtime.
+
+If the FDD package reports that .NET is missing, use the self-contained package.
+Installing .NET is not required just for this scanner.
+
+## Recommended: calculator and Helper
+
+### 1. Download the Helper
+
+Download <code>ZZZ-Scanner-Helper.exe</code> from the official
+[GitHub Releases](https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases).
+Keep it in a stable, writable location. Do not run it from inside a ZIP, an
+attachment preview, or a temporary directory that will be deleted.
+
+The Helper is NativeAOT and does not require .NET 8.
+
+### 2. Verify and start it
+
+The current binaries are unsigned. SmartScreen, antivirus, or enterprise policy
+can block the Helper before it starts. In that case it cannot display its own
+diagnostic because no Helper process exists yet.
+
+Only allow a file obtained from the official release. Check its hash with:
+
+~~~powershell
+Get-FileHash .\ZZZ-Scanner-Helper.exe -Algorithm SHA256
+~~~
+
+Compare the result with the release information. Do not disable security
+software globally and do not download DLLs from third-party DLL sites.
+
+Run the Helper once. It registers <code>zzz-scanner://</code> for the current
+Windows account and listens only on <code>127.0.0.1:22355</code>. If the EXE is
+moved, run it again so the protocol registration points to the new location.
+Only one Helper instance can own port 22355.
+
+### 3. Start from the calculator
+
+1. Start the game and sign in.
+2. Set the game UI to Simplified Chinese.
+3. Open Inventory, then the Drive Disc list.
+4. Open the scanner page in the supported calculator.
+5. Select the local or cloud client.
+6. Start scanning and allow the browser to open <code>zzz-scanner://</code>.
+7. Keep the game visible. Do not use the mouse, scroll wheel, inventory tabs,
+   sort, filters, or window controls until the scan ends.
+
+The browser obtains a one-time token from the Helper and then uses a
+token-protected loopback WebSocket. Arbitrary websites are not accepted.
+
+### 4. Automatic package choice
+
+The Helper checks registered .NET locations, standard installation directories,
+and <code>dotnet --list-runtimes</code>.
+
+- Confirmed Desktop Runtime 8.x: use <code>win-x64-fdd</code>.
+- Missing or uncertain runtime: use <code>win-x64-self-contained</code>.
+- Runtime disappears before launch: fall back once to self-contained.
+
+The Helper never starts a .NET installer and does not change the machine-wide
+.NET installation.
+
+Current space checks are approximately 160 MiB for FDD and 358 MiB for
+self-contained, including ZIP, extraction, and a 100 MiB safety margin. The
+calculator receives the exact required byte count.
+
+### 5. Cache and update behavior
+
+~~~text
+%LOCALAPPDATA%\ZZZScannerNext\
+  helper\
+    ZZZ-Scanner-Helper.exe
+  packages\
+    temporary downloads only
+  runtime\
+    <version>\
+      <packageId>\
+  outputs\
+    newest successful and failed sessions
+  logs\
+    helper-YYYYMMDD.log
+~~~
+
+Helper 1.2.1 installs itself into the fixed current-user helper directory and
+registers the browser protocol to that path. Future Helper releases update this
+managed file transactionally. Helper 1.1.x requires one final download: run the
+1.2.1 installer and confirm the takeover once, and it safely closes the uniquely
+verified old Helper, installs the managed copy, and restarts it automatically.
+
+Manifest schema v3 lists the size and SHA-256 of every runtime file. The Helper
+therefore deletes the package ZIP after a verified install and still validates
+the installed tree before reuse. A newly downloaded runtime does not become
+active until its child WebSocket handshake succeeds. The activation receipt is
+then replaced and every inactive runtime is removed. During an update, the old
+and new runtimes coexist briefly so a failed launch cannot destroy the working
+version.
+
+Managed scan outputs are version-independent. Cleanup migrates legacy
+<code>runtime/**/Scans</code> sessions and retains only the newest successful
+session and newest failed session. The calculator Settings page reports exact
+usage and can repeat this cleanup without uninstalling the active Scanner.
+
+## Manual installation
+
+### 1. Extract the complete package
+
+Extract the whole ZIP into a normal writable directory. Do not:
+
+- run the EXE from inside the archive;
+- copy only the EXE and omit <code>Data</code>, <code>Resources</code>, or DLLs;
+- mix files from different versions;
+- replace bundled DLLs with downloads from unrelated sites.
+
+The EXE, <code>Data</code>, <code>Resources\models</code>,
+<code>onnxruntime.dll</code>, and the bundled VC runtime files must remain
+together.
+
+### 2. Start the GUI
+
+Run <code>ZZZ-Scanner.Next.exe</code>. It uses the current user's permissions
+and does not request administrator access by default.
+
+Standalone defaults:
+
+- Process: <code>ZenlessZoneZero</code>
+- Read limit: <code>0</code>, meaning no explicit item limit
+- Rarity: S
+- Only level-15 Drive Discs: enabled
+- Bring game forward: enabled
+- High-speed OCR: enabled
+- Capture backend: GDI
+- Traversal: profile default, currently overlap-signature scanning
+- Verified Fast Mode: disabled until selected
+
+For Cloud Zenless Zone Zero, use this process name:
+
+~~~text
+Zenless Zone Zero Cloud
+~~~
+
+## Use the desktop scanner
+
+### 1. Detect the window
+
+Click **检测窗口 / Detect Window**.
+
+- Success means the configured process and a usable main window were found.
+- Failure usually means the process name is wrong, the game is not running, the
+  local/cloud selection is wrong, or the game window is not ready.
+- A higher-integrity game cannot be controlled by a normal scanner. See
+  [Permissions and UAC](#permissions-and-uac).
+
+### 2. Start safely
+
+Before clicking **开始扫描 / Start Scan**:
+
+- open the Drive Disc inventory;
+- keep the game visible and not minimized;
+- close overlays and windows covering the grid or detail panel;
+- keep display scale, HDR, resolution, UI scale, sort, and filters unchanged;
+- stop using the mouse and keyboard for the duration of the scan.
+
+The scanner deliberately controls the pointer and foreground window. Using the
+computer during a scan can select the wrong item or trigger safety stops.
+
+Use **停止 / Stop** when needed. A canceled scan may still leave diagnostics in
+its output directory.
+
+### 3. Basic settings
+
+| Setting | Meaning | Guidance |
+| --- | --- | --- |
+| Process name | Windows process to locate | <code>ZenlessZoneZero</code> locally; <code>Zenless Zone Zero Cloud</code> for cloud |
+| Read limit | Maximum captured items; 0 has no explicit limit | Use 30 for a smoke test, 120 for validation, 0 for normal import |
+| S / A | Rarity filters shown by the GUI | Calculator workflows normally use S |
+| Only level-15 | Stops at the first lower-level Drive Disc | Keep enabled for normal calculator import |
+| Bring to foreground | Activates the game before input and capture | Normally keep enabled |
+
+Sort the inventory so desired level-15 items appear before lower-level items.
+Stopping at the first non-15 item is expected behavior.
+
+Disabling **Only level-15** is experimental. Lower-level panels may contain fewer
+substat rows, so full non-15 scanning can fail ROI completeness checks. It is
+not the normal calculator import path.
+
+### 4. Advanced settings
+
+Leave these at defaults for the first scan.
+
+- **Verified Fast Mode** enables the validated fast profile, strict visual
+  routing, Fast OCR assist, early one-row acceptance, adaptive full-ROI panel
+  acceptance, and recoverable overlap conflicts. Invalid templates cause a
+  safe fallback.
+- **GDI** is conservative. **DXGI** can be faster and falls back to GDI if
+  initialization, frame acquisition, or monitor matching fails.
+- Debug screenshots and OCR shadow datasets can create many local files and are
+  intended for diagnosis or model work.
+- Worker, batch, queue, and IntraOp values affect OCR throughput. Aggressive
+  values can raise CPU/memory usage and disrupt UI timing.
+- Experimental panel and scroll timing controls exist for repeatable benchmarks,
+  not as universal speed recommendations.
+
+## Prepare the game
+
+Before every scan:
+
+1. Use the Simplified Chinese UI.
+2. Open the Drive Disc inventory.
+3. Use a supported local/cloud window layout.
+4. Keep Windows scaling and game resolution stable.
+5. Remove overlays from the inventory and detail panel.
+6. Confirm sort and filters.
+7. Run a 30-item smoke scan after a game update, driver change, resolution
+   change, or switching between local and cloud.
+
+If the smoke scan reports failed items, duplicates, incomplete ROIs, unexpected
+profile fallback, or an incorrect count, inspect <code>scan.log</code> before a
+full import.
+
+## Output files
+
+Each scan creates a unique directory next to the scanner executable:
+
+~~~text
+Scans\YYYY-MM-DD-HH-mm-ss-fff-p<process>-<random>\
+~~~
+
+| File | Purpose |
+| --- | --- |
+| <code>export.json</code> | Cleaned Drive Disc records used for import |
+| <code>scan.log</code> | Version, options, progress, safety events, fallbacks, and errors |
+| <code>ocr_diagnostics.csv</code> | Per-ROI timing and OCR diagnostics |
+| <code>*.error.txt</code> | Failure details for an item |
+| <code>*.non15.txt</code> | First lower-level item that caused a normal stop |
+
+Optional modes can add shadow ROI images, debug screenshots, Fast OCR CSV files,
+resource metrics, and visual profile metadata.
+
+The GUI's **打开产物文件夹 / Open Output Folder** button opens the latest result.
+In Helper mode, results are under
+<code>%LOCALAPPDATA%\ZZZScannerNext\outputs</code>.
+
+Review diagnostics before sharing. Screenshots contain visible game UI, and
+logs can contain local paths and machine-specific information.
+
+## Permissions and UAC
+
+The scanner uses <code>asInvoker</code>. Normal operation should not require
+administrator rights.
+
+Windows prevents a lower-integrity process from controlling a higher-integrity
+game. If the game was started as administrator, the scanner reports
+<code>elevation_required</code>. The calculator can ask the Helper to restart
+only the scanner through UAC.
+
+- Approve UAC only after initiating the scan yourself.
+- Canceling UAC is reported as <code>uac_cancelled</code>, not a timeout.
+- Prefer running both the game and scanner normally instead of permanently
+  running everything as administrator.
+
+## Troubleshooting
+
+### Helper does not start
+
+Check SmartScreen, Windows Security protection history, antivirus quarantine,
+enterprise policy, the x64/OS requirement, and whether another Helper owns port
+22355. A pre-start security block cannot be diagnosed inside the application.
+
+### Calculator says Helper is missing or outdated
+
+1. In the calculator, select **Download and update Helper**.
+2. Run Helper 1.2.1 and confirm the one-time takeover.
+3. Leave the scan drawer open; the installer closes the verified old Helper,
+   installs the managed copy, and the page reconnects automatically.
+
+Do not terminate an unknown process that owns port 22355. The installer refuses
+to take over when the service identity, version, or candidate process is
+ambiguous and reports the recovery action instead.
+
+A healthy Helper reports its versions at
+<code>http://127.0.0.1:22355/</code>.
+
+### Download fails
+
+Use Retry. The Helper resumes partial downloads and tries all mirrors.
+Persistent failures usually involve offline/filtered network access, TLS proxy
+problems, an incomplete release upload, insufficient space, no write access
+under LocalAppData, or security software removing the ZIP.
+
+Remote manifests, packages, and redirects require HTTPS. Loopback HTTP is only
+for local development.
+
+### Package is corrupt or files are missing
+
+Choose **Repair scanner**. The Helper clears the selected cache, downloads
+again, verifies SHA-256, extracts to a temporary directory, checks every file,
+and atomically replaces the runtime.
+
+### Native DLL missing or process exits immediately
+
+Repair first. The release already includes ONNX Runtime and required app-local
+VC files. If Windows still reports <code>0xC0000135</code>:
+
+1. check whether antivirus quarantined a bundled DLL;
+2. confirm the complete archive was extracted;
+3. confirm the x64 package is being used;
+4. open Helper logs and include the diagnostic ID in a report.
+
+Do not download an individual DLL from a third-party site.
+
+### Game not found
+
+- Start the game before scanning.
+- Use <code>ZenlessZoneZero</code> for local.
+- Use <code>Zenless Zone Zero Cloud</code> for cloud.
+- Open the Drive Disc inventory.
+- Confirm the process is the game, not the launcher/updater.
+
+### Data is wrong or scanning stops
+
+Confirm the Chinese UI, supported layout, unobstructed visible window, no user
+input during scanning, stable sort/filter/display settings, and correct
+local/cloud selection. Inspect <code>scan.log</code> for incomplete ROIs,
+profile routing, fallbacks, duplicates, overlap conflicts, and slot-safety
+events. After a game UI update, treat profiles as potentially stale until a
+smoke scan passes.
+
+### Logs and diagnostics
+
+Use **Open log folder** or **Copy diagnostics** in the calculator:
+
+~~~text
+%LOCALAPPDATA%\ZZZScannerNext\logs
+~~~
+
+Startup failures before browser connection use a native Windows dialog with an
+error code, diagnostic ID, and log location.
+
+## Known limitations
+
+- The scanner depends on visible UI coordinates, colors, panel timing, and OCR
+  text. A game patch can break it without changing the process name.
+- Only the current Simplified Chinese dictionary and inventory layout are
+  maintained.
+- Fast OCR profiles cover a finite list of local/cloud resolutions. PP-OCR
+  fallback does not prove an unknown layout is safe.
+- Full lower-level Drive Disc scanning is not a supported calculator workflow.
+- GDI requires a visible desktop. Minimized, covered, locked, disconnected, or
+  remote-session windows can produce stale or blank captures.
+- DXGI depends on GPU, driver, display, and session and may fall back to GDI.
+- HDR, color filters, overlays, UI mods, and color-management changes can alter
+  rarity and stability checks.
+- Unsigned binaries can be blocked before self-diagnostics are possible.
+- No program can guarantee every Windows 10/11 installation. Damaged system
+  files, restrictive policy, security products, unsupported hardware, and
+  future game changes remain outside its control.
+- A non-invasive implementation is not game-publisher approval. Users are
+  responsible for applicable rules and account risk.
+- This community project is not affiliated with or endorsed by HoYoverse.
+
+## Command-line use
+
+Command-line modes are intended for repeatable validation and development. A
+live scan controls the mouse and game window just like the GUI.
+
+### One scan
+
+~~~powershell
+.\ZZZ-Scanner.Next.exe --scan-once --max-items 30
+.\ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi
+~~~
+
+| Option | Meaning |
+| --- | --- |
+| <code>--process &lt;name&gt;</code> | Local or cloud process |
+| <code>--profile &lt;name&gt;</code> | Exact scan profile |
+| <code>--max-items &lt;n&gt;</code> | 0 has no explicit limit |
+| <code>--rarities S,A</code> | Comma-separated rarity filters |
+| <code>--include-non15</code> | Experimental lower-level scanning |
+| <code>--no-bring-to-front</code> | Do not activate the game |
+| <code>--capture-mode gdi|dxgi</code> | Capture backend |
+| <code>--fast-mode</code> | Validated fast profile and Fast OCR |
+| <code>--adaptive-timing</code> | Force per-run adaptive timing |
+| <code>--no-adaptive-timing</code> | Disable adaptive timing |
+| <code>--ocr-workers 0..4</code> | 0 selects automatically |
+| <code>--ocr-batch 1..16</code> | OCR batch size |
+| <code>--ocr-queue 1..256</code> | Queue capacity |
+| <code>--ocr-intra-op 1..8</code> | ONNX intra-op threads |
+| <code>--config &lt;json&gt;</code> | Load a ScanRunCommand JSON file |
+
+The command prints output paths and counts. Exit code 0 means no failed items,
+1 means failure, 73 means another scan owns the mutex, and 130 means canceled.
+
+### Offline benchmark
+
+~~~powershell
+.\ZZZ-Scanner.Next.exe --scan-benchmark <scan-directory> [baseline-directory]
+~~~
+
+This reads existing output only and does not control the game. Release checks
+normally require zero duplicate exports, zero error files,
+<code>slot_safety_pass=true</code>, zero hard overlap stops, and the expected
+profile route/item count.
+
+### Maintainer tools
+
+~~~powershell
+.\ZZZ-Scanner.Next.exe --capture-stability-suite both --max-items 120 --rounds 5
+.\ZZZ-Scanner.Next.exe --scan-stability-suite <suite-directory>
+.\ZZZ-Scanner.Next.exe --ocr-shadow-analyze <scan-or-parent> --build-fast-index <index.json>
+.\ZZZ-Scanner.Next.exe --ocr-fast-eval <index.json> <shadow-parent>
+.\ZZZ-Scanner.Next.exe --ocr-fast-cross-validate <shadow-parent>
+.\ZZZ-Scanner.Next.exe --ocr-fast-calibrate <shadow-parent> --output <index.json> --feature v6
+.\ZZZ-Scanner.Next.exe --ocr-fast-calibrate-visual-profiles <shadow-parent> --output <index.json> --feature v6
+.\ZZZ-Scanner.Next.exe --ocr-fast-merge-indexes <output.json> <index1.json> <index2.json> [...]
+~~~
+
+Calibration requires multiple clean runs. Faster output alone is not enough to
+enable a release policy. See [architecture](docs/ARCHITECTURE.md) and
+[testing evidence](docs/TESTING.md).
+
+## Build from source
+
+Requirements:
+
+- Windows x64;
+- .NET 8 SDK;
+- <code>Resources\models\PP-OCRv5_mobile_rec_infer.onnx</code>.
+
+The large model is not tracked in Git. Obtain it from an official project
+release and verify it.
+
+~~~powershell
 dotnet restore
-.\scripts\publish-slim.ps1 -Version 1.0.36
-```
+dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
+dotnet build Launcher\ZZZ-Scanner.Helper.csproj -c Release -p:NuGetAudit=false
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+.\scripts\publish-slim.ps1 -Version 1.0.38
+~~~
 
-构建产物位于 `dist/publish-scanner-<version>/ZZZ-Scanner.Next.exe`，同时会生成瘦身后的
-`dist/ZZZ-Scanner.Next-win-x64-<version>.zip` 和 NativeAOT
-`dist/publish-helper/ZZZ-Scanner-Helper.exe`。
+Outputs:
 
-## 命令行诊断
+~~~text
+dist\ZZZ-Scanner.Next-win-x64-fdd.zip
+dist\ZZZ-Scanner.Next-win-x64-self-contained.zip
+dist\publish-helper\ZZZ-Scanner-Helper.exe
+dist\scanner-manifest-<version>.json
+dist\publish-report-<version>.json
+~~~
 
-```powershell
-ZZZ-Scanner.Next.exe --scan-benchmark <scan-dir> [baseline-scan-dir]
-```
+Release gates enforce 25 MiB FDD, 90 MiB self-contained, and 10 MiB Helper
+limits; no OpenCvSharp/PDB files; matching models; required VC/ONNX files;
+complete PE dependencies; and deterministic ZIP paths/timestamps.
 
-`--scan-benchmark` 只读取扫描输出目录，不启动 GUI、不申请管理员权限、不操作游戏窗口。
+Official CI uses <code>-RequireVCRedistLayout</code>. Local builds may record a
+System32 fallback, but those are not official release artifacts.
 
-自动压测扫描可以直接运行：
+## Security and privacy
 
-```powershell
-ZZZ-Scanner.Next.exe --scan-once --max-items 120
-```
+- OCR and screenshots are processed locally.
+- Normal scans do not upload screenshots to this repository.
+- Web integration uses loopback HTTP/WebSocket, an origin allowlist, and a
+  one-time token.
+- Remote manifests, packages, and redirects require HTTPS.
+- ZIP extraction rejects absolute paths, traversal, and entries outside the
+  controlled runtime root.
+- Cache reuse requires package and per-file integrity verification.
+- Scanner WebSocket messages are size-limited and only one scan runs at a time.
 
-`--scan-once` 会用默认 GUI 参数直接扫描当前游戏进程，结束后打印 `output_dir` 和 `export_file`，便于连续做“发布 -> 实扫 -> benchmark”。
+Debug screenshots and OCR shadow datasets are written locally when explicitly
+enabled. Review them before sharing.
 
-Fast OCR 影子数据和可回退辅助识别可用下面的命令做离线验证：
+## More documentation
 
-```powershell
-ZZZ-Scanner.Next.exe --ocr-shadow-analyze <scan-dir-or-parent> --build-fast-index <index.json>
-ZZZ-Scanner.Next.exe --ocr-fast-eval <index.json> <scan-dir-or-parent>
-ZZZ-Scanner.Next.exe --ocr-fast-cross-validate <shadow-parent>
-ZZZ-Scanner.Next.exe --ocr-fast-calibrate <shadow-parent> --output <index.json>
-ZZZ-Scanner.Next.exe --ocr-fast-calibrate <shadow-parent> --output <index.json> --feature v6
-ZZZ-Scanner.Next.exe --ocr-fast-merge-indexes <output.json> <index1.json> <index2.json> [...]
-ZZZ-Scanner.Next.exe --ocr-fast-feature-eval <shadow-parent>
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --ocr-fast-assist --ocr-fast-index <index.json>
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --adaptive-timing
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --no-adaptive-timing
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi --panel-stability-mode text-core
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi --scroll-accept-mode early-one-row
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi --panel-accept-mode adaptive-early-full-roi
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi --panel-accept-mode safe --scroll-accept-mode safe
-ZZZ-Scanner.Next.exe --scan-once --max-items 0 --fast-mode --capture-mode dxgi --overlap-conflict-mode recover
-ZZZ-Scanner.Next.exe --scan-once --collect-visual-profile local-1280x720-current --visual-profile-client local --visual-profile-quality current --capture-mode dxgi --max-items 120
-ZZZ-Scanner.Next.exe --ocr-fast-calibrate-visual-profiles <shadow-parent> --output <index.json> --feature v6
-ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi --profile-routing family
-ZZZ-Scanner.Next.exe --capture-stability-suite both --max-items 120 --rounds 5
-ZZZ-Scanner.Next.exe --capture-stability-suite dxgi --suite-profile speed-1.0.27 --max-items 120 --rounds 5
-ZZZ-Scanner.Next.exe --scan-stability-suite <scan-parent>
-```
-
-`--ocr-fast-calibrate` 会基于多轮 shadow 数据生成模板索引，并按字段写入是否启用 assist、最低分数和最低 margin。1.0.31 起推荐 `--feature v6`：先对 ROI 文字核心做 canonical crop，再生成灰度、横向差分、纵向差分和边缘梯度 hash。少于两轮 shadow 数据时会保持 assist 全部禁用。
-
-`--feature v4` 仍可读取/生成旧实验特征；`--ocr-fast-feature-eval` 会对比 v3/v4/v6 的跨轮误接受和接受率。
-
-`--ocr-fast-assist` 默认关闭，只会对通过索引策略的字段名类 ROI 使用快路径；不支持、未启用或低置信度的 ROI 会回退 PP-OCR。1.0.36 起 `name` 不参与正式 assist 导出，始终回退 PP-OCR，避免套装名模板误接受污染槽位。
-
-`--fast-mode` 会启用经过验证的 fast profile 和 Fast OCR assist；启动时会检查 `Data/ocr_fast_templates.json` 是否为 v3+ 且存在已启用字段，不满足时自动回退普通模式并写入日志。
-
-1.0.30 起支持多环境视觉 profile。`--collect-visual-profile <id>` 是安全采集快捷命令，会关闭 Fast OCR assist、开启 `--ocr-shadow-dataset`、使用 safe 面板/滚动策略并写入 `visual_profile.json`；配套参数为 `--visual-profile-client local|cloud|unknown`、`--visual-profile-quality <label>`。扫描目录会记录用户请求标签、实际检测到的窗口几何、DPI、capture 后端、profile family 和 profile 路由。若请求标签的几何与实际客户区不一致，训练/assist 会自动使用 detected profile，并在 `ProfileGeometryStatus` 中记录 fallback 原因。
-
-1.0.34 内置了已验证的本地三挡分辨率与云绝区零大窗口/普通窗口/全屏 Fast OCR v6 模板：`local-1280x720-current`、`local-1600x900-current`、`local-1920x1080-current`、`cloud-1592x896-current`、`cloud-1440x808-current`、`cloud-1920x1080-current`。本地三挡已完成 120 件 assist 与默认有效全量扫描验收；云大窗口、普通窗口、全屏均完成 shadow、120 件 assist 和默认有效全量验收。`--fast-mode` 会用 strict exact profile 路由，未知分辨率或未训练 profile 自动回退 PP-OCR。`family`、`compatible` 和 `auto` 仍保留为显式 eval/shadow 探索路径，`auto` 的全局 fallback 不作为默认 assist 导出路径。`--ocr-fast-merge-indexes` 可把多个 v6 index 合并成候选模板，合并后仍按 profile policy 控制字段启用。1.0.35 起网页 WebSocket `scan_req` 可显式传入 `processName`；云绝区零应传 `Zenless Zone Zero Cloud` 并配合 `visualProfileClient=cloud`。1.0.36 起 benchmark 会输出 `slot_safety_pass` 和槽位违规计数，任何槽位/主词条非法组合都不能作为发布验收通过。
-
-1.0.32 还收紧了 `selection_changed_stable_full_roi` 兜底：滚动后首格、retry/fallback/recover 场景、以及 selection 变化时间没有明确正值时，不允许只凭选中态变化接受详情面板；日志会记录 `PANEL_SELECTION_ONLY_BLOCKED`。同排相邻格如果只出现弱 panel change，或点击后 25ms 内出现过早 panel change，也会记录 `PANEL_WEAK_CHANGE_BLOCKED` 并触发 stale retry，避免把旧面板入队。benchmark 输出 `selection_only_accept_count`、`post_scroll_selection_only_blocked_count`、`weak_panel_change_blocked_count` 和 `fast_exact_profile_accept_count`。
-
-`--capture-mode gdi|dxgi` 可选择截图后端；默认仍是 GDI。DXGI 是显式实验路径，初始化失败、取帧异常或显示器不匹配时会回退 GDI 并写入 `scan.log`。
-
-1.0.20 起扫描内部增加 frame 诊断，`scan.log` 会记录 `captureFrameBackend`，benchmark 会输出 `frame_capture_ms`、`frame_to_bitmap_ms` 和 `bitmap_created_count`。DXGI raw BGRA 目前只保留为后续实验路径；本机验证发布候选默认仍使用稳定的 `bitmap-fallback`。
-
-1.0.21 验证了更激进的 quick panel accept 和 DXGI raw frame 缓存，但它们分别带来重复导出或速度退化，因此默认不启用。当前推荐仍是 `--fast-mode --capture-mode dxgi` 的稳定路径；benchmark 中的 `quick_accept_count` 应为 0。
-
-`--panel-stability-mode panel|text-core|auto` 可切换面板稳定判定。`text-core` 只观察 12 个 OCR ROI 的文字核心区域，但仍必须看到详情变化、12 ROI 全可见并满足稳定帧；`auto` 会先 warmup 对比两者。1.0.22 本机 120 件实测 text-core 没有提速，默认 fast-mode 仍使用 `panel`，text-core/auto 仅作为显式实验。
-
-`--scroll-accept-mode safe|early-one-row` 可切换滚动接受策略。`early-one-row` 在行签名确认只前进一行时提前接受滚动结果，多行 overshoot 仍会阻断且不做回滚。1.0.24 起 fast-mode 默认使用 `early-one-row`；如需保守对照，可显式传入 `--scroll-accept-mode safe`。
-
-`--panel-accept-mode safe|adaptive-early-full-roi` 可切换面板接受策略。`adaptive-early-full-roi` 只在 warmup 后、非滚动后首格中启用；仍必须看到详情变化、12 个 OCR ROI 全可见、达到本轮自适应最低等待，且不启用 quick accept。1.0.24 起 fast-mode 默认使用该策略；如需保守对照，可显式传入 `--panel-accept-mode safe`。
-
-`--post-scroll-panel-accept-mode safe|adaptive-after-scroll` 可切换滚动后首格面板接受实验策略。1.0.25 默认仍为 `safe`；`adaptive-after-scroll` 可降低首格等待。1.0.26 中它与 DXGI `--panel-min-accept-floor 110` 组合 5 轮全 pass，平均 `3.719/s`，但未达到默认升级的 5% 平均增益门槛，因此仍需显式传入。
-
-`--panel-min-accept-floor <90..120>` 可显式测试面板最低等待下限。默认仍为 `120ms`；本机 `110ms` 多轮通过，1.0.26 中单独使用 5 轮平均 `3.655/s`，与滚动后首格 adaptive 组合 5 轮平均 `3.719/s`。`90ms` 曾触发滚动签名一致性保护，不建议使用。
-
-`--panel-floor-mode static|scene-adaptive` 可切换场景化面板最低等待。`scene-adaptive` 只允许同排普通点击使用更低下限，滚动后首格、warmup、视觉第 2 行补扫和 retry/fallback 场景继续保守；配套参数为 `--same-row-panel-min-accept-floor <100..120>`、`--post-scroll-panel-min-accept-floor <100..120>`。`--scroll-tick-delay-ms <50..80>` 可显式测试滚动 tick 等待。1.0.27 中 5 轮矩阵和最佳候选 10 轮均 correctness 全 pass，但最佳 10 轮平均 `3.624/s`，低于 1.0.26 最佳候选，因此这些参数仍作为显式实验，不替代默认 fast-mode。
-
-`--overlap-conflict-mode strict|recheck|recover` 可切换重叠页滚动签名冲突处理。普通模式默认 `recheck`，`--fast-mode` 默认 `recover`。1.0.28 起遇到 `scrollRows=1`、`signatureRows=2` 这类弱冲突时，会先连续复核列表签名；弱证据不会直接覆盖滚动验证结果，只有强二行且已扫逻辑行集合能证明不会漏行时才接受二行推进，否则安全停止。benchmark 会输出 `overlap_conflict_count`、`overlap_conflict_recovered_count`、`overlap_ambiguous_accept_count`、`overlap_hard_stop_count`、`full_scan_complete` 和 `missing_logical_rows_count`。
-
-`--adaptive-timing` 会启用本轮自适应面板等待和 OCR 背压限速；`--fast-mode` 默认启用，`--no-adaptive-timing` 可用于对照复测。该状态只存在于本次扫描内，不保存机器画像。1.0.24 的 DXGI fast 默认命令验收为 `MaxItems=120`、`completed_per_sec=3.656`、重复导出 0、`IncompleteRoi=0`、`quick_accept_count=0`、滚动验收全 pass；1.0.20 的 DXGI fast 基线为 `3.406/s`。
-
-1.0.26 新增 `--capture-stability-suite gdi|dxgi|both --max-items <n> --rounds <n>`，用于自动串行跑后端/参数候选；1.0.27 增加 `--suite-profile speed-1.0.27`，固定跑 DXGI 默认、floor110+postscroll、scene-adaptive 105/100 和 scroll 60/50 的候选矩阵。同版 benchmark 输出 `panel_floor_mode`、`same_row_panel_floor_ms`、`post_scroll_panel_floor_ms`、`floor_wait_limited_count/ms`、`panel_accept_elapsed_vs_floor_ms` 和 `scroll_tick_delay_ms`。1.0.26 的 `--scan-stability-suite` 输出 `recommended_candidate`、`reject_reason` 和 `speed_vs_baseline_percent`；五轮实测中 GDI 默认出现重复导出，拒绝作为推荐；DXGI `--panel-min-accept-floor 110 --post-scroll-panel-accept-mode adaptive-after-scroll` 5/5 轮全 pass、平均 `3.719/s`，但平均增益低于 5%，仍作为显式实验候选。1.0.25 新增 `--scan-stability-suite <scan-parent>` 用于跨轮汇总速度分布和 correctness；同版 benchmark 输出 `post_scroll_adaptive_accept_count`、`panel_min_floor_ms` 和 `before_min_accept_count`。1.0.24 起 benchmark 输出 `roi_complete_frames`、`selected_stable_frames`、`panel_frames_after_warmup` 和 `accept_gate_reason_*_count`；1.0.23 起输出 `same_row_panel_wait_ms`、`post_scroll_first_panel_wait_ms` 和 `post_scroll_first_cell_total_ms`，用于拆分普通同排点击与滚动后首格等待；1.0.22 起输出 `panel_text_stable_ms`、`panel_stable_source_*`、`rarity_probe_ms` 和 `selection_probe_ms`；1.0.21 起输出 `quick_accept_count`、`quick_accept_rate_percent`、`panel_frames` 和 `selection_change_ms`；1.0.20 起输出 `frame_capture_ms`、`frame_to_bitmap_ms` 和 `bitmap_created_count`；1.0.18 起输出 `adaptive_throttle_ms`、`ocr_backlog_before_enqueue` 和 `adaptive_panel_min_ms`；1.0.17 起输出 `capture_ms`、`panel_signature_ms`、`visible_roi_ms`、`frame_loop_ms`、`scroll_list_stable_ms` 和 `row_signature_ms`；1.0.16 起输出 `panel_change_ms`、`panel_roi_ms`、`panel_stable_ms`、`after_scroll_extra_ms` 和 `capture_limited`；1.0.15 起输出 `fast_accepted_per_item`、`fast_rejected_per_item`、`ppocr_roi_per_item` 和 `fast_match_ms_per_item`。1.0.3 起 benchmark 还会输出重叠页扫描计数，用于确认补扫行、滚动接受和导出一致性。
-
-## 文档
-
-- [架构说明](docs/ARCHITECTURE.md)
-- [测试记录](docs/TESTING.md)
-- [数据来源](docs/DATA_SOURCES.md)
-- [变更记录](docs/CHANGELOG.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Testing and release evidence](docs/TESTING.md)
+- [Data sources](docs/DATA_SOURCES.md)
+- [Changelog](docs/CHANGELOG.md)
+- [YAS study notes](docs/yas-study.md)
 
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -4,12 +4,10 @@ using System.Drawing;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using OpenCvSharp;
-using OpenCvSharp.Extensions;
 using ZZZScannerNext.Cleaning;
 using ZZZScannerNext.Core;
 using ZZZScannerNext.Ocr;
-using CvRect = OpenCvSharp.Rect;
+using CvRect = System.Drawing.Rectangle;
 using OcrBatchInput = ZZZScannerNext.Ocr.PaddleOcrRecognizer.OcrBatchInput;
 
 namespace ZZZScannerNext.Scanning;
@@ -80,17 +78,20 @@ public sealed class ScanController
             }
         }
 
-        var profile = _profiles.Profiles.FirstOrDefault(p => p.Name == profileName)
-            ?? _profiles.Profiles.First();
-        if (requestedFastMode && fastModeActive && string.Equals(profileName, ScanOptions.FastProfileName, StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(profile.Name, ScanOptions.FastProfileName, StringComparison.OrdinalIgnoreCase))
+        var profile = _profiles.Find(profileName);
+        if (profile is null
+            && requestedFastMode
+            && fastModeActive
+            && string.Equals(profileName, ScanOptions.FastProfileName, StringComparison.OrdinalIgnoreCase))
         {
             options.FastOcrAssist = false;
             fastModeActive = false;
             fastModeMessage = $"fast scan profile not found: {ScanOptions.FastProfileName}";
-            profile = _profiles.Profiles.FirstOrDefault(p => p.Name == ScanOptions.DefaultProfileName)
-                ?? _profiles.Profiles.First();
+            profileName = ScanOptions.DefaultProfileName;
+            profile = _profiles.ResolveRequired(profileName);
         }
+
+        profile ??= _profiles.ResolveRequired(profileName);
 
         var outputDir = AppPaths.CreateScanDirectory();
         using var scanLog = new ScanLog(Path.Combine(outputDir, "scan.log"));
@@ -2179,8 +2180,7 @@ public sealed class ScanController
         {
             var rect = window.ToScreenRectangle(profile.Rectangle("inventoryCount"));
             using var image = window.Capture(rect);
-            using var mat = BitmapConverter.ToMat(image);
-            var ocr = recognizer.Recognize(mat, [new CvRect(0, 0, mat.Width, mat.Height)]);
+            var ocr = recognizer.Recognize(image, [new CvRect(0, 0, image.Width, image.Height)]);
             var text = ocr.Count > 0 ? ocr[0].Text : "";
             var match = Regex.Match(text, @"(\d{1,4})\s*/\s*\d{2,5}");
             if (match.Success && int.TryParse(match.Groups[1].Value, out var count))
@@ -3308,7 +3308,6 @@ public sealed class ScanController
         scanLog.Write($"OCR worker {workerId} started. IntraOpThreads={ocrIntraOpThreads}.");
         while (TryTakeBatch(queue, options.OcrBatchSize, out var batch))
         {
-            Mat?[]? mats = null;
             try
             {
                 if (Volatile.Read(ref counters.StopAfterIndex) > 0)
@@ -3317,15 +3316,7 @@ public sealed class ScanController
                     break;
                 }
 
-                var bitmapToMatSw = Stopwatch.StartNew();
-                mats = new Mat?[batch.Count];
-                for (var i = 0; i < batch.Count; i++)
-                {
-                    var capture = batch[i];
-                    var mat = BitmapConverter.ToMat(capture.Image);
-                    mats[i] = mat;
-                }
-                bitmapToMatSw.Stop();
+                var bitmapInputSw = Stopwatch.StartNew();
 
                 FastOcrAssistPlan?[]? assistPlans = null;
                 var fastMatchMs = 0.0;
@@ -3346,8 +3337,9 @@ public sealed class ScanController
                 }
 
                 var inputs = batch
-                    .Select((capture, index) => new OcrBatchInput(mats[index]!, assistPlans?[index]?.PpOcrRois ?? capture.Rois))
+                    .Select((capture, index) => new OcrBatchInput(capture.Image, assistPlans?[index]?.PpOcrRois ?? capture.Rois))
                     .ToArray();
+                bitmapInputSw.Stop();
                 var recognition = recognizer.RecognizeBatchDetailed(inputs);
                 var ocrBatch = recognition.Results;
                 if (Volatile.Read(ref counters.StopAfterIndex) > 0)
@@ -3382,7 +3374,7 @@ public sealed class ScanController
                     workerId,
                     batch.Count,
                     recognition.Diagnostics,
-                    bitmapToMatSw.Elapsed.TotalMilliseconds,
+                    bitmapInputSw.Elapsed.TotalMilliseconds,
                     cleanSw.Elapsed.TotalMilliseconds,
                     fallbackCount: 0,
                     backlog,
@@ -3402,14 +3394,6 @@ public sealed class ScanController
             }
             finally
             {
-                if (mats is not null)
-                {
-                    foreach (var mat in mats)
-                    {
-                        mat?.Dispose();
-                    }
-                }
-
                 foreach (var capture in batch)
                 {
                     capture.Dispose();

@@ -15,6 +15,25 @@ public sealed class ScanProfileFile
             File.ReadAllText(AppPaths.DataFile("scan_profiles.json")), JsonDefaults.Read)
             ?? throw new InvalidDataException("Cannot load scan_profiles.json.");
     }
+
+    public ScanProfile? Find(string profileName)
+    {
+        return Profiles.FirstOrDefault(
+            profile => string.Equals(profile.Name, profileName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public ScanProfile ResolveRequired(string profileName)
+    {
+        if (Profiles.Count == 0)
+        {
+            throw new InvalidDataException("scan_profiles.json does not contain any profiles.");
+        }
+
+        return Find(profileName)
+            ?? throw new ArgumentException(
+                $"Unknown scan profile: {profileName}. Available profiles: {string.Join(", ", Profiles.Select(profile => profile.Name))}.",
+                nameof(profileName));
+    }
 }
 
 public sealed class ScanProfile

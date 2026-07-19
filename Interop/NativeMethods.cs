@@ -14,6 +14,9 @@ internal static class NativeMethods
     public const uint ModShift = 0x0004;
     public const uint VkC = 0x43;
     private const int DwmwaExtendedFrameBounds = 9;
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const uint TokenQuery = 0x0008;
+    private const int TokenElevation = 20;
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -64,6 +67,26 @@ internal static class NativeMethods
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out NativeRect pvAttribute, int cbAttribute);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(
+        IntPtr tokenHandle,
+        int tokenInformationClass,
+        out int tokenInformation,
+        int tokenInformationLength,
+        out int returnLength);
+
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
     public static void TryEnablePerMonitorDpiAwareness()
     {
         try
@@ -113,6 +136,58 @@ internal static class NativeMethods
         catch
         {
             return null;
+        }
+    }
+
+    public static bool IsCurrentProcessElevated()
+    {
+        return TryIsProcessElevated(Environment.ProcessId, out var elevated) && elevated;
+    }
+
+    public static bool RequiresElevationForProcess(int processId)
+    {
+        if (IsCurrentProcessElevated())
+        {
+            return false;
+        }
+
+        return !TryIsProcessElevated(processId, out var elevated) || elevated;
+    }
+
+    private static bool TryIsProcessElevated(int processId, out bool elevated)
+    {
+        elevated = false;
+        var processHandle = OpenProcess(ProcessQueryLimitedInformation, inheritHandle: false, processId);
+        if (processHandle == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!OpenProcessToken(processHandle, TokenQuery, out var tokenHandle))
+            {
+                return false;
+            }
+
+            try
+            {
+                if (!GetTokenInformation(tokenHandle, TokenElevation, out var tokenElevation, sizeof(int), out _))
+                {
+                    return false;
+                }
+
+                elevated = tokenElevation != 0;
+                return true;
+            }
+            finally
+            {
+                CloseHandle(tokenHandle);
+            }
+        }
+        finally
+        {
+            CloseHandle(processHandle);
         }
     }
 }

@@ -2,9 +2,7 @@ using System.Drawing.Imaging;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using OpenCvSharp;
 using ZZZScannerNext.Ocr;
-using CvRect = OpenCvSharp.Rect;
 
 namespace ZZZScannerNext.Scanning;
 
@@ -31,7 +29,7 @@ public sealed class OcrShadowDatasetWriter : IDisposable
         int itemIndex,
         string rarity,
         Bitmap image,
-        IReadOnlyList<CvRect> rois,
+        IReadOnlyList<Rectangle> rois,
         IReadOnlyList<OcrResult> ocr,
         DriveDiscExport export)
     {
@@ -135,11 +133,10 @@ public sealed class OcrShadowDatasetWriter : IDisposable
         };
     }
 
-    private static bool TrySaveCrop(Bitmap source, CvRect roi, string file)
+    private static bool TrySaveCrop(Bitmap source, Rectangle roi, string file)
     {
         var bounds = new Rectangle(0, 0, source.Width, source.Height);
-        var requested = new Rectangle(roi.X, roi.Y, roi.Width, roi.Height);
-        var rect = Rectangle.Intersect(bounds, requested);
+        var rect = Rectangle.Intersect(bounds, roi);
         if (rect.Width <= 0 || rect.Height <= 0)
         {
             return false;
