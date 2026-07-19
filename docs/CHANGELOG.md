@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Helper 1.2.1 修复 1.1.x 升级死路：下载引导程序先校验 22355 端口确为 ZZZ Scanner Helper，再要求唯一进程的名称、文件版本与健康检查版本一致。用户确认后才关闭该旧进程、等待端口释放、安装和校验固定路径副本、注册协议并启动托管 Helper；未知服务、多候选、版本不匹配、取消、终止失败或端口释放超时均不结束进程。
+- 网页在读取 Helper 版本和协议后才允许请求 Scanner manifest。1.1.x 只显示“下载并更新 Helper”和“重新检测”；协议 v3 的旧版本自动调用 `update_helper`，断线期间保持扫描流程并在重连后继续准备 OCR。自动更新失败同时提供重试和手动下载。
+- 发布脚本从 Helper 项目版本生成 `launcherMinVersion`，Helper Release tag 与 Scanner tag 解耦，并支持 `-HelperOnly` 只生成 Helper 资产。Helper 1.2.1 为 `8137728` 字节、SHA-256 `d3c88f1f7556e9bab15f7129e253d2c5527b0f5009a84d52a7a0acd354f326ae`；Scanner 1.0.38 两个既有包未重建或替换，哈希保持不变。
+
 - 1.0.38 / Helper 1.2.0 将长期驻留文件收敛为一个托管 Helper 和一个已完成握手的活动 OCR runtime。Helper 首次确认后安装到 `%LOCALAPPDATA%\ZZZScannerNext\helper`，协议注册固定指向托管路径；下载引导副本在哈希一致且托管进程接管后删除。
 - Helper 协议升级到 v3，新增带 `requestId` 的 `get_storage_info`、`cleanup_storage` 和 `update_helper`。存储统计区分 Helper、runtime、安装包、扫描产物、日志及可释放空间；清理失败路径写入待清理收据并在下次启动重试。
 - scanner manifest 升级到 schema v3，每个包新增逐文件路径、大小和 SHA-256。Helper 在验证 ZIP、临时解压目录和文件清单后删除 ZIP；后续无需保留压缩包也能检查缺失、篡改和意外文件。

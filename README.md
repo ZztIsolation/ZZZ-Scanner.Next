@@ -176,9 +176,11 @@ calculator receives the exact required byte count.
     helper-YYYYMMDD.log
 ~~~
 
-Helper 1.2.0 installs itself into the fixed current-user helper directory and
+Helper 1.2.1 installs itself into the fixed current-user helper directory and
 registers the browser protocol to that path. Future Helper releases update this
-managed file transactionally; Helper 1.1.0 requires one final manual download.
+managed file transactionally. Helper 1.1.x requires one final download: run the
+1.2.1 installer and confirm the takeover once, and it safely closes the uniquely
+verified old Helper, installs the managed copy, and restarts it automatically.
 
 Manifest schema v3 lists the size and SHA-256 of every runtime file. The Helper
 therefore deletes the package ZIP after a verified install and still validates
@@ -361,11 +363,14 @@ enterprise policy, the x64/OS requirement, and whether another Helper owns port
 
 ### Calculator says Helper is missing or outdated
 
-1. Download Helper 1.2.0 or later.
-2. Close old Helper processes.
-3. Replace the old EXE.
-4. run the new EXE once from its permanent location;
-5. reload the calculator.
+1. In the calculator, select **Download and update Helper**.
+2. Run Helper 1.2.1 and confirm the one-time takeover.
+3. Leave the scan drawer open; the installer closes the verified old Helper,
+   installs the managed copy, and the page reconnects automatically.
+
+Do not terminate an unknown process that owns port 22355. The installer refuses
+to take over when the service identity, version, or candidate process is
+ambiguous and reports the recovery action instead.
 
 A healthy Helper reports its versions at
 <code>http://127.0.0.1:22355/</code>.

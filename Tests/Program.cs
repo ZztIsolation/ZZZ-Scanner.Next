@@ -25,6 +25,7 @@ internal static class Program
             ("runtime path containment", TestRuntimePathContainmentAsync),
             ("installed runtime verification", TestInstalledRuntimeVerificationAsync),
             ("single-version storage cleanup", TestSingleVersionStorageCleanupAsync),
+            ("legacy Helper takeover selection", TestLegacyHelperTakeoverSelectionAsync),
             ("managed output root", TestManagedOutputRootAsync),
             ("managed OCR preprocessing", TestManagedOcrPreprocessingAsync),
             ("OCR output equivalence", TestOcrOutputEquivalenceAsync),
@@ -207,6 +208,39 @@ internal static class Program
         {
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
+    }
+
+    private static Task TestLegacyHelperTakeoverSelectionAsync()
+    {
+        const string currentPath = @"E:\downloads\ZZZ-Scanner-Helper.exe";
+        var selected = HelperInstallationManager.SelectTakeoverCandidate(
+            "1.1.0",
+            currentPath,
+            [
+                new HelperProcessCandidate(10, currentPath, "1.2.1"),
+                new HelperProcessCandidate(20, @"E:\legacy\ZZZ-Scanner-Helper.exe", "1.1.0+build"),
+                new HelperProcessCandidate(30, @"E:\other\ZZZ-Scanner-Helper.exe", "1.0.2"),
+            ]);
+        AssertTrue(selected.Candidate is not null);
+        AssertEqual(20, selected.Candidate!.ProcessId);
+
+        var ambiguous = HelperInstallationManager.SelectTakeoverCandidate(
+            "1.1.0",
+            currentPath,
+            [
+                new HelperProcessCandidate(20, @"E:\legacy-a\ZZZ-Scanner-Helper.exe", "1.1.0"),
+                new HelperProcessCandidate(21, @"E:\legacy-b\ZZZ-Scanner-Helper.exe", "1.1.0"),
+            ]);
+        AssertTrue(ambiguous.Candidate is null);
+        AssertTrue(ambiguous.Reason.Contains("多个", StringComparison.Ordinal));
+
+        var missing = HelperInstallationManager.SelectTakeoverCandidate(
+            "1.1.0",
+            currentPath,
+            [new HelperProcessCandidate(30, @"E:\other\ZZZ-Scanner-Helper.exe", "1.0.2")]);
+        AssertTrue(missing.Candidate is null);
+        AssertTrue(missing.Reason.Contains("未找到", StringComparison.Ordinal));
+        return Task.CompletedTask;
     }
 
     private static Task TestManagedOutputRootAsync()

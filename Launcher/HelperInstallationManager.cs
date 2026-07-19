@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Net.Sockets;
+using System.Text.Json;
 
 namespace ZZZScannerHelper;
 
@@ -9,6 +10,7 @@ internal static class HelperInstallationManager
 {
     private const string SkipManagedInstallEnvironmentVariable = "ZZZ_SCANNER_SKIP_MANAGED_INSTALL";
     private const string AcceptManagedInstallEnvironmentVariable = "ZZZ_SCANNER_ACCEPT_MANAGED_INSTALL";
+    private const string AcceptHelperTakeoverEnvironmentVariable = "ZZZ_SCANNER_ACCEPT_HELPER_TAKEOVER";
     private const string BootstrapArgument = "--complete-managed-install";
     private const string ApplyUpdateArgument = "--apply-helper-update";
     private const string CompleteUpdateArgument = "--complete-helper-update";
@@ -73,15 +75,47 @@ internal static class HelperInstallationManager
             return new HelperLifecycleResult(false, args);
         }
 
-        if (await IsExistingHelperRunningAsync())
+        var installConfirmed = false;
+        var existingHelper = await ProbeExistingHelperAsync();
+        if (existingHelper.PortOpen)
         {
-            ShowExistingHelperWarning();
-            return new HelperLifecycleResult(false, args);
+            if (!existingHelper.TrustedService || !TryParseVersion(existingHelper.Version, out var existingVersion))
+            {
+                ShowUnsafePortWarning(existingHelper);
+                return new HelperLifecycleResult(true, []);
+            }
+
+            var currentVersion = Version.Parse(Program.HelperVersion);
+            if (existingVersion >= currentVersion)
+            {
+                ShowCurrentHelperRunning(existingHelper.Version);
+                return new HelperLifecycleResult(true, []);
+            }
+
+            var selection = SelectTakeoverCandidate(
+                existingHelper.Version,
+                processPath,
+                DiscoverHelperProcesses(processPath));
+            if (selection.Candidate is null)
+            {
+                ShowAmbiguousHelperWarning(existingHelper.Version, selection.Reason);
+                return new HelperLifecycleResult(true, []);
+            }
+            if (!ConfirmHelperTakeover(existingHelper.Version, selection.Candidate.Path))
+            {
+                return new HelperLifecycleResult(true, []);
+            }
+            if (!await StopExistingHelperAsync(selection.Candidate.ProcessId))
+            {
+                ShowTakeoverFailure(existingHelper.Version);
+                return new HelperLifecycleResult(true, []);
+            }
+            installConfirmed = true;
         }
 
-        if (!ConfirmManagedInstall())
+        if (!installConfirmed && !ConfirmManagedInstall())
         {
-            return new HelperLifecycleResult(false, args);
+            return new HelperLifecycleResult(true, []);
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(managedPath)!);
@@ -179,31 +213,161 @@ internal static class HelperInstallationManager
         return MessageBox(IntPtr.Zero, message, "安装 ZZZ Scanner Helper", 0x24) == 6;
     }
 
-    private static async Task<bool> IsExistingHelperRunningAsync()
+    private static async Task<ExistingHelperProbe> ProbeExistingHelperAsync()
     {
         try
         {
-            using var client = new TcpClient();
-            await client.ConnectAsync("127.0.0.1", 22355).WaitAsync(TimeSpan.FromMilliseconds(500));
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            using var response = await http.GetAsync("http://127.0.0.1:22355/");
+            var body = await response.Content.ReadAsStringAsync();
+            using var document = JsonDocument.Parse(body);
+            var root = document.RootElement;
+            var service = root.TryGetProperty("service", out var serviceProperty) ? serviceProperty.GetString() ?? "" : "";
+            var version = root.TryGetProperty("version", out var versionProperty) ? versionProperty.GetString() ?? "" : "";
+            return new ExistingHelperProbe(true, response.IsSuccessStatusCode && service == "zzz-scanner-helper", service, version);
+        }
+        catch
+        {
+            try
+            {
+                using var client = new TcpClient();
+                await client.ConnectAsync("127.0.0.1", 22355).WaitAsync(TimeSpan.FromMilliseconds(500));
+                return new ExistingHelperProbe(true, false, "", "");
+            }
+            catch
+            {
+                return new ExistingHelperProbe(false, false, "", "");
+            }
+        }
+    }
+
+    internal static HelperTakeoverSelection SelectTakeoverCandidate(
+        string healthVersion,
+        string currentProcessPath,
+        IEnumerable<HelperProcessCandidate> candidates)
+    {
+        var matches = candidates
+            .Where(candidate => !Path.GetFullPath(candidate.Path).Equals(
+                Path.GetFullPath(currentProcessPath),
+                StringComparison.OrdinalIgnoreCase))
+            .Where(candidate => VersionsEqual(candidate.ProductVersion, healthVersion))
+            .ToList();
+        return matches.Count == 1
+            ? new HelperTakeoverSelection(matches[0], "")
+            : new HelperTakeoverSelection(
+                null,
+                matches.Count == 0 ? "未找到与服务版本匹配的 Helper 进程。" : "检测到多个与服务版本匹配的 Helper 进程。");
+    }
+
+    private static List<HelperProcessCandidate> DiscoverHelperProcesses(string currentProcessPath)
+    {
+        var processName = Path.GetFileNameWithoutExtension(currentProcessPath);
+        var candidates = new List<HelperProcessCandidate>();
+        foreach (var process in Process.GetProcessesByName(processName))
+        {
+            try
+            {
+                var path = process.MainModule?.FileName;
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    continue;
+                }
+                var productVersion = FileVersionInfo.GetVersionInfo(path).ProductVersion ?? "";
+                candidates.Add(new HelperProcessCandidate(process.Id, path, productVersion));
+            }
+            catch
+            {
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+        return candidates;
+    }
+
+    private static bool VersionsEqual(string left, string right)
+    {
+        return TryParseVersion(left, out var leftVersion)
+            && TryParseVersion(right, out var rightVersion)
+            && leftVersion == rightVersion;
+    }
+
+    private static bool TryParseVersion(string value, out Version version)
+    {
+        var normalized = value.Split(new[] { '+', '-' }, 2, StringSplitOptions.None)[0];
+        return Version.TryParse(normalized, out version!);
+    }
+
+    private static bool ConfirmHelperTakeover(string version, string path)
+    {
+        if (Environment.GetEnvironmentVariable(AcceptHelperTakeoverEnvironmentVariable) == "1")
+        {
+            return true;
+        }
+        if (!Environment.UserInteractive)
+        {
+            return false;
+        }
+        var message = $"检测到正在运行的旧版扫描助手 {version}：\n{path}\n\n继续后将关闭旧版、安装到固定目录并启动新版。是否继续？";
+        return MessageBox(IntPtr.Zero, message, "更新 ZZZ Scanner Helper", 0x24) == 6;
+    }
+
+    private static async Task<bool> StopExistingHelperAsync(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline)
+            {
+                try
+                {
+                    using var client = new TcpClient();
+                    await client.ConnectAsync("127.0.0.1", 22355).WaitAsync(TimeSpan.FromMilliseconds(300));
+                }
+                catch
+                {
+                    return true;
+                }
+                await Task.Delay(250);
+            }
+        }
+        catch (ArgumentException)
+        {
             return true;
         }
         catch
         {
-            return false;
         }
+        return false;
     }
 
-    private static void ShowExistingHelperWarning()
+    private static void ShowUnsafePortWarning(ExistingHelperProbe helper)
     {
-        if (!Environment.UserInteractive)
-        {
-            return;
-        }
-        MessageBox(
-            IntPtr.Zero,
-            "检测到旧版扫描助手仍在运行。请先关闭旧 Helper，然后再次运行刚下载的安装文件。",
-            "请先关闭旧版 Helper",
-            0x30);
+        if (!Environment.UserInteractive) return;
+        var identity = string.IsNullOrWhiteSpace(helper.Service) ? "无法识别" : helper.Service;
+        MessageBox(IntPtr.Zero, $"端口 22355 已被占用，但服务身份为“{identity}”。为避免结束错误进程，安装已停止。", "无法安全更新 Helper", 0x30);
+    }
+
+    private static void ShowCurrentHelperRunning(string version)
+    {
+        if (!Environment.UserInteractive) return;
+        MessageBox(IntPtr.Zero, $"Helper {version} 已在运行，无需重复安装。", "ZZZ Scanner Helper", 0x40);
+    }
+
+    private static void ShowAmbiguousHelperWarning(string version, string reason)
+    {
+        if (!Environment.UserInteractive) return;
+        MessageBox(IntPtr.Zero, $"检测到 Helper {version}，但无法安全确定需要关闭的进程。\n{reason}\n请在任务管理器中关闭旧 Helper 后重试。", "无法自动接管旧 Helper", 0x30);
+    }
+
+    private static void ShowTakeoverFailure(string version)
+    {
+        if (!Environment.UserInteractive) return;
+        MessageBox(IntPtr.Zero, $"无法关闭 Helper {version} 或端口未及时释放。请在任务管理器中关闭旧 Helper 后重试。", "Helper 更新未完成", 0x30);
     }
 
     private static async Task VerifySameFileAsync(string source, string destination)
@@ -393,3 +557,6 @@ internal static class HelperInstallationManager
 }
 
 internal sealed record HelperLifecycleResult(bool Exit, string[] Arguments);
+internal sealed record ExistingHelperProbe(bool PortOpen, bool TrustedService, string Service, string Version);
+internal sealed record HelperProcessCandidate(int ProcessId, string Path, string ProductVersion);
+internal sealed record HelperTakeoverSelection(HelperProcessCandidate? Candidate, string Reason);

@@ -18,7 +18,7 @@ namespace ZZZScannerHelper;
 internal static partial class Program
 {
     private const string ServiceName = "zzz-scanner-helper";
-    private const string HelperVersion = "1.2.0";
+    internal const string HelperVersion = "1.2.1";
     private const int ProtocolVersion = 3;
     private const int HelperPort = 22355;
     private const string ProtocolName = "zzz-scanner";

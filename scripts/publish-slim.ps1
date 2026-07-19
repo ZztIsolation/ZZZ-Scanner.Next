@@ -1,6 +1,8 @@
 param(
     [string]$Version,
     [string]$OutputRoot,
+    [string]$HelperReleaseTag,
+    [switch]$HelperOnly,
     [switch]$RequireVCRedistLayout,
     [int]$MaxFddMiB = 25,
     [int]$MaxSelfContainedMiB = 90,
@@ -34,6 +36,12 @@ $helperVersion = $helperProject.Project.PropertyGroup |
 $parsedHelperVersion = $null
 if (-not [System.Version]::TryParse($helperVersion, [ref]$parsedHelperVersion)) {
     throw "Helper project Version is invalid: $helperVersion"
+}
+if ([string]::IsNullOrWhiteSpace($HelperReleaseTag)) {
+    $HelperReleaseTag = "helper-$helperVersion"
+}
+if ($HelperReleaseTag -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+    throw "Helper release tag contains unsupported characters: $HelperReleaseTag"
 }
 $distRoot = if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     Join-Path $repoRoot "dist"
@@ -371,7 +379,11 @@ function Assert-MaxSize([string]$Path, [int]$MaxMiB, [string]$Label, [string]$Pu
 }
 
 New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
-foreach ($path in @($helperOut, $fddOut, $selfContainedOut, $fddZip, $selfContainedZip, $manifestPath, $helperManifestPath, $reportPath)) {
+$outputPaths = @($helperOut, $helperManifestPath)
+if (-not $HelperOnly) {
+    $outputPaths += @($fddOut, $selfContainedOut, $fddZip, $selfContainedZip, $manifestPath, $reportPath)
+}
+foreach ($path in $outputPaths) {
     Remove-OutputPath $path
 }
 
@@ -389,6 +401,27 @@ Invoke-DotnetPublish @(
     "publish", "Launcher\ZZZ-Scanner.Helper.csproj", "-c", "Release", "-r", "win-x64",
     "--self-contained", "true", "-o", $helperOut
 ) "Helper publish"
+
+if ($HelperOnly) {
+    $helperDependencyReport = Assert-PeDependencyClosure $helperOut
+    $helperExe = Join-Path $helperOut "ZZZ-Scanner-Helper.exe"
+    Assert-MaxSize $helperExe $MaxHelperMiB "NativeAOT Helper" $helperOut
+    $helperManifest = [ordered]@{
+        schemaVersion = 1
+        version = $helperVersion
+        packageUrls = @(
+            "https://github.com/ZztIsolation/zzz_calculator/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
+        )
+        sha256 = (Get-FileHash -Algorithm SHA256 $helperExe).Hash.ToLowerInvariant()
+        size = (Get-Item $helperExe).Length
+    }
+    $helperManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $helperManifestPath -Encoding UTF8
+    Write-Host "helper_exe=$helperExe"
+    Write-Host "helper_size=$((Get-Item $helperExe).Length)"
+    Write-Host "helper_manifest=$helperManifestPath"
+    return
+}
+
 Invoke-DotnetPublish (@(
     "publish", "ZZZ-Scanner.Next.csproj", "-c", "Release", "-r", "win-x64",
     "--self-contained", "false", "-o", $fddOut
@@ -457,7 +490,7 @@ function New-PackageManifest([string]$Id, [string]$Mode, [string]$ZipPath, [stri
 
 $manifest = [ordered]@{
     schemaVersion = 3
-    launcherMinVersion = "1.2.0"
+    launcherMinVersion = $helperVersion
     scannerVersion = $Version
     support = [ordered]@{
         os = "windows"
@@ -480,7 +513,7 @@ $helperManifest = [ordered]@{
     schemaVersion = 1
     version = $helperVersion
     packageUrls = @(
-        "https://github.com/ZztIsolation/zzz_calculator/releases/download/scanner-$Version/ZZZ-Scanner-Helper.exe"
+        "https://github.com/ZztIsolation/zzz_calculator/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
     )
     sha256 = (Get-FileHash -Algorithm SHA256 $helperExe).Hash.ToLowerInvariant()
     size = (Get-Item $helperExe).Length
@@ -489,6 +522,7 @@ $helperManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $helperMani
 
 $report = [ordered]@{
     version = $Version
+    helperReleaseTag = $HelperReleaseTag
     createdAt = [DateTimeOffset]::Now.ToString("O")
     vcRuntimeSource = $vcRedist.Source
     vcRuntimePath = $vcRedist.Path
