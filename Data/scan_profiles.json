@@ -31,6 +31,29 @@
       "resetToTopWheelTicks": 180,
       "resetToTopWheelDelayMs": 50,
       "colorTolerance": 26,
+      "visualProbes": {
+        "requiredSignals": 2,
+        "requiredStableFrames": 2,
+        "pollMilliseconds": 250,
+        "backpackReady": {
+          "radius": 24,
+          "hueToleranceDegrees": 35,
+          "minimumSaturation": 0.45,
+          "minimumValue": 0.30,
+          "minimumCoverage": 0.12
+        },
+        "rarity": {
+          "maximumScore": 42,
+          "minimumCandidateMargin": 8
+        },
+        "rowPresence": {
+          "patchRadius": 3,
+          "minimumLuminanceTolerance": 18,
+          "relativeLuminanceTolerance": 0.35,
+          "edgeThreshold": 18,
+          "minimumEdgeDensity": 0.003
+        }
+      },
       "points": {
         "driveDiscTab": [1530, 170],
         "listWheelArea": [690, 520],
@@ -100,6 +123,29 @@
       "resetToTopWheelTicks": 180,
       "resetToTopWheelDelayMs": 50,
       "colorTolerance": 26,
+      "visualProbes": {
+        "requiredSignals": 2,
+        "requiredStableFrames": 2,
+        "pollMilliseconds": 250,
+        "backpackReady": {
+          "radius": 24,
+          "hueToleranceDegrees": 35,
+          "minimumSaturation": 0.45,
+          "minimumValue": 0.30,
+          "minimumCoverage": 0.12
+        },
+        "rarity": {
+          "maximumScore": 42,
+          "minimumCandidateMargin": 8
+        },
+        "rowPresence": {
+          "patchRadius": 3,
+          "minimumLuminanceTolerance": 18,
+          "relativeLuminanceTolerance": 0.35,
+          "edgeThreshold": 18,
+          "minimumEdgeDensity": 0.003
+        }
+      },
       "points": {
         "driveDiscTab": [1530, 170],
         "listWheelArea": [690, 520],

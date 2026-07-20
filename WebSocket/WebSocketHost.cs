@@ -287,6 +287,29 @@ public sealed class WebSocketHost : IDisposable
                 scanner = AppInfo.DiagnosticPayload()
             }, CancellationToken.None);
         }
+        catch (VisualPreflightException ex)
+        {
+            var captureUnavailable = string.Equals(ex.Reason, "capture_unavailable", StringComparison.Ordinal);
+            var colorUnsupported = string.Equals(ex.Reason, "color_unsupported", StringComparison.Ordinal);
+            await SendAsync(socket, sendGate, "scan_error", new
+            {
+                code = "visual_preflight_failed",
+                phase = "scan",
+                title = captureUnavailable
+                    ? "无法读取游戏画面"
+                    : colorUnsupported ? "当前显示色彩无法安全识别" : "未识别到驱动盘仓库",
+                message = ex.Message,
+                remedy = captureUnavailable
+                    ? "请保持游戏可见且未最小化，并关闭遮挡窗口后重试。"
+                    : colorUnsupported
+                        ? "请关闭过强的反色、单色或自定义 LUT 后重试；常见 HDR、夜间模式和温和显卡滤镜会自动兼容。"
+                        : "请确认游戏为简体中文、使用 16:9 布局并打开驱动盘仓库后重试。",
+                retryable = true,
+                actions = new[] { new { kind = "retry_scan", label = "重新扫描" } },
+                details = ex.DiagnosticDetails,
+                scanner = AppInfo.DiagnosticPayload()
+            }, CancellationToken.None);
+        }
         catch (Exception ex)
         {
             var gameNotFound = ex.Message.Contains("未找到游戏窗口进程", StringComparison.Ordinal);

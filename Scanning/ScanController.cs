@@ -199,14 +199,6 @@ public sealed class ScanController
                 window);
             visualProfile.ProfileRoutingDecision = options.ProfileRouting.ToString().ToLowerInvariant();
             runtimeState.VisualProfileId = visualProfile.ProfileId;
-            sessionDiagnostics = new ScanSessionDiagnostics
-            {
-                ClientWidth = visualProfile.ClientWidth,
-                ClientHeight = visualProfile.ClientHeight,
-                Dpi = visualProfile.Dpi,
-                CaptureMode = visualProfile.CaptureModeActive,
-                VisualProfileId = visualProfile.ProfileId
-            };
             visualProfile.Save(outputDir);
             scanLog.Write($"VISUAL_PROFILE_SELECTED id={visualProfile.ProfileId}, trainingProfile={visualProfile.TrainingProfileId}, profileFamily={visualProfile.ProfileFamilyId}, geometryStatus={visualProfile.ProfileGeometryStatus}, requested_label={visualProfile.RequestedProfileId}, detected_profile={visualProfile.DetectedProfileId}, detected_geometry={visualProfile.GeometryKey}, clientKind={visualProfile.ClientKind}, quality={visualProfile.QualityLabel}, size={visualProfile.ClientWidth}x{visualProfile.ClientHeight}, dpi={visualProfile.Dpi}, captureRequested={visualProfile.CaptureModeRequested}, captureActive={visualProfile.CaptureModeActive}, frameBackend={visualProfile.CaptureFrameBackend}, profileRouting={options.ProfileRouting}");
             if (!visualProfile.ProfileId.Equals(visualProfile.DetectedProfileId, StringComparison.OrdinalIgnoreCase))
@@ -214,26 +206,61 @@ public sealed class ScanController
                 scanLog.Write($"VISUAL_PROFILE_LABEL_GEOMETRY_MISMATCH requested_label={visualProfile.ProfileId}, detected_profile={visualProfile.DetectedProfileId}, detected_geometry={visualProfile.GeometryKey}");
             }
 
-            if (options.FastOcrAssist)
-            {
-                fastOcrAssist = FastOcrAssistEngine.TryCreate(options.FastOcrTemplateIndexFile, profile.OrderedRoiKeys(), visualProfile.ProfileId, options.ProfileRouting, scanLog.Write);
-                fastOcrAssistRecorder = fastOcrAssist?.CreateRecorder(outputDir);
-                if (fastOcrAssist is not null)
-                {
-                    scanLog.Write($"Fast OCR assist enabled. Index={fastOcrAssist.IndexFile}, Templates={fastOcrAssist.TemplateCount}, VisualProfile={fastOcrAssist.VisualProfileId}, ProfileRouting={fastOcrAssist.ProfileRoutingMode}, Csv={Path.Combine(outputDir, "ocr_fast_assist.csv")}");
-                }
-            }
-
             using var inventoryRecognizer = new PaddleOcrRecognizer(AppPaths.ModelFile, AppPaths.CharacterDictFile, ocrIntraOpThreads);
-            var ocrWorkers = StartOcrWorkers(queue, ocrResults, outputDir, options, scanLog, ocrWorkerCount, ocrIntraOpThreads, counters, ocrDiagnostics, ocrShadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder);
-            var resultConsumer = Task.Run(() => ConsumeOcrResults(ocrResults, results, counters, outputDir, progress, scanLog, duplicateGuard, options, linked));
+            Task[] ocrWorkers = [];
+            var resultConsumer = Task.CompletedTask;
             var captureCompleted = false;
 
             try
             {
-                await PrepareBackpackAsync(window, profile, progress, counters, scanLog, linked.Token);
+                var preflight = await PrepareBackpackAsync(
+                    window,
+                    profile,
+                    inventoryRecognizer,
+                    visualProfile.ProfileId,
+                    progress,
+                    counters,
+                    scanLog,
+                    linked.Token);
+                var transformClass = VisualProbeEvaluator.TransformClassName(preflight.Anchor.TransformClass);
+                sessionDiagnostics = new ScanSessionDiagnostics
+                {
+                    ClientWidth = visualProfile.ClientWidth,
+                    ClientHeight = visualProfile.ClientHeight,
+                    Dpi = visualProfile.Dpi,
+                    CaptureMode = visualProfile.CaptureModeActive,
+                    VisualProfileId = visualProfile.ProfileId,
+                    PreflightState = "accepted",
+                    VisualTransformClass = transformClass,
+                    AnchorScore = preflight.Anchor.Score,
+                    GridScore = preflight.GridScore,
+                    InventoryCountDetected = preflight.InventoryCount.HasValue,
+                    HueDelta = preflight.Anchor.HueDelta,
+                    SaturationDeltaPct = preflight.Anchor.SaturationDeltaPercent,
+                    ValueDeltaPct = preflight.Anchor.ValueDeltaPercent
+                };
+
+                var shiftedVisualEnvironment = preflight.Anchor.TransformClass != VisualTransformClass.Neutral;
+                if (shiftedVisualEnvironment && options.FastOcrAssist)
+                {
+                    options.FastOcrAssist = false;
+                    scanLog.Write($"Fast OCR assist disabled for shifted visual environment. visualTransformClass={transformClass}; PP-OCR remains authoritative.");
+                }
+
+                if (options.FastOcrAssist)
+                {
+                    fastOcrAssist = FastOcrAssistEngine.TryCreate(options.FastOcrTemplateIndexFile, profile.OrderedRoiKeys(), visualProfile.ProfileId, options.ProfileRouting, scanLog.Write);
+                    fastOcrAssistRecorder = fastOcrAssist?.CreateRecorder(outputDir);
+                    if (fastOcrAssist is not null)
+                    {
+                        scanLog.Write($"Fast OCR assist enabled. Index={fastOcrAssist.IndexFile}, Templates={fastOcrAssist.TemplateCount}, VisualProfile={fastOcrAssist.VisualProfileId}, ProfileRouting={fastOcrAssist.ProfileRoutingMode}, Csv={Path.Combine(outputDir, "ocr_fast_assist.csv")}");
+                    }
+                }
+
+                ocrWorkers = StartOcrWorkers(queue, ocrResults, outputDir, options, scanLog, ocrWorkerCount, ocrIntraOpThreads, counters, ocrDiagnostics, ocrShadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder, shiftedVisualEnvironment);
+                resultConsumer = Task.Run(() => ConsumeOcrResults(ocrResults, results, counters, outputDir, progress, scanLog, duplicateGuard, options, linked));
                 monitor = Task.Run(() => MonitorBackpackAsync(window, profile, linked, progress, counters, scanLog), cancellationToken);
-                var inventoryCount = TryReadInventoryCount(window, profile, inventoryRecognizer, scanLog);
+                var inventoryCount = preflight.InventoryCount ?? TryReadInventoryCount(window, profile, inventoryRecognizer, scanLog);
                 await ProduceCapturesAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog, inventoryCount, traversalMode, linked.Token);
                 captureCompleted = true;
                 Report(progress, counters, "截图采集完成，后台 OCR 正在收尾。");
@@ -292,6 +319,11 @@ public sealed class ScanController
 
         if (pendingException is not null)
         {
+            if (sessionDiagnostics is not null)
+            {
+                pendingException = new ScanSessionDiagnosticException(pendingException, sessionDiagnostics);
+            }
+
             ExceptionDispatchInfo.Capture(pendingException).Throw();
         }
 
@@ -318,40 +350,121 @@ public sealed class ScanController
         };
     }
 
-    private static async Task PrepareBackpackAsync(
+    private static async Task<VisualPreflightResult> PrepareBackpackAsync(
         GameWindow window,
         ScanProfile profile,
+        PaddleOcrRecognizer inventoryRecognizer,
+        string visualProfileId,
         IProgress<ScanProgress> progress,
         Counters counters,
         ScanLog scanLog,
         CancellationToken token)
     {
         Report(progress, counters, "等待背包驱动盘界面。");
-        var dismantlePoint = window.ToScreenPoint(profile.Point("dismantleButton"));
-        var dismantleColor = profile.Color("dismantleButton");
-        scanLog.Write($"Preflight dismantle point={dismantlePoint}, expected={ColorText(dismantleColor)}, current={ColorText(window.GetPixel(dismantlePoint))}");
-
-        try
+        var visualOptions = profile.VisualProbes ?? new VisualProbeOptions();
+        var aspectRatio = window.ClientScreenRect.Height <= 0
+            ? 0
+            : window.ClientScreenRect.Width / (double)window.ClientScreenRect.Height;
+        if (Math.Abs(aspectRatio - (16d / 9d)) > 0.03)
         {
-            await WaitUntilAsync(
-                () => window.GetPixel(dismantlePoint).IsCloseTo(dismantleColor, profile.ColorTolerance),
-                TimeSpan.FromSeconds(profile.WaitForBackpackSeconds),
-                TimeSpan.FromMilliseconds(200),
-                2,
-                token);
-        }
-        catch (TimeoutException ex)
-        {
-            var current = window.GetPixel(dismantlePoint);
-            scanLog.Write($"Preflight failed. Expected dismantle color={ColorText(dismantleColor)}, actual={ColorText(current)}");
-            throw new InvalidOperationException("未检测到驱动盘仓库界面。请先打开背包/仓库的驱动盘页，再开始扫描；本次没有继续点击或滚动。", ex);
+            throw VisualPreflightException.Create(
+                "layout_mismatch",
+                "游戏客户区不是受支持的 16:9 布局，本次没有继续点击或滚动。",
+                default,
+                gridScore: 0,
+                inventoryCountDetected: false,
+                stableFrames: 0,
+                visualOptions.RequiredStableFrames,
+                window,
+                visualProfileId);
         }
 
-        window.LeftClick(window.ToScreenPoint(profile.Point("driveDiscTab")));
-        await Task.Delay(profile.ClickDelayMs, token);
+        var backpackPolicy = visualOptions.BackpackReady ?? new ChromaticProbePolicy();
+        var center = window.ToScreenPoint(profile.Point("dismantleButton"));
+        var radiusX = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Width / (double)profile.StandardScreen[0]));
+        var radiusY = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Height / (double)profile.StandardScreen[1]));
+        var anchorRect = Rectangle.Intersect(
+            window.ClientScreenRect,
+            Rectangle.FromLTRB(center.X - radiusX, center.Y - radiusY, center.X + radiusX + 1, center.Y + radiusY + 1));
+        var expected = profile.Color("dismantleButton");
+        var requiredSignals = Math.Clamp(visualOptions.RequiredSignals, 1, 3);
+        var requiredStableFrames = Math.Max(1, visualOptions.RequiredStableFrames);
+        var poll = TimeSpan.FromMilliseconds(Math.Clamp(visualOptions.PollMilliseconds, 100, 1000));
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Max(1, profile.WaitForBackpackSeconds));
+        var nextInventoryProbe = DateTime.MinValue;
+        var gate = new VisualPreflightGate(requiredSignals, requiredStableFrames);
+        int? inventoryCount = null;
+        var lastAnchor = new ChromaticProbeResult(false, 0, 0, 0, 0, 0, 180, 100, 100, Color.Empty, VisualTransformClass.Unknown, 0, 0);
+        var lastGridScore = 0;
 
-        await ResetListToTopAsync(window, profile, progress, counters, scanLog, token);
-        Report(progress, counters, "已定位到驱动盘列表顶部。");
+        while (DateTime.UtcNow < deadline)
+        {
+            token.ThrowIfCancellationRequested();
+            using var anchorImage = window.Capture(anchorRect);
+            lastAnchor = VisualProbeEvaluator.EvaluateChromaticAnchor(anchorImage, expected, backpackPolicy);
+            if (!inventoryCount.HasValue && DateTime.UtcNow >= nextInventoryProbe)
+            {
+                inventoryCount = TryReadInventoryCount(window, profile, inventoryRecognizer, scanLog);
+                nextInventoryProbe = DateTime.UtcNow + TimeSpan.FromSeconds(1);
+            }
+
+            var recognizedGridCells = CountRecognizedFirstRowCells(window, profile, 3);
+            lastGridScore = (int)Math.Round(recognizedGridCells / 3d * 100);
+            var passedSignals = (lastAnchor.Passed ? 1 : 0)
+                + (inventoryCount.HasValue ? 1 : 0)
+                + (recognizedGridCells >= 2 ? 1 : 0);
+            var accepted = gate.Observe(lastAnchor.Passed, inventoryCount.HasValue, recognizedGridCells >= 2);
+            var transformClass = VisualProbeEvaluator.TransformClassName(lastAnchor.TransformClass);
+            scanLog.WriteEvent(
+                "VISUAL_PREFLIGHT",
+                $"signals={passedSignals}/3, requiredSignals={requiredSignals}, stableFrames={gate.StableFrames}/{requiredStableFrames}, anchorPassed={lastAnchor.Passed}, anchorScore={lastAnchor.Score}, coverage={lastAnchor.Coverage:F3}, median={ColorText(lastAnchor.MedianColor)}, medianHsv=({lastAnchor.MedianHue:F1},{lastAnchor.MedianSaturation:F3},{lastAnchor.MedianValue:F3}), hueDelta={lastAnchor.HueDelta}, saturationDeltaPct={lastAnchor.SaturationDeltaPercent}, valueDeltaPct={lastAnchor.ValueDeltaPercent}, transform={transformClass}, inventoryCountDetected={inventoryCount.HasValue}, gridCells={recognizedGridCells}/3, gridScore={lastGridScore}, capture={window.ActiveCaptureMode}, anchorRect={anchorRect}");
+
+            if (accepted)
+            {
+                scanLog.Write($"Visual preflight accepted. transform={transformClass}, anchorScore={lastAnchor.Score}, gridScore={lastGridScore}, inventoryCountDetected={inventoryCount.HasValue}.");
+                window.LeftClick(window.ToScreenPoint(profile.Point("driveDiscTab")));
+                await Task.Delay(profile.ClickDelayMs, token);
+                await ResetListToTopAsync(window, profile, progress, counters, scanLog, token);
+                Report(progress, counters, "已定位到驱动盘列表顶部。");
+                return new VisualPreflightResult(lastAnchor, lastGridScore, inventoryCount);
+            }
+
+            await Task.Delay(poll, token);
+        }
+
+        var reason = lastAnchor.MeanLuminance < 4 && lastAnchor.LuminanceStandardDeviation < 3
+            ? "capture_unavailable"
+            : !lastAnchor.Passed && (inventoryCount.HasValue || lastGridScore > 0)
+                ? "color_unsupported"
+                : "layout_mismatch";
+        scanLog.Write($"Visual preflight failed. reason={reason}, anchorScore={lastAnchor.Score}, gridScore={lastGridScore}, inventoryCountDetected={inventoryCount.HasValue}, stableFrames={gate.StableFrames}/{requiredStableFrames}.");
+        throw VisualPreflightException.Create(
+            reason,
+            "未能安全确认驱动盘仓库界面。请保持游戏可见并确认仓库布局正常；本次没有继续点击或滚动。",
+            lastAnchor,
+            lastGridScore,
+            inventoryCount.HasValue,
+            gate.StableFrames,
+            requiredStableFrames,
+            window,
+            visualProfileId);
+    }
+
+    private static int CountRecognizedFirstRowCells(GameWindow window, ScanProfile profile, int maximumCells)
+    {
+        var offset = profile.Point("driveDiscOffset");
+        var step = profile.Point("driveDiscStep");
+        var count = 0;
+        for (var column = 0; column < Math.Min(maximumCells, Math.Max(1, profile.VisibleColumns)); column++)
+        {
+            var point = window.ToScreenPoint(new PointF(offset.X + (step.X * column), offset.Y));
+            if (DetectRarityAround(window, profile, point).Rarity is not null)
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private static async Task ResetListToTopAsync(
@@ -364,13 +477,19 @@ public sealed class ScanController
     {
         Report(progress, counters, "正在将驱动盘列表拉到最上方。");
         var scrollTop = window.ToScreenPoint(profile.Point("scrollBarTop"));
-        var scrollBarColor = profile.Color("scrollBar");
+        var listGridRect = ProfileRectangleOrFallback(
+            window,
+            profile,
+            "listGridRect",
+            BuildListGridFallback(window, profile, Math.Max(1, profile.VisibleRows), Math.Max(1, profile.VisibleColumns)));
         window.MoveCursor(window.ToScreenPoint(profile.Point("listWheelArea")));
         var resetDelay = Math.Max(80, profile.ResetToTopWheelDelayMs);
         var reachedTop = false;
+        var consecutiveNoMovement = 0;
         for (var i = 0; i < profile.ResetToTopWheelTicks; i++)
         {
             token.ThrowIfCancellationRequested();
+            var before = CaptureSignature(window, listGridRect);
             scanLog.WriteEvent("RESET_WHEEL", $"tick={i + 1}/{profile.ResetToTopWheelTicks}, delta=120, cursor={window.ToScreenPoint(profile.Point("listWheelArea"))}");
             window.MouseWheel(120);
             if (resetDelay > 0)
@@ -378,7 +497,11 @@ public sealed class ScanController
                 await Task.Delay(resetDelay, token);
             }
 
-            if (i >= 8 && IsScrollAtTop(window, profile, scrollTop, scrollBarColor))
+            var after = CaptureSignature(window, listGridRect);
+            var distance = SignatureDistance(before, after);
+            consecutiveNoMovement = distance <= ListStableTolerance ? consecutiveNoMovement + 1 : 0;
+            scanLog.WriteEvent("RESET_TOP_MOTION", $"tick={i + 1}, signatureDistance={distance}, noMovementFrames={consecutiveNoMovement}/2");
+            if (consecutiveNoMovement >= 2)
             {
                 scanLog.Write($"Reset reached top after {i + 1} wheel ticks.");
                 reachedTop = true;
@@ -889,23 +1012,24 @@ public sealed class ScanController
     {
         var offset = profile.Point("driveDiscOffset");
         var step = profile.Point("driveDiscStep");
-        var scrollBottom = window.ToScreenPoint(profile.Point("scrollBarBottom"));
-        var scrollBarColor = profile.Color("scrollBar");
         var panelRect = window.ToScreenRectangle(profile.Rectangle("detailPanel"));
         var panelChangeProbeRect = ProfileRectangleOrFallback(window, profile, "panelChangeProbeRect", panelRect);
+        var listGridRect = ProfileRectangleOrFallback(window, profile, "listGridRect", BuildListGridFallback(window, profile, 4, Math.Max(1, profile.VisibleColumns)));
         var rois = BuildRois(window, profile, panelRect);
         var statOffset = window.ToScreenPoint(profile.Point("statBackgroundOffset"), clientToScreen: false);
         var statRowBackground = profile.Color("statRowBackground");
         var totalRows = inventoryCount is > 0 ? (int)Math.Ceiling(inventoryCount.Value / 9d) : (int?)null;
         var maxScrollRows = Math.Max(0, (totalRows ?? 69) - 4);
-        scanLog.Write($"Traversal: legacy third-row mode. inventoryCount={inventoryCount?.ToString() ?? "unknown"}, totalRows={totalRows?.ToString() ?? "unknown"}, maxScrollRows={maxScrollRows}, scrollBottom={scrollBottom}, wheelDelta={profile.ScrollWheelDelta}.");
+        scanLog.Write($"Traversal: legacy third-row mode. inventoryCount={inventoryCount?.ToString() ?? "unknown"}, totalRows={totalRows?.ToString() ?? "unknown"}, maxScrollRows={maxScrollRows}, listGrid={listGridRect}, wheelDelta={profile.ScrollWheelDelta}.");
 
         var pass = 0;
+        var atBottom = false;
+        var scrollRows = 0;
         for (var row = 1; row <= 4; row++)
         {
             token.ThrowIfCancellationRequested();
             pass++;
-            var bottomBefore = IsScrollAtBottom(window, profile, scrollBottom, scrollBarColor);
+            var bottomBefore = atBottom;
             scanLog.Write($"Pass {pass}: scan visual row {row}, bottomBefore={bottomBefore}, queued={counters.Queued}, completed={counters.Completed}, failed={counters.Failed}");
             Report(progress, counters, $"扫描第 {pass} 轮：可视第 {row} 行{(bottomBefore ? "，已到底" : "")}。");
 
@@ -940,17 +1064,26 @@ public sealed class ScanController
 
             if (row == 3)
             {
-                var bottomAfterRow = IsScrollAtBottom(window, profile, scrollBottom, scrollBarColor);
-                if (!bottomAfterRow)
+                if (!atBottom && scrollRows < maxScrollRows)
                 {
+                    var before = CaptureSignature(window, listGridRect);
                     scanLog.Write($"Scroll: legacy third-row wheel after pass {pass}, delta={profile.ScrollWheelDelta}.");
                     scanLog.WriteEvent("LEGACY_WHEEL", $"afterPass={pass}, visualRow={row}, delta={profile.ScrollWheelDelta}");
                     window.MouseWheel(profile.ScrollWheelDelta);
                     await Task.Delay(profile.WheelDelayMs, token);
-                    row--;
+                    var after = CaptureSignature(window, listGridRect);
+                    var distance = SignatureDistance(before, after);
+                    atBottom = distance <= ListStableTolerance;
+                    scanLog.WriteEvent("LEGACY_BOTTOM_MOTION", $"afterPass={pass}, signatureDistance={distance}, atBottom={atBottom}");
+                    if (!atBottom)
+                    {
+                        scrollRows++;
+                        row--;
+                    }
                 }
                 else
                 {
+                    atBottom = true;
                     scanLog.Write("Bottom reached after visual row 3; scanning final visual row 4 next.");
                 }
             }
@@ -1059,7 +1192,7 @@ public sealed class ScanController
             var rarity = rarityProbe.Rarity;
             if (rarity is null || options.ShowDebugImages || counters.Visited % 50 == 0)
             {
-                scanLog.Write($"Probe pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, point={clickPoint}, rarity={rarity ?? "null"}, best={ColorText(rarityProbe.BestColor)}, bestMatch={rarityProbe.BestCandidate}, delta={rarityProbe.BestDelta}, fullScan={rarityProbe.FullScan}, bottom={isBottom}");
+                scanLog.Write($"Probe pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, point={clickPoint}, rarity={rarity ?? "null"}, best={ColorText(rarityProbe.BestColor)}, bestMatch={rarityProbe.BestCandidate}, score={rarityProbe.BestScore}, secondScore={rarityProbe.SecondScore}, margin={rarityProbe.Margin}, fullScan={rarityProbe.FullScan}, bottom={isBottom}");
             }
             if (rarity is null)
             {
@@ -1178,16 +1311,6 @@ public sealed class ScanController
         }
 
         return RowScanResult.Completed;
-    }
-
-    private static bool IsScrollAtBottom(GameWindow window, ScanProfile profile, System.Drawing.Point scrollBottom, Color scrollBarColor)
-    {
-        return window.GetPixel(scrollBottom).IsCloseTo(scrollBarColor, profile.ColorTolerance);
-    }
-
-    private static bool IsScrollAtTop(GameWindow window, ScanProfile profile, System.Drawing.Point scrollTop, Color scrollBarColor)
-    {
-        return window.GetPixel(scrollTop).IsCloseTo(scrollBarColor, profile.ColorTolerance);
     }
 
     private static ScanTraversalMode ResolveTraversalMode(ScanOptions options, ScanProfile profile)
@@ -2018,6 +2141,11 @@ public sealed class ScanController
         return value.HasValue ? value.Value.ToString("F1") : "NA";
     }
 
+    private static string FormatOptionalInt(int? value)
+    {
+        return value.HasValue ? value.Value.ToString() : "NA";
+    }
+
     private static int AverageSignatureDistance(IReadOnlyList<ImageSignature> beforeRows, IReadOnlyList<ImageSignature> afterRows, IReadOnlyList<(int Before, int After)> pairs)
     {
         var sum = 0;
@@ -2220,58 +2348,38 @@ public sealed class ScanController
     private static RarityProbe DetectRarityAround(GameWindow window, ScanProfile profile, System.Drawing.Point center)
     {
         const int radius = 36;
-        const int rarityScoreTolerance = 42;
         using var image = window.Capture(new Rectangle(center.X - radius, center.Y - radius, radius * 2 + 1, radius * 2 + 1));
         var candidates = new[]
         {
-            new RarityColor("S", profile.Color("rarityS")),
-            new RarityColor("A", profile.Color("rarityA")),
-            new RarityColor("B", profile.Color("rarityB")),
+            new VisualRarityCandidate("S", profile.Color("rarityS")),
+            new VisualRarityCandidate("A", profile.Color("rarityA")),
+            new VisualRarityCandidate("B", profile.Color("rarityB")),
         };
 
-        var best = ProbeBestRarity(image, candidates, FixedRaritySamplePoints(image.Width, image.Height));
-        if (best.BestDelta <= rarityScoreTolerance)
+        var rarityPolicy = (profile.VisualProbes ?? new VisualProbeOptions()).Rarity ?? new RarityProbePolicy();
+        var best = ProbeBestRarity(image, candidates, FixedRaritySamplePoints(image.Width, image.Height), rarityPolicy);
+        if (best.Rarity is not null)
         {
-            return best with { Rarity = best.BestCandidate, FullScan = false };
+            return best with { FullScan = false };
         }
 
-        best = ProbeBestRarity(image, candidates, CenterRaritySamplePoints(image.Width, image.Height));
-        if (best.BestDelta <= rarityScoreTolerance)
+        best = ProbeBestRarity(image, candidates, CenterRaritySamplePoints(image.Width, image.Height), rarityPolicy);
+        if (best.Rarity is not null)
         {
-            return best with { Rarity = best.BestCandidate, FullScan = false };
+            return best with { FullScan = false };
         }
 
-        best = ProbeBestRarity(image, candidates, FullRaritySamplePoints(image.Width, image.Height));
-        return best with
-        {
-            Rarity = best.BestDelta <= rarityScoreTolerance ? best.BestCandidate : null,
-            FullScan = true
-        };
+        return ProbeBestRarity(image, candidates, FullRaritySamplePoints(image.Width, image.Height), rarityPolicy) with { FullScan = true };
     }
 
-    private static RarityProbe ProbeBestRarity(Bitmap image, IReadOnlyList<RarityColor> candidates, IEnumerable<System.Drawing.Point> points)
+    private static RarityProbe ProbeBestRarity(
+        Bitmap image,
+        IReadOnlyList<VisualRarityCandidate> candidates,
+        IEnumerable<System.Drawing.Point> points,
+        RarityProbePolicy policy)
     {
-        var bestDelta = int.MaxValue;
-        var bestCandidate = "";
-        var bestColor = Color.Empty;
-        foreach (var point in points)
-        {
-            var x = Math.Clamp(point.X, 0, image.Width - 1);
-            var y = Math.Clamp(point.Y, 0, image.Height - 1);
-            var color = image.GetPixel(x, y);
-            foreach (var candidate in candidates)
-            {
-                var delta = RarityColorScore(color, candidate.Color);
-                if (delta < bestDelta)
-                {
-                    bestDelta = delta;
-                    bestCandidate = candidate.Rarity;
-                    bestColor = color;
-                }
-            }
-        }
-
-        return new RarityProbe(null, bestColor, bestCandidate, bestDelta, FullScan: false);
+        var result = VisualProbeEvaluator.EvaluateRarity(image, candidates, points, policy);
+        return new RarityProbe(result.Rarity, result.BestColor, result.BestCandidate, result.BestScore, result.SecondScore, result.Margin, FullScan: false);
     }
 
     private static IEnumerable<System.Drawing.Point> FixedRaritySamplePoints(int width, int height)
@@ -2312,71 +2420,6 @@ public sealed class ScanController
                 yield return new System.Drawing.Point(x, y);
             }
         }
-    }
-
-    private static int RarityColorScore(Color current, Color expected)
-    {
-        var channelDelta = MaxChannelDelta(current, expected);
-        var hueScore = HueScore(current, expected);
-        return Math.Min(channelDelta, hueScore);
-    }
-
-    private static int HueScore(Color current, Color expected)
-    {
-        var currentHsv = ToHsv(current);
-        if (currentHsv.Saturation < 0.35f || currentHsv.Value < 0.20f)
-        {
-            return 999;
-        }
-
-        var expectedHsv = ToHsv(expected);
-        var hueDelta = Math.Abs(currentHsv.Hue - expectedHsv.Hue);
-        hueDelta = Math.Min(hueDelta, 360f - hueDelta);
-        var saturationPenalty = currentHsv.Saturation < 0.55f ? (0.55f - currentHsv.Saturation) * 80f : 0f;
-        var valuePenalty = currentHsv.Value < 0.35f ? (0.35f - currentHsv.Value) * 80f : 0f;
-        return (int)Math.Round(hueDelta + saturationPenalty + valuePenalty);
-    }
-
-    private static HsvColor ToHsv(Color color)
-    {
-        var r = color.R / 255f;
-        var g = color.G / 255f;
-        var b = color.B / 255f;
-        var max = Math.Max(r, Math.Max(g, b));
-        var min = Math.Min(r, Math.Min(g, b));
-        var delta = max - min;
-        var hue = 0f;
-
-        if (delta > 0.0001f)
-        {
-            if (Math.Abs(max - r) < 0.0001f)
-            {
-                hue = 60f * (((g - b) / delta) % 6f);
-            }
-            else if (Math.Abs(max - g) < 0.0001f)
-            {
-                hue = 60f * (((b - r) / delta) + 2f);
-            }
-            else
-            {
-                hue = 60f * (((r - g) / delta) + 4f);
-            }
-
-            if (hue < 0f)
-            {
-                hue += 360f;
-            }
-        }
-
-        var saturation = max <= 0.0001f ? 0f : delta / max;
-        return new HsvColor(hue, saturation, max);
-    }
-
-    private static int MaxChannelDelta(Color current, Color expected)
-    {
-        return Math.Max(
-            Math.Abs(current.R - expected.R),
-            Math.Max(Math.Abs(current.G - expected.G), Math.Abs(current.B - expected.B)));
     }
 
     private static string ColorText(Color color)
@@ -2636,19 +2679,12 @@ public sealed class ScanController
 
     private static int SignatureDistance(ImageSignature left, ImageSignature right)
     {
-        var count = Math.Min(left.Samples.Length, right.Samples.Length);
-        if (count == 0)
+        if (left.Samples.Length == 0 || right.Samples.Length == 0)
         {
             return left.Hash == right.Hash ? 0 : int.MaxValue;
         }
 
-        var sum = 0;
-        for (var i = 0; i < count; i++)
-        {
-            sum += Math.Abs(left.Samples[i] - right.Samples[i]);
-        }
-
-        return sum / count;
+        return VisualProbeEvaluator.MeasureLuminanceMovement(left.Samples, right.Samples);
     }
 
     private static Rectangle RelativeIntersection(Rectangle childScreenRect, Rectangle parentScreenRect, System.Drawing.Size imageSize)
@@ -2708,14 +2744,20 @@ public sealed class ScanController
                 runtimeState.PanelStability.MarkSafetyFallback();
                 scanLog.WriteEvent("PANEL_STALE_RETRY", $"attempt={attempt}/{maxAttempts - 1}, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}, point={clickPoint}");
                 await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
-                RefreshSelectionForPanelRetry(window, profile, panelRect, rois, panelChangeProbeRect, scanLog, clickPoint, selectionRefreshPoint, pass, row, col, maxColumns, logicalRow, visibleTopText, viewportStateText, token, out activePreviousPanelSignatures, out activeSelectionProbeRect, out activeBeforeSelectionSignature);
+                var refresh = await RefreshSelectionForPanelRetryAsync(window, profile, panelRect, rois, panelChangeProbeRect, scanLog, clickPoint, selectionRefreshPoint, pass, row, col, maxColumns, logicalRow, visibleTopText, viewportStateText, token);
+                activePreviousPanelSignatures = refresh.PanelSignatures;
+                activeSelectionProbeRect = refresh.SelectionProbeRect;
+                activeBeforeSelectionSignature = refresh.SelectionSignature;
             }
             catch (TimeoutException ex) when (attempt < maxAttempts)
             {
                 runtimeState.PanelStability.MarkSafetyFallback();
                 scanLog.WriteEvent("PANEL_CAPTURE_RETRY", $"attempt={attempt}/{maxAttempts - 1}, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}, point={clickPoint}, reason={ex.Message}");
                 await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
-                RefreshSelectionForPanelRetry(window, profile, panelRect, rois, panelChangeProbeRect, scanLog, clickPoint, selectionRefreshPoint, pass, row, col, maxColumns, logicalRow, visibleTopText, viewportStateText, token, out activePreviousPanelSignatures, out activeSelectionProbeRect, out activeBeforeSelectionSignature);
+                var refresh = await RefreshSelectionForPanelRetryAsync(window, profile, panelRect, rois, panelChangeProbeRect, scanLog, clickPoint, selectionRefreshPoint, pass, row, col, maxColumns, logicalRow, visibleTopText, viewportStateText, token);
+                activePreviousPanelSignatures = refresh.PanelSignatures;
+                activeSelectionProbeRect = refresh.SelectionProbeRect;
+                activeBeforeSelectionSignature = refresh.SelectionSignature;
             }
             catch (TimeoutException ex)
             {
@@ -2735,7 +2777,7 @@ public sealed class ScanController
         throw new UnreachableException("Panel capture retry loop exhausted without returning or throwing.");
     }
 
-    private static void RefreshSelectionForPanelRetry(
+    private static async Task<SelectionRefreshCapture> RefreshSelectionForPanelRetryAsync(
         GameWindow window,
         ScanProfile profile,
         Rectangle panelRect,
@@ -2751,33 +2793,67 @@ public sealed class ScanController
         int? logicalRow,
         string visibleTopText,
         string viewportStateText,
-        CancellationToken token,
-        out ImageSignature[]? refreshedPanelSignatures,
-        out Rectangle refreshedSelectionProbeRect,
-        out ImageSignature refreshedSelectionSignature)
+        CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var delayMs = Math.Max(80, profile.ClickDelayMs);
+        var targetPanelSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
+        ImageSignature[] refreshedPanelSignatures = targetPanelSignatures;
         if (selectionRefreshPoint is { } refreshPoint && refreshPoint != clickPoint)
         {
             scanLog.WriteEvent("PANEL_SELECTION_REFRESH", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}, refreshPoint={refreshPoint}, targetPoint={clickPoint}");
             window.MoveCursor(refreshPoint);
             window.LeftClickCurrent();
-            Thread.Sleep(delayMs);
-            refreshedPanelSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
-            refreshedSelectionProbeRect = SelectionProbeRect(window, clickPoint);
-            refreshedSelectionSignature = CaptureScreenSignature(refreshedSelectionProbeRect);
-        }
-        else
-        {
-            refreshedPanelSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
-            refreshedSelectionProbeRect = SelectionProbeRect(window, clickPoint);
-            refreshedSelectionSignature = CaptureScreenSignature(refreshedSelectionProbeRect);
+
+            var maximumWaitMs = SelectionRefreshTiming.ResolveMaximumWaitMilliseconds(profile.LoadTimeoutMs);
+            var pollMs = Math.Max(5, profile.LoadPollMs);
+            var wait = Stopwatch.StartNew();
+            var gate = new SelectionRefreshGate(requiredStableFrames: 2);
+            ImageSignature[]? previousObservedSignatures = null;
+            var frameCount = 0;
+            while (wait.ElapsedMilliseconds < maximumWaitMs)
+            {
+                token.ThrowIfCancellationRequested();
+                var currentSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
+                frameCount++;
+                var changedFromTarget = ProbeChangeDistance(targetPanelSignatures, currentSignatures) > PanelStrongChangeTolerance;
+                var stableWithPrevious = previousObservedSignatures is not null
+                    && AreProbesStable(previousObservedSignatures, currentSignatures);
+                if (gate.Observe(changedFromTarget, stableWithPrevious))
+                {
+                    refreshedPanelSignatures = currentSignatures;
+                    scanLog.WriteEvent(
+                        "PANEL_SELECTION_REFRESH_READY",
+                        $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, elapsedMs={wait.Elapsed.TotalMilliseconds:F1}, stableFrames={gate.StableFrames}/2, frameCount={frameCount}");
+                    break;
+                }
+
+                previousObservedSignatures = currentSignatures;
+                var remainingMs = maximumWaitMs - (int)wait.ElapsedMilliseconds;
+                if (remainingMs <= 0)
+                {
+                    break;
+                }
+
+                await Task.Delay(Math.Min(pollMs, remainingMs), token);
+            }
+
+            if (!gate.Accepted)
+            {
+                scanLog.WriteEvent(
+                    "PANEL_SELECTION_REFRESH_TIMEOUT",
+                    $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, elapsedMs={wait.Elapsed.TotalMilliseconds:F1}, timeoutMs={maximumWaitMs}, changedFromTarget={gate.ChangedFromTarget}, stableFrames={gate.StableFrames}/2, frameCount={frameCount}, baseline=target_snapshot");
+            }
         }
 
         token.ThrowIfCancellationRequested();
+        var refreshedSelectionProbeRect = SelectionProbeRect(window, clickPoint);
+        var refreshedSelectionSignature = CaptureScreenSignature(refreshedSelectionProbeRect);
         window.MoveCursor(clickPoint);
         window.LeftClickCurrent();
+        return new SelectionRefreshCapture(
+            refreshedPanelSignatures,
+            refreshedSelectionProbeRect,
+            refreshedSelectionSignature);
     }
 
     private static Rectangle ClampRectangle(Rectangle rect, System.Drawing.Size bounds)
@@ -2903,6 +2979,8 @@ public sealed class ScanController
         var acceptReason = "changed_stable_full_roi";
         var acceptGateReason = "waiting_for_panel_change";
         var lastVisibleCount = 0;
+        var roiKeys = profile.OrderedRoiKeys();
+        var lastRoiVisibility = new VisibleRoiEvaluation(0, roiKeys.FirstOrDefault(), null);
         var quickRejectReason = runtimeState.QuickPanelAcceptEnabled ? "waiting_for_panel_change" : "disabled";
         var unchangedFallbackDelay = TimeSpan.FromMilliseconds(Math.Clamp(
             profile.PanelUnchangedFallbackMs,
@@ -3095,8 +3173,15 @@ public sealed class ScanController
             signatureMilliseconds += signatureWatch.Elapsed.TotalMilliseconds;
 
             var visibleWatch = Stopwatch.StartNew();
-            var visibleCount = CountVisibleRois(image, rois, statOffset, statRowBackground, profile.ColorTolerance);
+            var roiVisibility = EvaluateVisibleRois(
+                image,
+                rois,
+                roiKeys,
+                statOffset,
+                (profile.VisualProbes ?? new VisualProbeOptions()).RowPresence ?? new RowPresenceProbePolicy());
+            var visibleCount = roiVisibility.Count;
             lastVisibleCount = visibleCount;
+            lastRoiVisibility = roiVisibility;
             visibleWatch.Stop();
             visibleRoiMilliseconds += visibleWatch.Elapsed.TotalMilliseconds;
             if (visibleCount == rois.Count)
@@ -3222,6 +3307,8 @@ public sealed class ScanController
         var timeoutException = new PanelCaptureTimeoutException(
             lastVisibleCount,
             rois.Count,
+            lastRoiVisibility.FirstMissingRoi,
+            lastRoiVisibility.FirstMissingProbe,
             acceptGateReason,
             sawPanelChange,
             selectionChanged,
@@ -3230,7 +3317,7 @@ public sealed class ScanController
             frameCount);
         scanLog.WriteEvent(
             "PANEL_CAPTURE_TIMEOUT",
-            $"visibleRois={timeoutException.VisibleRois}/{timeoutException.TotalRois}, acceptGateReason={timeoutException.AcceptGateReason}, sawPanelChange={timeoutException.SawPanelChange}, selectionChanged={timeoutException.SelectionChanged}, stableFrames={timeoutException.StableFrames}/{timeoutException.RequiredStableFrames}, frameCount={timeoutException.FrameCount}, captureMode={window.ActiveCaptureMode}");
+            $"visibleRois={timeoutException.VisibleRois}/{timeoutException.TotalRois}, firstMissingRoi={timeoutException.FirstMissingRoi ?? "none"}, referenceLuma={FormatOptionalInt(timeoutException.ReferenceLuma)}, candidateLuma={FormatOptionalInt(timeoutException.CandidateLuma)}, lumaDelta={FormatOptionalInt(timeoutException.LumaDelta)}, allowedLumaDelta={FormatOptionalInt(timeoutException.AllowedLumaDelta)}, edgeDensityPermille={FormatOptionalInt(timeoutException.EdgeDensityPermille)}, minimumEdgeDensityPermille={FormatOptionalInt(timeoutException.MinimumEdgeDensityPermille)}, acceptGateReason={timeoutException.AcceptGateReason}, sawPanelChange={timeoutException.SawPanelChange}, selectionChanged={timeoutException.SelectionChanged}, stableFrames={timeoutException.StableFrames}/{timeoutException.RequiredStableFrames}, frameCount={timeoutException.FrameCount}, captureMode={window.ActiveCaptureMode}");
         throw timeoutException;
     }
 
@@ -3245,46 +3332,63 @@ public sealed class ScanController
             .ToArray();
     }
 
-    private static int CountVisibleRois(Bitmap image, IReadOnlyList<CvRect> rois, System.Drawing.Point statOffset, Color statRowBackground, int tolerance)
+    private sealed record VisibleRoiEvaluation(
+        int Count,
+        string? FirstMissingRoi,
+        RowPresenceProbeResult? FirstMissingProbe);
+
+    private static VisibleRoiEvaluation EvaluateVisibleRois(
+        Bitmap image,
+        IReadOnlyList<CvRect> rois,
+        IReadOnlyList<string> roiKeys,
+        System.Drawing.Point statOffset,
+        RowPresenceProbePolicy policy)
     {
         var count = 0;
-        var rowPresenceTolerance = Math.Min(tolerance, 10);
+        var referenceRoi = rois.Count > 2 ? rois[2] : rois[0];
         foreach (var roi in rois)
         {
-            var x = Math.Clamp(roi.X + statOffset.X, 0, image.Width - 1);
-            var y = Math.Clamp(roi.Y + statOffset.Y, 0, image.Height - 1);
-            if (count <= 3 || image.GetPixel(x, y).IsCloseTo(statRowBackground, rowPresenceTolerance))
+            var probe = count <= 3
+                ? null
+                : VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, referenceRoi, roi, statOffset, policy);
+            if (probe is null || probe.Present)
             {
                 count++;
             }
             else
             {
-                break;
+                return new VisibleRoiEvaluation(count, roiKeys.ElementAtOrDefault(count), probe);
             }
         }
 
-        return count;
+        return new VisibleRoiEvaluation(count, null, null);
     }
 
-    private static int CountVisibleRois(CapturedFrame image, IReadOnlyList<CvRect> rois, System.Drawing.Point statOffset, Color statRowBackground, int tolerance)
+    private static VisibleRoiEvaluation EvaluateVisibleRois(
+        CapturedFrame image,
+        IReadOnlyList<CvRect> rois,
+        IReadOnlyList<string> roiKeys,
+        System.Drawing.Point statOffset,
+        RowPresenceProbePolicy policy)
     {
         var count = 0;
-        var rowPresenceTolerance = Math.Min(tolerance, 10);
+        var referenceRoi = rois.Count > 2 ? rois[2] : rois[0];
         foreach (var roi in rois)
         {
-            var x = Math.Clamp(roi.X + statOffset.X, 0, image.Width - 1);
-            var y = Math.Clamp(roi.Y + statOffset.Y, 0, image.Height - 1);
-            if (count <= 3 || image.GetPixel(x, y).IsCloseTo(statRowBackground, rowPresenceTolerance))
+            var probe = count <= 3
+                ? null
+                : VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, referenceRoi, roi, statOffset, policy);
+            if (probe is null || probe.Present)
             {
                 count++;
             }
             else
             {
-                break;
+                return new VisibleRoiEvaluation(count, roiKeys.ElementAtOrDefault(count), probe);
             }
         }
 
-        return count;
+        return new VisibleRoiEvaluation(count, null, null);
     }
 
     private Task[] StartOcrWorkers(
@@ -3300,10 +3404,11 @@ public sealed class ScanController
         OcrShadowDatasetWriter? shadowDataset,
         FastOcrShadowRecorder? fastOcrShadow,
         FastOcrAssistEngine? fastOcrAssist,
-        FastOcrAssistRecorder? fastOcrAssistRecorder)
+        FastOcrAssistRecorder? fastOcrAssistRecorder,
+        bool normalizedRetryEnabled)
     {
         return Enumerable.Range(1, workerCount)
-            .Select(workerId => Task.Run(() => ConsumeOcrWorker(queue, ocrResults, outputDir, options, scanLog, workerId, ocrIntraOpThreads, counters, diagnostics, shadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder)))
+            .Select(workerId => Task.Run(() => ConsumeOcrWorker(queue, ocrResults, outputDir, options, scanLog, workerId, ocrIntraOpThreads, counters, diagnostics, shadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder, normalizedRetryEnabled)))
             .ToArray();
     }
 
@@ -3334,7 +3439,8 @@ public sealed class ScanController
         OcrShadowDatasetWriter? shadowDataset,
         FastOcrShadowRecorder? fastOcrShadow,
         FastOcrAssistEngine? fastOcrAssist,
-        FastOcrAssistRecorder? fastOcrAssistRecorder)
+        FastOcrAssistRecorder? fastOcrAssistRecorder,
+        bool normalizedRetryEnabled)
     {
         using var recognizer = new PaddleOcrRecognizer(AppPaths.ModelFile, AppPaths.CharacterDictFile, ocrIntraOpThreads);
         var cleaner = new DriveDiscCleaner(_wikiData);
@@ -3397,6 +3503,25 @@ public sealed class ScanController
                     }
                     catch (Exception ex)
                     {
+                        if (normalizedRetryEnabled && NeedsNormalizedOcrRetry(ocr))
+                        {
+                            try
+                            {
+                                using var normalized = VisualProbeEvaluator.NormalizeLuminance(capture.Image);
+                                var retryOcr = recognizer.Recognize(normalized, capture.Rois);
+                                var retryExport = cleaner.Clean(capture.Index, capture.Rarity, retryOcr);
+                                scanLog.WriteEvent("OCR_LUMINANCE_RETRY_ACCEPTED", $"index={capture.Index}, originalError={SanitizeLogValue(ex.Message)}, emptyOrLowConfidence={NeedsNormalizedOcrRetry(ocr)}");
+                                TryWriteOcrShadowDataset(shadowDataset, capture, retryOcr, retryExport, scanLog);
+                                TryWriteFastOcrShadow(fastOcrShadow, capture, retryOcr, retryExport, scanLog);
+                                ocrResults.Add(OcrWorkResult.Success(capture.Index, retryExport, BuildOcrDetail(capture, retryOcr)));
+                                continue;
+                            }
+                            catch (Exception retryException)
+                            {
+                                scanLog.WriteEvent("OCR_LUMINANCE_RETRY_REJECTED", $"index={capture.Index}, originalError={SanitizeLogValue(ex.Message)}, retryError={SanitizeLogValue(retryException.Message)}");
+                            }
+                        }
+
                         var detail = BuildErrorDetail(capture, ocr, ex);
                         ocrResults.Add(OcrWorkResult.Failure(capture.Index, detail, ex.Message));
                     }
@@ -3687,14 +3812,25 @@ public sealed class ScanController
         Counters counters,
         ScanLog scanLog)
     {
+        var visualOptions = profile.VisualProbes ?? new VisualProbeOptions();
+        var backpackPolicy = visualOptions.BackpackReady ?? new ChromaticProbePolicy();
         var dismantlePoint = window.ToScreenPoint(profile.Point("dismantleButton"));
         var dismantleColor = profile.Color("dismantleButton");
+        var radiusX = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Width / (double)profile.StandardScreen[0]));
+        var radiusY = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Height / (double)profile.StandardScreen[1]));
+        var probeRect = Rectangle.Intersect(
+            window.ClientScreenRect,
+            Rectangle.FromLTRB(dismantlePoint.X - radiusX, dismantlePoint.Y - radiusY, dismantlePoint.X + radiusX + 1, dismantlePoint.Y + radiusY + 1));
+        var failedFrames = 0;
 
         while (!linked.IsCancellationRequested)
         {
-            if (!window.GetPixel(dismantlePoint).IsCloseTo(dismantleColor, profile.ColorTolerance))
+            using var image = window.Capture(probeRect);
+            var probe = VisualProbeEvaluator.EvaluateChromaticAnchor(image, dismantleColor, backpackPolicy);
+            failedFrames = probe.Passed ? 0 : failedFrames + 1;
+            if (failedFrames >= 2)
             {
-                scanLog.Write($"Backpack monitor canceled scan. point={dismantlePoint}, current={ColorText(window.GetPixel(dismantlePoint))}, expected={ColorText(dismantleColor)}");
+                scanLog.Write($"Backpack monitor canceled scan. rect={probeRect}, anchorScore={probe.Score}, coverage={probe.Coverage:F3}, median={ColorText(probe.MedianColor)}, expected={ColorText(dismantleColor)}, failedFrames={failedFrames}");
                 Report(progress, counters, "检测到背包界面已退出。");
                 linked.Cancel();
                 return;
@@ -3806,6 +3942,16 @@ public sealed class ScanController
         int EffectiveScrollTickDelayMs)
     {
         public string VisualProfileId { get; set; } = "";
+    }
+
+    private static bool NeedsNormalizedOcrRetry(IReadOnlyList<OcrResult> ocr)
+    {
+        return ocr.Any(result => string.IsNullOrWhiteSpace(result.Text) || result.Score < 0.45f);
+    }
+
+    private static string SanitizeLogValue(string value)
+    {
+        return value.Replace('\r', ' ').Replace('\n', ' ').Replace(',', ';');
     }
 
     private enum PanelStabilitySource
@@ -4189,6 +4335,11 @@ public sealed class ScanController
         }
     }
 
+    private sealed record SelectionRefreshCapture(
+        ImageSignature[] PanelSignatures,
+        Rectangle SelectionProbeRect,
+        ImageSignature SelectionSignature);
+
     private sealed class StalePanelException : TimeoutException
     {
         public StalePanelException(string message)
@@ -4202,6 +4353,8 @@ public sealed class ScanController
         public PanelCaptureTimeoutException(
             int visibleRois,
             int totalRois,
+            string? firstMissingRoi,
+            RowPresenceProbeResult? firstMissingProbe,
             string acceptGateReason,
             bool sawPanelChange,
             bool selectionChanged,
@@ -4212,6 +4365,13 @@ public sealed class ScanController
         {
             VisibleRois = visibleRois;
             TotalRois = totalRois;
+            FirstMissingRoi = firstMissingRoi;
+            ReferenceLuma = firstMissingProbe?.ReferenceLuma;
+            CandidateLuma = firstMissingProbe?.CandidateLuma;
+            LumaDelta = firstMissingProbe?.LumaDelta;
+            AllowedLumaDelta = firstMissingProbe?.AllowedLumaDelta;
+            EdgeDensityPermille = firstMissingProbe?.EdgeDensityPermille;
+            MinimumEdgeDensityPermille = firstMissingProbe?.MinimumEdgeDensityPermille;
             AcceptGateReason = acceptGateReason;
             SawPanelChange = sawPanelChange;
             SelectionChanged = selectionChanged;
@@ -4222,6 +4382,13 @@ public sealed class ScanController
 
         public int VisibleRois { get; }
         public int TotalRois { get; }
+        public string? FirstMissingRoi { get; }
+        public int? ReferenceLuma { get; }
+        public int? CandidateLuma { get; }
+        public int? LumaDelta { get; }
+        public int? AllowedLumaDelta { get; }
+        public int? EdgeDensityPermille { get; }
+        public int? MinimumEdgeDensityPermille { get; }
         public string AcceptGateReason { get; }
         public bool SawPanelChange { get; }
         public bool SelectionChanged { get; }
@@ -4257,6 +4424,13 @@ public sealed class ScanController
                 maxColumns,
                 timeout?.VisibleRois ?? 0,
                 timeout?.TotalRois ?? 0,
+                timeout?.FirstMissingRoi,
+                timeout?.ReferenceLuma,
+                timeout?.CandidateLuma,
+                timeout?.LumaDelta,
+                timeout?.AllowedLumaDelta,
+                timeout?.EdgeDensityPermille,
+                timeout?.MinimumEdgeDensityPermille,
                 timeout?.AcceptGateReason ?? "unknown",
                 timeout?.SawPanelChange ?? false,
                 timeout?.SelectionChanged ?? false,
@@ -4307,13 +4481,16 @@ public sealed class ScanController
         Stop
     }
 
-    private readonly record struct RarityColor(string Rarity, Color Color);
-
     private readonly record struct OverlapRowCandidate(int LogicalRow, int VisualRow);
 
-    private readonly record struct RarityProbe(string? Rarity, Color BestColor, string BestCandidate, int BestDelta, bool FullScan);
-
-    private readonly record struct HsvColor(float Hue, float Saturation, float Value);
+    private readonly record struct RarityProbe(
+        string? Rarity,
+        Color BestColor,
+        string BestCandidate,
+        int BestScore,
+        int SecondScore,
+        int Margin,
+        bool FullScan);
 
     private sealed class ScanLog : IDisposable
     {

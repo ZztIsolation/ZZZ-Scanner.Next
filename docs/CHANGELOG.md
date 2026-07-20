@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Scanner 1.0.40 将仓库预检从拆解按钮单个固定 RGB 像素改为活动捕获后端上的青色区域、仓库数量 OCR 和首行品质区域三信号门禁；任意两个信号需连续稳定两帧，失败时不会点击或滚动。
+- 新增 `neutral/highlight_clipped/warm_shifted/saturation_shifted/contrast_shifted/unknown` 捕获空间分类。常见 HDR 高光裁切、夜间模式和温和显卡色彩调整自动兼容；黑帧、反色、极端滤镜或无法确认的布局继续保守停止。
+- 非中性色彩环境自动关闭 Fast OCR assist，以 PP-OCR 为权威识别；仅在原始识别为空或低置信度且清洗失败时执行一次 P2-P98 亮度归一化重试，重试结果仍经过完整字段和槽位校验。
+- 滚动端点改用列表图像签名的连续无位移判断，副属性行改用相对背景亮度与文字边缘判断；`scan_complete` 和所有扫描失败会返回预检状态、色彩分类、脱敏分数、窗口尺寸、DPI、捕获后端和视觉配置。
+- 本地日志保留完整 HSV 与判定过程；Web 遥测不包含截图、OCR 文本、仓库数量、原始 RGB、本机路径或异常堆栈。原生回归新增常见色彩变换、HDR 裁切、品质歧义、预检状态机、相对行检测和亮度归一化覆盖。
+
 - Scanner 1.0.39 为详情面板超时增加结构化诊断：最后一次 `visibleRois/totalRois`、接受门槛、面板/选择变化状态、稳定帧、三次重试、捕获帧数、窗口客户区、DPI、实际捕获后端和视觉配置 ID 会同时写入 `PANEL_CAPTURE_TIMEOUT` 本地日志并通过现有 `scan_error.details` 发送给本机网页。
 - `scan_complete` 新增聚合 `queued`、`completed` 和安全的会话诊断；现有字段保持兼容。网页可以只上传这些脱敏字段，不需要也不会从 Scanner 读取驱动盘数组、截图、OCR 文本、本机目录、完整日志或异常堆栈。
 - 回归项目新增结构化面板超时诊断契约，当前 17 项 Helper/Scanner 回归测试全部通过。正式 Windows CI 使用 `-RequireVCRedistLayout` 构建并通过双包体积门禁：FDD `21756850` 字节、SHA-256 `6488a032b22c9cf907ea3637927b3c8df3b9bd7a04162818c3244cec80d57ea0`；自包含包 `84775658` 字节、SHA-256 `cc1552a38536b764373c24821af003b7e85adb097f3611653a86783c2a06b037`。构建报告确认 `vcRuntimeSource=vc-redist-layout`；System32 fallback 产物不得作为正式发布资产。Helper 继续沿用已经发布的 1.2.1，不用本次流水线中同版本的重复构建覆盖。

@@ -33,6 +33,12 @@ internal static class Program
             ("WebSocket origin and token handshake", TestWebSocketHandshakeAsync),
             ("fast mode defaults", TestFastModeDefaultsAsync),
             ("strict profile selection", TestStrictProfileSelectionAsync),
+            ("visual probe display transforms", TestVisualProbeDisplayTransformsAsync),
+            ("privacy-safe visual fixtures", TestPrivacySafeVisualFixturesAsync),
+            ("visual preflight gate", TestVisualPreflightGateAsync),
+            ("visual rarity ambiguity", TestVisualRarityAmbiguityAsync),
+            ("relative row presence", TestRelativeRowPresenceAsync),
+            ("luminance normalization", TestLuminanceNormalizationAsync),
             ("structured panel timeout diagnostics", TestPanelTimeoutDiagnosticsAsync),
             ("assembly-backed app version", TestAssemblyBackedAppVersionAsync)
         };
@@ -529,6 +535,210 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestVisualProbeDisplayTransformsAsync()
+    {
+        var expected = Color.FromArgb(0, 186, 255);
+        var variants = new Dictionary<string, Color>
+        {
+            ["neutral"] = expected,
+            ["hdr clipped"] = Color.FromArgb(0, 255, 255),
+            ["night light 15 percent"] = Color.FromArgb(8, 190, 217),
+            ["night light 25 percent"] = Color.FromArgb(12, 186, 191),
+            ["mild saturation reduction"] = Color.FromArgb(26, 174, 230),
+            ["mild contrast increase"] = Color.FromArgb(0, 198, 255),
+            ["warm gamma combination"] = Color.FromArgb(10, 202, 230),
+        };
+
+        foreach (var (name, color) in variants)
+        {
+            using var image = VisualAnchorFixture(color);
+            var result = VisualProbeEvaluator.EvaluateChromaticAnchor(image, expected);
+            AssertTrue(result.Passed, $"{name} should pass but scored {result.Score} with hue delta {result.HueDelta}.");
+            AssertTrue(result.Score >= 60, $"{name} should retain a useful confidence score.");
+        }
+
+        using (var clipped = VisualAnchorFixture(Color.FromArgb(0, 255, 255)))
+        {
+            var result = VisualProbeEvaluator.EvaluateChromaticAnchor(clipped, expected);
+            AssertEqual(VisualTransformClass.HighlightClipped, result.TransformClass);
+        }
+
+        using (var monochrome = VisualAnchorFixture(Color.FromArgb(190, 190, 190)))
+        {
+            AssertTrue(!VisualProbeEvaluator.EvaluateChromaticAnchor(monochrome, expected).Passed);
+        }
+
+        using (var inverted = VisualAnchorFixture(Color.FromArgb(255, 69, 0)))
+        {
+            AssertTrue(!VisualProbeEvaluator.EvaluateChromaticAnchor(inverted, expected).Passed);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestVisualPreflightGateAsync()
+    {
+        var gate = new VisualPreflightGate(requiredSignals: 2, requiredStableFrames: 2);
+        AssertTrue(!gate.Observe(anchorPassed: false, inventoryCountDetected: false, gridPassed: false));
+        AssertTrue(!gate.Observe(anchorPassed: true, inventoryCountDetected: false, gridPassed: false));
+        AssertEqual(0, gate.StableFrames);
+        AssertTrue(!gate.Observe(anchorPassed: true, inventoryCountDetected: true, gridPassed: false));
+        AssertEqual(1, gate.StableFrames);
+        AssertTrue(!gate.Observe(anchorPassed: false, inventoryCountDetected: true, gridPassed: false));
+        AssertEqual(0, gate.StableFrames);
+        AssertTrue(!gate.Observe(anchorPassed: true, inventoryCountDetected: false, gridPassed: true));
+        AssertTrue(gate.Observe(anchorPassed: true, inventoryCountDetected: false, gridPassed: true));
+        AssertTrue(gate.Accepted);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPrivacySafeVisualFixturesAsync()
+    {
+        var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Visual");
+        using var anchor = new Bitmap(Path.Combine(fixtureDirectory, "preflight-anchor-hdr.png"));
+        var anchorResult = VisualProbeEvaluator.EvaluateChromaticAnchor(anchor, Color.FromArgb(0, 186, 255));
+        AssertTrue(anchorResult.Passed, $"Captured HDR anchor should pass, score={anchorResult.Score}.");
+        AssertEqual(VisualTransformClass.HighlightClipped, anchorResult.TransformClass);
+
+        using var firstRow = new Bitmap(Path.Combine(fixtureDirectory, "first-row-drive-discs-hdr.png"));
+        var candidates = new[]
+        {
+            new VisualRarityCandidate("S", Color.FromArgb(255, 181, 0)),
+            new VisualRarityCandidate("A", Color.FromArgb(233, 0, 255)),
+            new VisualRarityCandidate("B", Color.FromArgb(0, 169, 255)),
+        };
+        var firstRowPoints = Enumerable.Range(0, firstRow.Height)
+            .SelectMany(y => Enumerable.Range(0, firstRow.Width).Select(x => new Point(x, y)));
+        var rarity = VisualProbeEvaluator.EvaluateRarity(firstRow, candidates, firstRowPoints);
+        AssertEqual("S", rarity.Rarity!);
+
+        using var scroll = new Bitmap(Path.Combine(fixtureDirectory, "scroll-region-hdr.png"));
+        var baseline = LuminanceSamples(scroll);
+        AssertEqual(0, VisualProbeEvaluator.MeasureLuminanceMovement(baseline, baseline));
+        using var shiftedScroll = new Bitmap(scroll.Width, scroll.Height);
+        using (var graphics = Graphics.FromImage(shiftedScroll))
+        {
+            graphics.Clear(Color.Black);
+            graphics.DrawImageUnscaled(scroll, 0, 28);
+        }
+        AssertTrue(VisualProbeEvaluator.MeasureLuminanceMovement(baseline, LuminanceSamples(shiftedScroll)) > 2);
+
+        using var details = new Bitmap(Path.Combine(fixtureDirectory, "detail-panel-rows-hdr.png"));
+        AssertTrue(VisualProbeEvaluator.IsRelativeTextRowPresent(
+            details,
+            new Rectangle(0, 58, 390, 45),
+            new Rectangle(0, 137, 390, 45),
+            new Point(18, 20)));
+        return Task.CompletedTask;
+    }
+
+    private static Task TestVisualRarityAmbiguityAsync()
+    {
+        var candidates = new[]
+        {
+            new VisualRarityCandidate("S", Color.FromArgb(255, 181, 0)),
+            new VisualRarityCandidate("A", Color.FromArgb(233, 0, 255)),
+            new VisualRarityCandidate("B", Color.FromArgb(0, 169, 255)),
+        };
+
+        using var clear = new Bitmap(20, 20);
+        using (var graphics = Graphics.FromImage(clear))
+        {
+            graphics.Clear(Color.FromArgb(25, 25, 25));
+            graphics.FillRectangle(Brushes.Gold, 4, 4, 12, 12);
+        }
+
+        var points = Enumerable.Range(0, clear.Height)
+            .SelectMany(y => Enumerable.Range(0, clear.Width).Select(x => new Point(x, y)))
+            .ToArray();
+        var clearResult = VisualProbeEvaluator.EvaluateRarity(clear, candidates, points);
+        AssertEqual("S", clearResult.Rarity!);
+        AssertTrue(clearResult.Margin >= 8);
+
+        using var ambiguous = new Bitmap(20, 20);
+        using (var graphics = Graphics.FromImage(ambiguous))
+        {
+            graphics.Clear(Color.FromArgb(25, 25, 25));
+            using var sBrush = new SolidBrush(candidates[0].Color);
+            using var aBrush = new SolidBrush(candidates[1].Color);
+            graphics.FillRectangle(sBrush, 2, 2, 7, 16);
+            graphics.FillRectangle(aBrush, 11, 2, 7, 16);
+        }
+
+        var ambiguousResult = VisualProbeEvaluator.EvaluateRarity(ambiguous, candidates, points);
+        AssertTrue(ambiguousResult.Rarity is null);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestRelativeRowPresenceAsync()
+    {
+        using var image = new Bitmap(220, 100);
+        using (var graphics = Graphics.FromImage(image))
+        {
+            graphics.Clear(Color.Black);
+            using var rowBrush = new SolidBrush(Color.FromArgb(22, 22, 22));
+            graphics.FillRectangle(rowBrush, 10, 10, 90, 30);
+            graphics.FillRectangle(rowBrush, 110, 10, 90, 30);
+            graphics.DrawLine(Pens.White, 120, 22, 185, 22);
+        }
+
+        var reference = new Rectangle(10, 10, 90, 30);
+        var present = new Rectangle(110, 10, 90, 30);
+        var absent = new Rectangle(110, 60, 90, 30);
+        var offset = new Point(10, 10);
+        AssertTrue(VisualProbeEvaluator.IsRelativeTextRowPresent(image, reference, present, offset));
+        AssertTrue(!VisualProbeEvaluator.IsRelativeTextRowPresent(image, reference, absent, offset));
+        return Task.CompletedTask;
+    }
+
+    private static Task TestLuminanceNormalizationAsync()
+    {
+        using var source = new Bitmap(100, 20);
+        for (var x = 0; x < source.Width; x++)
+        {
+            var value = 60 + (x * 80 / (source.Width - 1));
+            for (var y = 0; y < source.Height; y++)
+            {
+                source.SetPixel(x, y, Color.FromArgb(value, value, value));
+            }
+        }
+
+        using var normalized = VisualProbeEvaluator.NormalizeLuminance(source);
+        AssertTrue(normalized.GetPixel(0, 0).R <= 8);
+        AssertTrue(normalized.GetPixel(normalized.Width - 1, 0).R >= 247);
+        return Task.CompletedTask;
+    }
+
+    private static Bitmap VisualAnchorFixture(Color anchor)
+    {
+        var image = new Bitmap(48, 48);
+        using var graphics = Graphics.FromImage(image);
+        graphics.Clear(Color.FromArgb(18, 18, 18));
+        using var brush = new SolidBrush(anchor);
+        graphics.FillEllipse(brush, 8, 8, 32, 32);
+        return image;
+    }
+
+    private static int[] LuminanceSamples(Bitmap image)
+    {
+        const int columns = 8;
+        const int rows = 12;
+        var samples = new int[columns * rows];
+        var index = 0;
+        for (var row = 0; row < rows; row++)
+        {
+            var y = Math.Min(image.Height - 1, (int)Math.Round((row + 0.5) * image.Height / rows));
+            for (var column = 0; column < columns; column++)
+            {
+                var x = Math.Min(image.Width - 1, (int)Math.Round((column + 0.5) * image.Width / columns));
+                var color = image.GetPixel(x, y);
+                samples[index++] = (color.R * 299 + color.G * 587 + color.B * 114) / 1000;
+            }
+        }
+
+        return samples;
+    }
+
     private static Task TestPanelTimeoutDiagnosticsAsync()
     {
         var details = ScanDiagnosticDetails.PanelCapture(
@@ -560,6 +770,26 @@ internal static class Program
         var exception = new DiagnosticTestException(details);
         AssertTrue(ReferenceEquals(details, ScanDiagnosticDetails.FromException(exception)));
         AssertTrue(ScanDiagnosticDetails.FromException(new InvalidOperationException()) is null);
+
+        var preflight = ScanDiagnosticDetails.Preflight(
+            preflightState: "color_unsupported",
+            visualTransformClass: "unknown",
+            anchorScore: 35,
+            gridScore: 67,
+            inventoryCountDetected: true,
+            hueDelta: 52,
+            saturationDeltaPct: 12,
+            valueDeltaPct: 8,
+            stableFrames: 0,
+            requiredStableFrames: 2,
+            clientWidth: 1920,
+            clientHeight: 1080,
+            dpi: 192,
+            captureMode: "dxgi",
+            visualProfileId: "local-1920x1080-current");
+        AssertEqual("color_unsupported", (string)preflight["preflightState"]!);
+        AssertEqual(35, (int)preflight["anchorScore"]!);
+        AssertEqual(true, (bool)preflight["inventoryCountDetected"]!);
         return Task.CompletedTask;
     }
 
@@ -716,11 +946,11 @@ internal static class Program
         return Encoding.UTF8.GetString(buffer, 0, result.Count);
     }
 
-    private static void AssertTrue(bool condition)
+    private static void AssertTrue(bool condition, string message = "Assertion failed.")
     {
         if (!condition)
         {
-            throw new InvalidOperationException("Assertion failed.");
+            throw new InvalidOperationException(message);
         }
     }
 
