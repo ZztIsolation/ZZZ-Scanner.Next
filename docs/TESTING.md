@@ -1,5 +1,29 @@
 # Testing
 
+## 2026-07-20 1.0.40 显示色彩兼容与 Windows 正式包
+
+已执行：
+
+```powershell
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
+gh workflow run windows-release.yml --ref codex/scanner-color-compat-1.0.40 `
+  -f version=1.0.40 `
+  -f model_url=https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases/download/ocr-model-ppocrv5/PP-OCRv5_mobile_rec_infer.onnx `
+  -f model_sha256=70ca955eba4729651da42e7cbcc69aaf41a601939ee5ffaa7a90efdfcd13db6d
+```
+
+结果：
+
+- 原生回归 27 项全部通过。色彩矩阵覆盖 HDR 高光裁切、蓝光降低 15%/25%、红色增益 10%、饱和度 0.8/1.25、Gamma 0.85/1.15、对比度 0.9/1.1、亮度偏移 +/-8 及两种组合；真实隐私裁剪中的预检锚点、首行 S 级品质和详情属性行保持一致。
+- 负向门禁覆盖黑白、反色、品质候选歧义和不足两信号/不足两稳定帧。预检失败在任何点击或滚动前返回 `visual_preflight_failed`。
+- 坐标回归覆盖 `1280x720`、`1600x900`、`1920x1080`、`3840x2160` 与 96/120/144/192 DPI，确认客户区坐标不重复应用 DPI 缩放。相对属性行探针的本机额外开销中位数为 `0.51%`，低于 5% 门禁。
+- Windows Actions run `29741156206` 在提交 `2d7917a989d37ab2e3bac4185854e167c9330bc9` 上成功，使用 `vc-redist-layout` 和固定 OCR 模型 SHA-256 `70ca955eba4729651da42e7cbcc69aaf41a601939ee5ffaa7a90efdfcd13db6d`。
+- FDD 包为 `21775584` 字节，SHA-256 `d6bd86ebc37c457c3fd8c2cb263c4db0f63cdbecd468bf500904e10fba273f89`；self-contained x64 包为 `84794392` 字节，SHA-256 `efb8317ece48bc38b18a101e1fa9d3e9f961e5166fc20cf470aade124cbc4288`。
+- 解压复验 FDD 33 个清单文件、自包含 281 个清单文件：缺失 0、SHA 不符 0、PDB/日志/扫描输出 0；两包 `FileVersion=1.0.40.0`、`ProductVersion=1.0.40+2d7917a989d37ab2e3bac4185854e167c9330bc9`。
+- Helper 协议与公开版本保持 `1.2.1`；CI 的同版本 Helper 重建没有替换现有 Helper release 或 Calculator Helper manifest。
+- 当前开发机实际输出为 `1920x1080`，且没有运行中的游戏窗口，因此没有执行 4K 200% 下 SDR/HDR/Auto HDR/夜间模式/显卡滤镜的 30/120 件实扫，也没有执行 SDR 与 4K HDR 默认有效全量逐字段一致性。按发布门禁，在这些人工验收完成前不得公开 GitHub Release、镜像或 manifest。
+
 ## 2026-07-14 1.0.37 Windows 双包、OCR 等价与自诊断发布
 
 已执行：
