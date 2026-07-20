@@ -175,6 +175,7 @@ public sealed class ScanController
         Task monitor = Task.CompletedTask;
         Exception? pendingException = null;
         Exception? ocrException = null;
+        ScanSessionDiagnostics? sessionDiagnostics = null;
 
         try
         {
@@ -197,6 +198,15 @@ public sealed class ScanController
                 options.CaptureMode,
                 window);
             visualProfile.ProfileRoutingDecision = options.ProfileRouting.ToString().ToLowerInvariant();
+            runtimeState.VisualProfileId = visualProfile.ProfileId;
+            sessionDiagnostics = new ScanSessionDiagnostics
+            {
+                ClientWidth = visualProfile.ClientWidth,
+                ClientHeight = visualProfile.ClientHeight,
+                Dpi = visualProfile.Dpi,
+                CaptureMode = visualProfile.CaptureModeActive,
+                VisualProfileId = visualProfile.ProfileId
+            };
             visualProfile.Save(outputDir);
             scanLog.Write($"VISUAL_PROFILE_SELECTED id={visualProfile.ProfileId}, trainingProfile={visualProfile.TrainingProfileId}, profileFamily={visualProfile.ProfileFamilyId}, geometryStatus={visualProfile.ProfileGeometryStatus}, requested_label={visualProfile.RequestedProfileId}, detected_profile={visualProfile.DetectedProfileId}, detected_geometry={visualProfile.GeometryKey}, clientKind={visualProfile.ClientKind}, quality={visualProfile.QualityLabel}, size={visualProfile.ClientWidth}x{visualProfile.ClientHeight}, dpi={visualProfile.Dpi}, captureRequested={visualProfile.CaptureModeRequested}, captureActive={visualProfile.CaptureModeActive}, frameBackend={visualProfile.CaptureFrameBackend}, profileRouting={options.ProfileRouting}");
             if (!visualProfile.ProfileId.Equals(visualProfile.DetectedProfileId, StringComparison.OrdinalIgnoreCase))
@@ -303,7 +313,8 @@ public sealed class ScanController
             Visited = counters.Visited,
             Queued = counters.Queued,
             Completed = counters.Completed,
-            Failed = counters.Failed
+            Failed = counters.Failed,
+            Diagnostics = sessionDiagnostics
         };
     }
 
@@ -2708,7 +2719,16 @@ public sealed class ScanController
             }
             catch (TimeoutException ex)
             {
-                throw new PanelCellCaptureException(pass, row, col, maxColumns, logicalRow, ex);
+                throw new PanelCellCaptureException(
+                    pass,
+                    row,
+                    col,
+                    maxColumns,
+                    logicalRow,
+                    maxAttempts,
+                    window,
+                    runtimeState.VisualProfileId,
+                    ex);
             }
         }
 
@@ -2882,6 +2902,7 @@ public sealed class ScanController
         double? textCoreStableMilliseconds = null;
         var acceptReason = "changed_stable_full_roi";
         var acceptGateReason = "waiting_for_panel_change";
+        var lastVisibleCount = 0;
         var quickRejectReason = runtimeState.QuickPanelAcceptEnabled ? "waiting_for_panel_change" : "disabled";
         var unchangedFallbackDelay = TimeSpan.FromMilliseconds(Math.Clamp(
             profile.PanelUnchangedFallbackMs,
@@ -3075,6 +3096,7 @@ public sealed class ScanController
 
             var visibleWatch = Stopwatch.StartNew();
             var visibleCount = CountVisibleRois(image, rois, statOffset, statRowBackground, profile.ColorTolerance);
+            lastVisibleCount = visibleCount;
             visibleWatch.Stop();
             visibleRoiMilliseconds += visibleWatch.Elapsed.TotalMilliseconds;
             if (visibleCount == rois.Count)
@@ -3197,8 +3219,19 @@ public sealed class ScanController
             await Task.Delay(interval, token);
         }
 
-        scanLog.Write("Panel readable wait timed out.");
-        throw new TimeoutException("详情面板截图等待超时。");
+        var timeoutException = new PanelCaptureTimeoutException(
+            lastVisibleCount,
+            rois.Count,
+            acceptGateReason,
+            sawPanelChange,
+            selectionChanged,
+            Math.Max(stableProbeFrames, textCoreStableProbeFrames),
+            requiredStableFrames,
+            frameCount);
+        scanLog.WriteEvent(
+            "PANEL_CAPTURE_TIMEOUT",
+            $"visibleRois={timeoutException.VisibleRois}/{timeoutException.TotalRois}, acceptGateReason={timeoutException.AcceptGateReason}, sawPanelChange={timeoutException.SawPanelChange}, selectionChanged={timeoutException.SelectionChanged}, stableFrames={timeoutException.StableFrames}/{timeoutException.RequiredStableFrames}, frameCount={timeoutException.FrameCount}, captureMode={window.ActiveCaptureMode}");
+        throw timeoutException;
     }
 
     private static CvRect[] BuildRois(GameWindow window, ScanProfile profile, Rectangle panelRect)
@@ -3770,7 +3803,10 @@ public sealed class ScanController
         int PanelMinAcceptFloorMs,
         int SameRowPanelMinAcceptFloorMs,
         int PostScrollPanelMinAcceptFloorMs,
-        int EffectiveScrollTickDelayMs);
+        int EffectiveScrollTickDelayMs)
+    {
+        public string VisualProfileId { get; set; } = "";
+    }
 
     private enum PanelStabilitySource
     {
@@ -4161,9 +4197,51 @@ public sealed class ScanController
         }
     }
 
-    private sealed class PanelCellCaptureException : TimeoutException
+    private sealed class PanelCaptureTimeoutException : TimeoutException
     {
-        public PanelCellCaptureException(int pass, int visualRow, int column, int maxColumns, int? logicalRow, Exception innerException)
+        public PanelCaptureTimeoutException(
+            int visibleRois,
+            int totalRois,
+            string acceptGateReason,
+            bool sawPanelChange,
+            bool selectionChanged,
+            int stableFrames,
+            int requiredStableFrames,
+            int frameCount)
+            : base("详情面板截图等待超时。")
+        {
+            VisibleRois = visibleRois;
+            TotalRois = totalRois;
+            AcceptGateReason = acceptGateReason;
+            SawPanelChange = sawPanelChange;
+            SelectionChanged = selectionChanged;
+            StableFrames = stableFrames;
+            RequiredStableFrames = requiredStableFrames;
+            FrameCount = frameCount;
+        }
+
+        public int VisibleRois { get; }
+        public int TotalRois { get; }
+        public string AcceptGateReason { get; }
+        public bool SawPanelChange { get; }
+        public bool SelectionChanged { get; }
+        public int StableFrames { get; }
+        public int RequiredStableFrames { get; }
+        public int FrameCount { get; }
+    }
+
+    private sealed class PanelCellCaptureException : TimeoutException, IScanDiagnosticException
+    {
+        public PanelCellCaptureException(
+            int pass,
+            int visualRow,
+            int column,
+            int maxColumns,
+            int? logicalRow,
+            int attempts,
+            GameWindow window,
+            string visualProfileId,
+            Exception innerException)
             : base($"详情面板截图等待超时：logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={visualRow}, col={column}/{maxColumns}。", innerException)
         {
             Pass = pass;
@@ -4171,6 +4249,26 @@ public sealed class ScanController
             Column = column;
             MaxColumns = maxColumns;
             LogicalRow = logicalRow;
+            var timeout = innerException as PanelCaptureTimeoutException;
+            DiagnosticDetails = ScanDiagnosticDetails.PanelCapture(
+                logicalRow,
+                visualRow,
+                column,
+                maxColumns,
+                timeout?.VisibleRois ?? 0,
+                timeout?.TotalRois ?? 0,
+                timeout?.AcceptGateReason ?? "unknown",
+                timeout?.SawPanelChange ?? false,
+                timeout?.SelectionChanged ?? false,
+                timeout?.StableFrames ?? 0,
+                timeout?.RequiredStableFrames ?? 0,
+                attempts,
+                timeout?.FrameCount ?? 0,
+                window.ClientScreenRect.Width,
+                window.ClientScreenRect.Height,
+                window.Dpi,
+                window.ActiveCaptureMode,
+                visualProfileId);
         }
 
         public int Pass { get; }
@@ -4178,6 +4276,7 @@ public sealed class ScanController
         public int Column { get; }
         public int MaxColumns { get; }
         public int? LogicalRow { get; }
+        public IReadOnlyDictionary<string, object?> DiagnosticDetails { get; }
     }
 
     private sealed record OcrWorkResult(int Index, DriveDiscExport? Export, string? ErrorDetail, string? ErrorMessage)

@@ -530,7 +530,7 @@ dotnet restore
 dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
 dotnet build Launcher\ZZZ-Scanner.Helper.csproj -c Release -p:NuGetAudit=false
 dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
-.\scripts\publish-slim.ps1 -Version 1.0.38
+.\scripts\publish-slim.ps1 -Version 1.0.39
 ~~~
 
 Outputs:
@@ -556,6 +556,13 @@ System32 fallback, but those are not official release artifacts.
 - Normal scans do not upload screenshots to this repository.
 - Web integration uses loopback HTTP/WebSocket, an origin allowlist, and a
   one-time token.
+- Scanner 1.0.39 passes ROI completeness, the final acceptance gate, stable
+  frames, retry count, window dimensions, DPI, capture backend, and visual
+  profile to the local web page as structured diagnostics. The calculator may
+  upload this privacy-limited summary under its separate privacy notice, but it
+  does not upload Drive Disc contents, OCR text, screenshots, local paths, full
+  logs, or exception stacks, and users can disable collection in calculator
+  settings.
 - Remote manifests, packages, and redirects require HTTPS.
 - ZIP extraction rejects absolute paths, traversal, and entries outside the
   controlled runtime root.

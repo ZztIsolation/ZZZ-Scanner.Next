@@ -615,7 +615,7 @@ dotnet restore
 dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
 dotnet build Launcher\ZZZ-Scanner.Helper.csproj -c Release -p:NuGetAudit=false
 dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
-.\scripts\publish-slim.ps1 -Version 1.0.38
+.\scripts\publish-slim.ps1 -Version 1.0.39
 ~~~
 
 发布输出：
@@ -647,6 +647,7 @@ VC143 Redistributable 布局复制依赖，并记录 DLL 版本、SHA-256 和许
 - OCR 和截图均在本机处理。
 - 普通扫描不会把截图上传到本仓库或项目服务器。
 - 网页集成只使用本机回环 HTTP/WebSocket、来源白名单和一次性令牌。
+- Scanner 1.0.39 会把 ROI 完整度、最后接受门槛、稳定帧、重试次数、窗口尺寸、DPI、捕获后端和视觉配置作为结构化诊断交给本机网页。计算器可以按其独立隐私说明上传这组脱敏摘要，但不会上传驱动盘内容、OCR 文本、截图、本机路径、完整日志或异常堆栈；用户可在计算器设置中关闭。
 - 远程 Manifest、程序包和重定向必须使用 HTTPS。
 - ZIP 解压会拒绝绝对路径、目录穿越和受控运行根目录以外的条目。
 - 复用缓存前必须通过包级和逐文件完整性校验。
