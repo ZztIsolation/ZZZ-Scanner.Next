@@ -38,6 +38,7 @@ internal static class Program
             ("visual preflight gate", TestVisualPreflightGateAsync),
             ("visual rarity ambiguity", TestVisualRarityAmbiguityAsync),
             ("relative row presence", TestRelativeRowPresenceAsync),
+            ("selection refresh wait", TestSelectionRefreshWaitAsync),
             ("luminance normalization", TestLuminanceNormalizationAsync),
             ("structured panel timeout diagnostics", TestPanelTimeoutDiagnosticsAsync),
             ("assembly-backed app version", TestAssemblyBackedAppVersionAsync)
@@ -624,11 +625,13 @@ internal static class Program
         AssertTrue(VisualProbeEvaluator.MeasureLuminanceMovement(baseline, LuminanceSamples(shiftedScroll)) > 2);
 
         using var details = new Bitmap(Path.Combine(fixtureDirectory, "detail-panel-rows-hdr.png"));
-        AssertTrue(VisualProbeEvaluator.IsRelativeTextRowPresent(
+        var rowProbe = VisualProbeEvaluator.EvaluateRelativeTextRowPresence(
             details,
             new Rectangle(0, 58, 390, 45),
             new Rectangle(0, 137, 390, 45),
-            new Point(18, 20)));
+            new Point(18, 20));
+        AssertTrue(rowProbe.Present);
+        AssertTrue(rowProbe.EdgeDensityPermille >= rowProbe.MinimumEdgeDensityPermille);
         return Task.CompletedTask;
     }
 
@@ -672,23 +675,89 @@ internal static class Program
 
     private static Task TestRelativeRowPresenceAsync()
     {
-        using var image = new Bitmap(220, 100);
-        using (var graphics = Graphics.FromImage(image))
+        var variants = new Dictionary<string, (Color Background, Color Text)>
         {
-            graphics.Clear(Color.Black);
-            using var rowBrush = new SolidBrush(Color.FromArgb(22, 22, 22));
-            graphics.FillRectangle(rowBrush, 10, 10, 90, 30);
-            graphics.FillRectangle(rowBrush, 110, 10, 90, 30);
-            graphics.DrawLine(Pens.White, 120, 22, 185, 22);
-        }
+            ["neutral"] = (Color.FromArgb(22, 22, 22), Color.White),
+            ["bright 1f"] = (Color.FromArgb(31, 31, 31), Color.White),
+            ["dark"] = (Color.FromArgb(13, 13, 13), Color.FromArgb(224, 224, 224)),
+            ["warm"] = (Color.FromArgb(31, 28, 24), Color.FromArgb(245, 230, 210)),
+            ["saturation shifted"] = (Color.FromArgb(20, 24, 34), Color.FromArgb(220, 236, 255)),
+            ["contrast shifted"] = (Color.FromArgb(8, 8, 8), Color.White),
+        };
 
         var reference = new Rectangle(10, 10, 90, 30);
-        var present = new Rectangle(110, 10, 90, 30);
-        var absent = new Rectangle(110, 60, 90, 30);
+        var candidates = Enumerable.Range(0, 4)
+            .Select(index => new Rectangle(110, 10 + (index * 40), 90, 30))
+            .ToArray();
+        var absent = new Rectangle(10, 190, 90, 30);
         var offset = new Point(10, 10);
-        AssertTrue(VisualProbeEvaluator.IsRelativeTextRowPresent(image, reference, present, offset));
-        AssertTrue(!VisualProbeEvaluator.IsRelativeTextRowPresent(image, reference, absent, offset));
+        foreach (var (name, colors) in variants)
+        {
+            using var image = new Bitmap(220, 230);
+            using (var graphics = Graphics.FromImage(image))
+            {
+                graphics.Clear(Color.Black);
+                using var rowBrush = new SolidBrush(colors.Background);
+                using var textPen = new Pen(colors.Text);
+                graphics.FillRectangle(rowBrush, reference);
+                foreach (var candidate in candidates)
+                {
+                    graphics.FillRectangle(rowBrush, candidate);
+                    graphics.DrawLine(textPen, candidate.Left + 10, candidate.Top + 12, candidate.Right - 10, candidate.Top + 12);
+                    graphics.DrawLine(textPen, candidate.Left + 18, candidate.Top + 7, candidate.Left + 18, candidate.Bottom - 7);
+                }
+            }
+
+            foreach (var candidate in candidates)
+            {
+                var result = VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, reference, candidate, offset);
+                AssertTrue(result.Present, $"{name} row should be present: {result}");
+                AssertTrue(result.LumaDelta <= result.AllowedLumaDelta, $"{name} luma gate should pass.");
+                AssertTrue(result.EdgeDensityPermille >= result.MinimumEdgeDensityPermille, $"{name} edge gate should pass.");
+            }
+
+            var blank = VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, reference, absent, offset);
+            AssertTrue(!blank.Present, $"{name} blank row should be absent: {blank}");
+        }
+
         return Task.CompletedTask;
+    }
+
+    private static async Task TestSelectionRefreshWaitAsync()
+    {
+        AssertEqual(600, SelectionRefreshTiming.ResolveMaximumWaitMilliseconds(1200));
+        AssertEqual(450, SelectionRefreshTiming.ResolveMaximumWaitMilliseconds(450));
+
+        var observations = new Queue<SelectionRefreshObservation>(new[]
+        {
+            new SelectionRefreshObservation(false, false),
+            new SelectionRefreshObservation(true, false),
+            new SelectionRefreshObservation(true, true),
+        });
+        var ready = await SelectionRefreshWaiter.WaitAsync(
+            () => observations.Dequeue(),
+            maximumWaitMilliseconds: 100,
+            pollMilliseconds: 1,
+            CancellationToken.None);
+        AssertTrue(ready.Ready);
+        AssertEqual(3, ready.FrameCount);
+        AssertEqual(2, ready.StableFrames);
+
+        var timedOut = await SelectionRefreshWaiter.WaitAsync(
+            () => new SelectionRefreshObservation(true, false),
+            maximumWaitMilliseconds: 12,
+            pollMilliseconds: 2,
+            CancellationToken.None);
+        AssertTrue(!timedOut.Ready);
+        AssertTrue(timedOut.ChangedFromTarget);
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await AssertCanceledAsync(SelectionRefreshWaiter.WaitAsync(
+            () => new SelectionRefreshObservation(false, false),
+            maximumWaitMilliseconds: 600,
+            pollMilliseconds: 5,
+            cancellation.Token));
     }
 
     private static Task TestLuminanceNormalizationAsync()
@@ -748,6 +817,13 @@ internal static class Program
             maxColumns: 9,
             visibleRois: 10,
             totalRois: 12,
+            firstMissingRoi: "subStat4",
+            referenceLuma: 22,
+            candidateLuma: 31,
+            lumaDelta: 9,
+            allowedLumaDelta: 18,
+            edgeDensityPermille: 0,
+            minimumEdgeDensityPermille: 3,
             acceptGateReason: "waiting_for_full_roi",
             sawPanelChange: true,
             selectionChanged: true,
@@ -763,6 +839,9 @@ internal static class Program
 
         AssertEqual(10, (int)details["visibleRois"]!);
         AssertEqual(12, (int)details["totalRois"]!);
+        AssertEqual("subStat4", (string)details["firstMissingRoi"]!);
+        AssertEqual(31, (int)details["candidateLuma"]!);
+        AssertEqual(3, (int)details["minimumEdgeDensityPermille"]!);
         AssertEqual("waiting_for_full_roi", (string)details["acceptGateReason"]!);
         AssertEqual(3, (int)details["attempts"]!);
         AssertEqual("local-1920x1080-current", (string)details["visualProfileId"]!);

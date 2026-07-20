@@ -2806,42 +2806,34 @@ public sealed class ScanController
 
             var maximumWaitMs = SelectionRefreshTiming.ResolveMaximumWaitMilliseconds(profile.LoadTimeoutMs);
             var pollMs = Math.Max(5, profile.LoadPollMs);
-            var wait = Stopwatch.StartNew();
-            var gate = new SelectionRefreshGate(requiredStableFrames: 2);
             ImageSignature[]? previousObservedSignatures = null;
-            var frameCount = 0;
-            while (wait.ElapsedMilliseconds < maximumWaitMs)
+            ImageSignature[]? latestObservedSignatures = null;
+            var result = await SelectionRefreshWaiter.WaitAsync(
+                () =>
+                {
+                    var currentSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
+                    var changedFromTarget = ProbeChangeDistance(targetPanelSignatures, currentSignatures) > PanelStrongChangeTolerance;
+                    var stableWithPrevious = previousObservedSignatures is not null
+                        && AreProbesStable(previousObservedSignatures, currentSignatures);
+                    previousObservedSignatures = currentSignatures;
+                    latestObservedSignatures = currentSignatures;
+                    return new SelectionRefreshObservation(changedFromTarget, stableWithPrevious);
+                },
+                maximumWaitMs,
+                pollMs,
+                token);
+            if (result.Ready && latestObservedSignatures is not null)
             {
-                token.ThrowIfCancellationRequested();
-                var currentSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
-                frameCount++;
-                var changedFromTarget = ProbeChangeDistance(targetPanelSignatures, currentSignatures) > PanelStrongChangeTolerance;
-                var stableWithPrevious = previousObservedSignatures is not null
-                    && AreProbesStable(previousObservedSignatures, currentSignatures);
-                if (gate.Observe(changedFromTarget, stableWithPrevious))
-                {
-                    refreshedPanelSignatures = currentSignatures;
-                    scanLog.WriteEvent(
-                        "PANEL_SELECTION_REFRESH_READY",
-                        $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, elapsedMs={wait.Elapsed.TotalMilliseconds:F1}, stableFrames={gate.StableFrames}/2, frameCount={frameCount}");
-                    break;
-                }
-
-                previousObservedSignatures = currentSignatures;
-                var remainingMs = maximumWaitMs - (int)wait.ElapsedMilliseconds;
-                if (remainingMs <= 0)
-                {
-                    break;
-                }
-
-                await Task.Delay(Math.Min(pollMs, remainingMs), token);
+                refreshedPanelSignatures = latestObservedSignatures;
+                scanLog.WriteEvent(
+                    "PANEL_SELECTION_REFRESH_READY",
+                    $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, elapsedMs={result.ElapsedMilliseconds:F1}, stableFrames={result.StableFrames}/2, frameCount={result.FrameCount}");
             }
-
-            if (!gate.Accepted)
+            else
             {
                 scanLog.WriteEvent(
                     "PANEL_SELECTION_REFRESH_TIMEOUT",
-                    $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, elapsedMs={wait.Elapsed.TotalMilliseconds:F1}, timeoutMs={maximumWaitMs}, changedFromTarget={gate.ChangedFromTarget}, stableFrames={gate.StableFrames}/2, frameCount={frameCount}, baseline=target_snapshot");
+                    $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, elapsedMs={result.ElapsedMilliseconds:F1}, timeoutMs={maximumWaitMs}, changedFromTarget={result.ChangedFromTarget}, stableFrames={result.StableFrames}/2, frameCount={result.FrameCount}, baseline=target_snapshot");
             }
         }
 
