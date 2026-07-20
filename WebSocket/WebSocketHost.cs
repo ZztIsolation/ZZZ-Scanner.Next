@@ -246,10 +246,13 @@ public sealed class WebSocketHost : IDisposable
             {
                 items = result.Items,
                 visited = result.Visited,
+                queued = result.Queued,
+                completed = result.Completed,
                 failed = result.Failed,
                 outputDirectory = result.OutputDirectory,
                 exportFile = result.ExportFile,
-                scanner = AppInfo.DiagnosticPayload()
+                scanner = AppInfo.DiagnosticPayload(),
+                diagnostics = result.Diagnostics
             }, token);
         }
         catch (OperationCanceledException)
@@ -296,6 +299,7 @@ public sealed class WebSocketHost : IDisposable
                 remedy = gameNotFound ? "请启动游戏并进入驱动盘背包后重试。" : "请重试；如果问题持续，请打开 Helper 日志。",
                 retryable = true,
                 actions = new[] { new { kind = "retry_scan", label = "重新扫描" } },
+                details = ScanDiagnosticDetails.FromException(ex),
                 error = ex.ToString(),
                 scanner = AppInfo.DiagnosticPayload()
             }, CancellationToken.None);

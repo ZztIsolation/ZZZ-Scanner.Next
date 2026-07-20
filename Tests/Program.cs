@@ -33,6 +33,7 @@ internal static class Program
             ("WebSocket origin and token handshake", TestWebSocketHandshakeAsync),
             ("fast mode defaults", TestFastModeDefaultsAsync),
             ("strict profile selection", TestStrictProfileSelectionAsync),
+            ("structured panel timeout diagnostics", TestPanelTimeoutDiagnosticsAsync),
             ("assembly-backed app version", TestAssemblyBackedAppVersionAsync)
         };
 
@@ -528,6 +529,40 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestPanelTimeoutDiagnosticsAsync()
+    {
+        var details = ScanDiagnosticDetails.PanelCapture(
+            logicalRow: 1,
+            visualRow: 1,
+            column: 1,
+            maxColumns: 9,
+            visibleRois: 10,
+            totalRois: 12,
+            acceptGateReason: "waiting_for_full_roi",
+            sawPanelChange: true,
+            selectionChanged: true,
+            stableFrames: 2,
+            requiredStableFrames: 2,
+            attempts: 3,
+            frameCount: 72,
+            clientWidth: 1920,
+            clientHeight: 1080,
+            dpi: 96,
+            captureMode: "dxgi",
+            visualProfileId: "local-1920x1080-current");
+
+        AssertEqual(10, (int)details["visibleRois"]!);
+        AssertEqual(12, (int)details["totalRois"]!);
+        AssertEqual("waiting_for_full_roi", (string)details["acceptGateReason"]!);
+        AssertEqual(3, (int)details["attempts"]!);
+        AssertEqual("local-1920x1080-current", (string)details["visualProfileId"]!);
+
+        var exception = new DiagnosticTestException(details);
+        AssertTrue(ReferenceEquals(details, ScanDiagnosticDetails.FromException(exception)));
+        AssertTrue(ScanDiagnosticDetails.FromException(new InvalidOperationException()) is null);
+        return Task.CompletedTask;
+    }
+
     private static ScannerManifest ValidManifest()
     {
         return new ScannerManifest
@@ -748,5 +783,11 @@ internal static class Program
         }
 
         throw new InvalidOperationException("Expected task cancellation.");
+    }
+
+    private sealed class DiagnosticTestException(IReadOnlyDictionary<string, object?> details)
+        : Exception, IScanDiagnosticException
+    {
+        public IReadOnlyDictionary<string, object?> DiagnosticDetails { get; } = details;
     }
 }
