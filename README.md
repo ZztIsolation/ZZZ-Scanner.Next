@@ -75,6 +75,8 @@ and moderate temperature, saturation, brightness, and contrast changes are
 handled through regional hue, relative luminance, and image-structure probes.
 Non-neutral captures automatically use PP-OCR. Inversion, monochrome output,
 extreme LUTs, strong game filters, and UI mods still fail closed.
+This reduces dependence on fixed RGB values; it does not guarantee every HDR,
+filter, driver-enhancement, or color-management configuration.
 
 ## Choose an installation method
 

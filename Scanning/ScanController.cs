@@ -3340,10 +3340,10 @@ public sealed class ScanController
         var referenceRoi = rois.Count > 2 ? rois[2] : rois[0];
         foreach (var roi in rois)
         {
-            var probe = count <= 3
+            RowPresenceProbeResult? probe = count <= 3
                 ? null
                 : VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, referenceRoi, roi, statOffset, policy);
-            if (probe is null || probe.Present)
+            if (probe is null || probe.Value.Present)
             {
                 count++;
             }
@@ -3367,10 +3367,10 @@ public sealed class ScanController
         var referenceRoi = rois.Count > 2 ? rois[2] : rois[0];
         foreach (var roi in rois)
         {
-            var probe = count <= 3
+            RowPresenceProbeResult? probe = count <= 3
                 ? null
                 : VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, referenceRoi, roi, statOffset, policy);
-            if (probe is null || probe.Present)
+            if (probe is null || probe.Value.Present)
             {
                 count++;
             }

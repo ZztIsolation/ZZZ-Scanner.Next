@@ -39,7 +39,7 @@ public sealed record RarityProbeResult(
     int SecondScore,
     int Margin);
 
-public sealed record RowPresenceProbeResult(
+public readonly record struct RowPresenceProbeResult(
     bool Present,
     int ReferenceLuma,
     int CandidateLuma,
@@ -559,10 +559,10 @@ public static class VisualProbeEvaluator
         (0.2126 * color.R) + (0.7152 * color.G) + (0.0722 * color.B);
 
     private static int ClampByteMetric(double value) =>
-        Math.Clamp((int)Math.Round(value), 0, 255);
+        value <= 0 ? 0 : value >= 255 ? 255 : (int)(value + 0.5);
 
     private static int ClampPermilleMetric(double value) =>
-        Math.Clamp((int)Math.Round(value * 1000), 0, 1000);
+        value <= 0 ? 0 : value >= 1 ? 1000 : (int)((value * 1000) + 0.5);
 
     private static float HueDelta(float left, float right)
     {

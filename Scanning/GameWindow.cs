@@ -180,9 +180,19 @@ public sealed class GameWindow : IDisposable
 
     public Point ToScreenPoint(PointF normalized, bool clientToScreen = true)
     {
-        var x = (int)Math.Round(normalized.X * _clientScreenRect.Width);
-        var y = (int)Math.Round(normalized.Y * _clientScreenRect.Height);
-        return clientToScreen ? new Point(_clientScreenRect.X + x, _clientScreenRect.Y + y) : new Point(x, y);
+        return MapToScreenPoint(_clientScreenRect, normalized, Dpi, clientToScreen);
+    }
+
+    internal static Point MapToScreenPoint(
+        Rectangle clientScreenRect,
+        PointF normalized,
+        int dpi,
+        bool clientToScreen = true)
+    {
+        _ = dpi;
+        var x = (int)Math.Round(normalized.X * clientScreenRect.Width);
+        var y = (int)Math.Round(normalized.Y * clientScreenRect.Height);
+        return clientToScreen ? new Point(clientScreenRect.X + x, clientScreenRect.Y + y) : new Point(x, y);
     }
 
     public Rectangle ToScreenRectangle(RectangleF normalized)

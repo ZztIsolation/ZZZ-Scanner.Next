@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Drawing;
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
@@ -34,10 +35,13 @@ internal static class Program
             ("fast mode defaults", TestFastModeDefaultsAsync),
             ("strict profile selection", TestStrictProfileSelectionAsync),
             ("visual probe display transforms", TestVisualProbeDisplayTransformsAsync),
+            ("visual fixture transform matrix", TestVisualFixtureTransformMatrixAsync),
             ("privacy-safe visual fixtures", TestPrivacySafeVisualFixturesAsync),
             ("visual preflight gate", TestVisualPreflightGateAsync),
             ("visual rarity ambiguity", TestVisualRarityAmbiguityAsync),
             ("relative row presence", TestRelativeRowPresenceAsync),
+            ("relative row probe overhead", TestRelativeRowProbeOverheadAsync),
+            ("DPI-independent client coordinates", TestDpiIndependentClientCoordinatesAsync),
             ("selection refresh wait", TestSelectionRefreshWaitAsync),
             ("luminance normalization", TestLuminanceNormalizationAsync),
             ("structured panel timeout diagnostics", TestPanelTimeoutDiagnosticsAsync),
@@ -577,6 +581,61 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestVisualFixtureTransformMatrixAsync()
+    {
+        var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Visual");
+        using var anchor = new Bitmap(Path.Combine(fixtureDirectory, "preflight-anchor-hdr.png"));
+        using var firstRow = new Bitmap(Path.Combine(fixtureDirectory, "first-row-drive-discs-hdr.png"));
+        using var details = new Bitmap(Path.Combine(fixtureDirectory, "detail-panel-rows-hdr.png"));
+        var candidates = new[]
+        {
+            new VisualRarityCandidate("S", Color.FromArgb(255, 181, 0)),
+            new VisualRarityCandidate("A", Color.FromArgb(233, 0, 255)),
+            new VisualRarityCandidate("B", Color.FromArgb(0, 169, 255)),
+        };
+        var firstRowPoints = Enumerable.Range(0, firstRow.Height)
+            .SelectMany(y => Enumerable.Range(0, firstRow.Width).Select(x => new Point(x, y)))
+            .ToArray();
+        var transforms = new[]
+        {
+            new FixtureTransform("hdr highlight clip", 1, 1, 1, 1, 1, 0, true),
+            new FixtureTransform("blue reduction 15 percent", 1, 0.85, 1, 1, 1, 0, false),
+            new FixtureTransform("blue reduction 25 percent", 1, 0.75, 1, 1, 1, 0, false),
+            new FixtureTransform("red gain 10 percent", 1.10, 1, 1, 1, 1, 0, false),
+            new FixtureTransform("saturation 0.8", 1, 1, 0.8, 1, 1, 0, false),
+            new FixtureTransform("saturation 1.25", 1, 1, 1.25, 1, 1, 0, false),
+            new FixtureTransform("gamma 0.85", 1, 1, 1, 0.85, 1, 0, false),
+            new FixtureTransform("gamma 1.15", 1, 1, 1, 1.15, 1, 0, false),
+            new FixtureTransform("contrast 0.9", 1, 1, 1, 1, 0.9, 0, false),
+            new FixtureTransform("contrast 1.1", 1, 1, 1, 1, 1.1, 0, false),
+            new FixtureTransform("brightness minus 8", 1, 1, 1, 1, 1, -8, false),
+            new FixtureTransform("brightness plus 8", 1, 1, 1, 1, 1, 8, false),
+            new FixtureTransform("night warm combination", 1.08, 0.80, 0.9, 0.92, 1, 4, false),
+            new FixtureTransform("hdr vivid combination", 1, 1, 1.20, 0.88, 1.08, 4, true),
+        };
+
+        foreach (var transform in transforms)
+        {
+            using var transformedAnchor = ApplyFixtureTransform(anchor, transform);
+            var anchorResult = VisualProbeEvaluator.EvaluateChromaticAnchor(transformedAnchor, Color.FromArgb(0, 186, 255));
+            AssertTrue(anchorResult.Passed, $"{transform.Name} anchor failed: score={anchorResult.Score}, hueDelta={anchorResult.HueDelta}.");
+
+            using var transformedRow = ApplyFixtureTransform(firstRow, transform);
+            var rarity = VisualProbeEvaluator.EvaluateRarity(transformedRow, candidates, firstRowPoints);
+            AssertTrue(string.Equals("S", rarity.Rarity, StringComparison.Ordinal), $"{transform.Name} changed the first-row rarity classification to {rarity.Rarity ?? "unknown"}.");
+
+            using var transformedDetails = ApplyFixtureTransform(details, transform);
+            var rowProbe = VisualProbeEvaluator.EvaluateRelativeTextRowPresence(
+                transformedDetails,
+                new Rectangle(0, 58, 390, 45),
+                new Rectangle(0, 137, 390, 45),
+                new Point(18, 20));
+            AssertTrue(rowProbe.Present, $"{transform.Name} changed detail-row presence: {rowProbe}.");
+        }
+
+        return Task.CompletedTask;
+    }
+
     private static Task TestVisualPreflightGateAsync()
     {
         var gate = new VisualPreflightGate(requiredSignals: 2, requiredStableFrames: 2);
@@ -760,6 +819,165 @@ internal static class Program
             cancellation.Token));
     }
 
+    private static Task TestDpiIndependentClientCoordinatesAsync()
+    {
+        var clientSizes = new[]
+        {
+            new Size(1280, 720),
+            new Size(1600, 900),
+            new Size(1920, 1080),
+            new Size(3840, 2160),
+        };
+        var dpis = new[] { 96, 120, 144, 192 };
+        foreach (var size in clientSizes)
+        {
+            var client = new Rectangle(317, 211, size.Width, size.Height);
+            foreach (var dpi in dpis)
+            {
+                var local = GameWindow.MapToScreenPoint(client, new PointF(0.75f, 0.80f), dpi, clientToScreen: false);
+                var screen = GameWindow.MapToScreenPoint(client, new PointF(0.75f, 0.80f), dpi, clientToScreen: true);
+                AssertTrue(local.X == (int)Math.Round(size.Width * 0.75), $"Unexpected X at {size.Width}x{size.Height}, DPI {dpi}.");
+                AssertTrue(local.Y == (int)Math.Round(size.Height * 0.80), $"Unexpected Y at {size.Width}x{size.Height}, DPI {dpi}.");
+                AssertEqual(client.X + local.X, screen.X);
+                AssertEqual(client.Y + local.Y, screen.Y);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestRelativeRowProbeOverheadAsync()
+    {
+        using var image = new Bitmap(220, 100);
+        using (var graphics = Graphics.FromImage(image))
+        {
+            graphics.Clear(Color.Black);
+            using var rowBrush = new SolidBrush(Color.FromArgb(31, 31, 31));
+            graphics.FillRectangle(rowBrush, 10, 10, 90, 30);
+            graphics.FillRectangle(rowBrush, 110, 10, 90, 30);
+            graphics.DrawLine(Pens.White, 120, 22, 185, 22);
+        }
+
+        var reference = new Rectangle(10, 10, 90, 30);
+        var candidate = new Rectangle(110, 10, 90, 30);
+        var offset = new Point(10, 10);
+        var policy = new RowPresenceProbePolicy();
+        for (var i = 0; i < 100; i++)
+        {
+            AssertTrue(LegacyRelativeTextRowPresent(image, reference, candidate, offset, policy));
+            AssertTrue(VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, reference, candidate, offset, policy).Present);
+        }
+
+        const int iterations = 1500;
+        var ratios = new List<double>();
+        for (var round = 0; round < 7; round++)
+        {
+            long legacyTicks;
+            long structuredTicks;
+            if (round % 2 == 0)
+            {
+                legacyTicks = MeasureRowProbe(() => LegacyRelativeTextRowPresent(image, reference, candidate, offset, policy), iterations);
+                structuredTicks = MeasureRowProbe(() => VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, reference, candidate, offset, policy).Present, iterations);
+            }
+            else
+            {
+                structuredTicks = MeasureRowProbe(() => VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, reference, candidate, offset, policy).Present, iterations);
+                legacyTicks = MeasureRowProbe(() => LegacyRelativeTextRowPresent(image, reference, candidate, offset, policy), iterations);
+            }
+
+            ratios.Add(structuredTicks / (double)Math.Max(1, legacyTicks));
+        }
+
+        ratios.Sort();
+        var medianRatio = ratios[ratios.Count / 2];
+        Console.WriteLine($"relative_row_probe.overhead_pct={(medianRatio - 1) * 100:F2}");
+        AssertTrue(medianRatio <= 1.05, $"Structured row diagnostics exceeded the 5% overhead budget: {(medianRatio - 1) * 100:F2}%.");
+        return Task.CompletedTask;
+    }
+
+    private static long MeasureRowProbe(Func<bool> probe, int iterations)
+    {
+        var watch = Stopwatch.StartNew();
+        for (var i = 0; i < iterations; i++)
+        {
+            if (!probe())
+            {
+                throw new InvalidOperationException("Benchmark row unexpectedly failed the presence gate.");
+            }
+        }
+
+        watch.Stop();
+        return watch.ElapsedTicks;
+    }
+
+    private static bool LegacyRelativeTextRowPresent(
+        Bitmap image,
+        Rectangle referenceRoi,
+        Rectangle candidateRoi,
+        Point sampleOffset,
+        RowPresenceProbePolicy policy)
+    {
+        var reference = LegacyMedianPatchLuminance(image, referenceRoi, sampleOffset, policy.PatchRadius);
+        var candidate = LegacyMedianPatchLuminance(image, candidateRoi, sampleOffset, policy.PatchRadius);
+        var tolerance = Math.Max(policy.MinimumLuminanceTolerance, Math.Abs(reference) * policy.RelativeLuminanceTolerance);
+        if (Math.Abs(reference - candidate) > tolerance)
+        {
+            return false;
+        }
+
+        return LegacyEdgeDensity(image, candidateRoi, policy.EdgeThreshold) >= policy.MinimumEdgeDensity;
+    }
+
+    private static double LegacyMedianPatchLuminance(Bitmap image, Rectangle roi, Point offset, int radius)
+    {
+        var centerX = Math.Clamp(roi.X + offset.X, 0, image.Width - 1);
+        var centerY = Math.Clamp(roi.Y + offset.Y, 0, image.Height - 1);
+        var values = new List<double>();
+        for (var y = centerY - radius; y <= centerY + radius; y++)
+        {
+            for (var x = centerX - radius; x <= centerX + radius; x++)
+            {
+                values.Add(LegacyLuminance(image.GetPixel(
+                    Math.Clamp(x, 0, image.Width - 1),
+                    Math.Clamp(y, 0, image.Height - 1))));
+            }
+        }
+
+        values.Sort();
+        return values[values.Count / 2];
+    }
+
+    private static double LegacyEdgeDensity(Bitmap image, Rectangle roi, int threshold)
+    {
+        var clipped = Rectangle.Intersect(new Rectangle(0, 0, image.Width, image.Height), roi);
+        if (clipped.Width < 2 || clipped.Height < 2)
+        {
+            return 0;
+        }
+
+        var edges = 0;
+        var comparisons = 0;
+        for (var y = clipped.Top; y < clipped.Bottom - 1; y += 4)
+        {
+            for (var x = clipped.Left; x < clipped.Right - 1; x += 4)
+            {
+                var current = LegacyLuminance(image.GetPixel(x, y));
+                if (Math.Abs(current - LegacyLuminance(image.GetPixel(x + 1, y))) >= threshold
+                    || Math.Abs(current - LegacyLuminance(image.GetPixel(x, y + 1))) >= threshold)
+                {
+                    edges++;
+                }
+
+                comparisons++;
+            }
+        }
+
+        return comparisons == 0 ? 0 : edges / (double)comparisons;
+    }
+
+    private static double LegacyLuminance(Color color) =>
+        (0.2126 * color.R) + (0.7152 * color.G) + (0.0722 * color.B);
+
     private static Task TestLuminanceNormalizationAsync()
     {
         using var source = new Bitmap(100, 20);
@@ -807,6 +1025,55 @@ internal static class Program
 
         return samples;
     }
+
+    private static Bitmap ApplyFixtureTransform(Bitmap source, FixtureTransform transform)
+    {
+        var output = new Bitmap(source.Width, source.Height);
+        for (var y = 0; y < source.Height; y++)
+        {
+            for (var x = 0; x < source.Width; x++)
+            {
+                var color = source.GetPixel(x, y);
+                double red = color.R * transform.RedGain;
+                double green = color.G;
+                double blue = color.B * transform.BlueGain;
+                var luma = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+                red = luma + ((red - luma) * transform.Saturation);
+                green = luma + ((green - luma) * transform.Saturation);
+                blue = luma + ((blue - luma) * transform.Saturation);
+                red = TransformChannel(red, transform);
+                green = TransformChannel(green, transform);
+                blue = TransformChannel(blue, transform);
+                output.SetPixel(x, y, Color.FromArgb(color.A, (int)red, (int)green, (int)blue));
+            }
+        }
+
+        return output;
+    }
+
+    private static double TransformChannel(double value, FixtureTransform transform)
+    {
+        var normalized = Math.Clamp(value, 0, 255) / 255.0;
+        value = Math.Pow(normalized, transform.Gamma) * 255.0;
+        value = ((value - 128) * transform.Contrast) + 128 + transform.Brightness;
+        value = Math.Clamp(value, 0, 255);
+        if (transform.ClipHighlights && value >= 230)
+        {
+            value = 255;
+        }
+
+        return Math.Round(value);
+    }
+
+    private readonly record struct FixtureTransform(
+        string Name,
+        double RedGain,
+        double BlueGain,
+        double Saturation,
+        double Gamma,
+        double Contrast,
+        int Brightness,
+        bool ClipHighlights);
 
     private static Task TestPanelTimeoutDiagnosticsAsync()
     {
