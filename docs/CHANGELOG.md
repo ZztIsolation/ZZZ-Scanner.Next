@@ -4,7 +4,7 @@
 
 - Scanner 1.0.39 为详情面板超时增加结构化诊断：最后一次 `visibleRois/totalRois`、接受门槛、面板/选择变化状态、稳定帧、三次重试、捕获帧数、窗口客户区、DPI、实际捕获后端和视觉配置 ID 会同时写入 `PANEL_CAPTURE_TIMEOUT` 本地日志并通过现有 `scan_error.details` 发送给本机网页。
 - `scan_complete` 新增聚合 `queued`、`completed` 和安全的会话诊断；现有字段保持兼容。网页可以只上传这些脱敏字段，不需要也不会从 Scanner 读取驱动盘数组、截图、OCR 文本、本机目录、完整日志或异常堆栈。
-- 回归项目新增结构化面板超时诊断契约，当前 17 项 Helper/Scanner 回归测试全部通过。本地双包体积门禁通过；正式 Release 仍必须由 Windows CI 使用 `-RequireVCRedistLayout` 生成，System32 fallback 产物不得作为正式发布资产。
+- 回归项目新增结构化面板超时诊断契约，当前 17 项 Helper/Scanner 回归测试全部通过。正式 Windows CI 使用 `-RequireVCRedistLayout` 构建并通过双包体积门禁：FDD `21756850` 字节、SHA-256 `6488a032b22c9cf907ea3637927b3c8df3b9bd7a04162818c3244cec80d57ea0`；自包含包 `84775658` 字节、SHA-256 `cc1552a38536b764373c24821af003b7e85adb097f3611653a86783c2a06b037`。构建报告确认 `vcRuntimeSource=vc-redist-layout`；System32 fallback 产物不得作为正式发布资产。Helper 继续沿用已经发布的 1.2.1，不用本次流水线中同版本的重复构建覆盖。
 
 - Helper 1.2.1 修复 1.1.x 升级死路：下载引导程序先校验 22355 端口确为 ZZZ Scanner Helper，再要求唯一进程的名称、文件版本与健康检查版本一致。用户确认后才关闭该旧进程、等待端口释放、安装和校验固定路径副本、注册协议并启动托管 Helper；未知服务、多候选、版本不匹配、取消、终止失败或端口释放超时均不结束进程。
 - 网页在读取 Helper 版本和协议后才允许请求 Scanner manifest。1.1.x 只显示“下载并更新 Helper”和“重新检测”；协议 v3 的旧版本自动调用 `update_helper`，断线期间保持扫描流程并在重连后继续准备 OCR。自动更新失败同时提供重试和手动下载。
