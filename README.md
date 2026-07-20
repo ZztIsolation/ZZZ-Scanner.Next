@@ -69,6 +69,13 @@ game client area. Unknown visual profiles fall back to PP-OCR instead of reusing
 a nearby Fast OCR profile. Non-16:9 layouts, custom UI scale, HDR/filter
 changes, and future UI changes are not guaranteed.
 
+Scanner 1.0.40 evaluates the captured pixels instead of reading or guessing
+Windows HDR, Auto HDR, Night light, or GPU settings. Common highlight clipping
+and moderate temperature, saturation, brightness, and contrast changes are
+handled through regional hue, relative luminance, and image-structure probes.
+Non-neutral captures automatically use PP-OCR. Inversion, monochrome output,
+extreme LUTs, strong game filters, and UI mods still fail closed.
+
 ## Choose an installation method
 
 ### Method A: calculator + Helper
@@ -439,6 +446,9 @@ error code, diagnostic ID, and log location.
   maintained.
 - Fast OCR profiles cover a finite list of local/cloud resolutions. PP-OCR
   fallback does not prove an unknown layout is safe.
+- Display-color compatibility covers common HDR, Night light, and moderate GPU
+  color adjustments only. There is no switch that bypasses the visual safety
+  gate and forces scanning to continue.
 - Full lower-level Drive Disc scanning is not a supported calculator workflow.
 - GDI requires a visible desktop. Minimized, covered, locked, disconnected, or
   remote-session windows can produce stale or blank captures.
