@@ -459,6 +459,58 @@ function New-Zip([string]$Source, [string]$Destination) {
     }
 }
 
+function Set-DeterministicPeTimestamps([string]$Path) {
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40) {
+        throw "PE file is too small: $Path"
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+    if ($peOffset -lt 0 -or $peOffset + 24 -gt $bytes.Length -or
+        [BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550) {
+        throw "Invalid PE signature: $Path"
+    }
+
+    $fixedTimestamp = [BitConverter]::GetBytes([uint32]0)
+    [Array]::Copy($fixedTimestamp, 0, $bytes, $peOffset + 8, 4)
+
+    $sectionCount = [BitConverter]::ToUInt16($bytes, $peOffset + 6)
+    $optionalSize = [BitConverter]::ToUInt16($bytes, $peOffset + 20)
+    $optionalOffset = $peOffset + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalOffset)
+    $dataDirectoryOffset = switch ($magic) {
+        0x10b { $optionalOffset + 96 }
+        0x20b { $optionalOffset + 112 }
+        default { throw "Unsupported PE optional-header magic 0x$($magic.ToString('x')): $Path" }
+    }
+    $debugDirectoryEntry = $dataDirectoryOffset + (6 * 8)
+    $debugRva = [BitConverter]::ToUInt32($bytes, $debugDirectoryEntry)
+    $debugSize = [BitConverter]::ToUInt32($bytes, $debugDirectoryEntry + 4)
+    if ($debugRva -ne 0 -and $debugSize -ge 28) {
+        $sectionOffset = $optionalOffset + $optionalSize
+        $debugOffset = $null
+        for ($index = 0; $index -lt $sectionCount; $index++) {
+            $entry = $sectionOffset + ($index * 40)
+            $virtualSize = [BitConverter]::ToUInt32($bytes, $entry + 8)
+            $virtualAddress = [BitConverter]::ToUInt32($bytes, $entry + 12)
+            $rawSize = [BitConverter]::ToUInt32($bytes, $entry + 16)
+            $rawOffset = [BitConverter]::ToUInt32($bytes, $entry + 20)
+            $mappedSize = [Math]::Max($virtualSize, $rawSize)
+            if ($debugRva -ge $virtualAddress -and $debugRva -lt $virtualAddress + $mappedSize) {
+                $debugOffset = [int]($rawOffset + ($debugRva - $virtualAddress))
+                break
+            }
+        }
+        if ($null -eq $debugOffset -or $debugOffset + $debugSize -gt $bytes.Length) {
+            throw "PE debug directory is outside mapped sections: $Path"
+        }
+        for ($offset = $debugOffset; $offset + 28 -le $debugOffset + $debugSize; $offset += 28) {
+            [Array]::Copy($fixedTimestamp, 0, $bytes, $offset + 4, 4)
+        }
+    }
+
+    [System.IO.File]::WriteAllBytes($Path, $bytes)
+}
+
 function Assert-MaxSize([string]$Path, [int]$MaxMiB, [string]$Label, [string]$PublishDirectory) {
     $size = (Get-Item $Path).Length
     $maximum = [long]$MaxMiB * 1024 * 1024
@@ -553,6 +605,8 @@ Invoke-DotnetPublish @(
     "publish", "Launcher\ZZZ-Scanner.Helper.csproj", "-c", "Release", "-r", "win-x64",
     "--self-contained", "true", "-o", $helperOut
 ) "Helper publish"
+$helperExe = Join-Path $helperOut "ZZZ-Scanner-Helper.exe"
+Set-DeterministicPeTimestamps $helperExe
 
 if ($HelperOnly) {
     $helperDependencyReport = Assert-PeDependencyClosure $helperOut
