@@ -1275,13 +1275,20 @@ internal static partial class Program
             }
             _server.MarkScannerActive();
             await SendAsync("scanner_ready", _server.CurrentScannerState(), token);
-            try
+            if (HelperInstallationManager.ConsumePostUpdateStoragePreservation())
             {
-                _server.CleanupStorage();
+                HelperLog.Write("AUTOMATIC_CLEANUP_SKIPPED reason=helper-update-preservation");
             }
-            catch (Exception ex)
+            else
             {
-                HelperLog.Write($"AUTOMATIC_CLEANUP_FAILED error={ex.Message}");
+                try
+                {
+                    _server.CleanupStorage();
+                }
+                catch (Exception ex)
+                {
+                    HelperLog.Write($"AUTOMATIC_CLEANUP_FAILED error={ex.Message}");
+                }
             }
         }
 

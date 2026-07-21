@@ -175,6 +175,9 @@ internal static class HelperInstallationManager
     public static HelperUpdateCommitResult ConfirmPendingUpdate(string transactionId) =>
         HelperUpdateTransactionManager.Confirm(transactionId);
 
+    public static bool ConsumePostUpdateStoragePreservation() =>
+        HelperUpdateTransactionManager.ConsumeStoragePreservation();
+
     internal static void ScheduleBootstrapCleanup(string path) => RecordPendingBootstrapCleanup(path);
 
     public static string ManagedHelperPath()

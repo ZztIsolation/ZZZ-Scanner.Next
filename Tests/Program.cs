@@ -324,6 +324,8 @@ internal static class Program
             AssertTrue(!await HelperUpdateTransactionManager.RecoverInterruptedAsync());
             AssertTrue(HelperUpdateTransactionManager.ReadReceiptForTests() is null);
             AssertTrue(!File.Exists(backup));
+            AssertTrue(HelperUpdateTransactionManager.ConsumeStoragePreservation());
+            AssertTrue(!HelperUpdateTransactionManager.ConsumeStoragePreservation());
         }
         finally
         {

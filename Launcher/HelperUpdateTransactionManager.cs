@@ -71,6 +71,7 @@ internal static partial class HelperUpdateTransactionManager
             receipt.Stage = "browser-confirmed";
             receipt.UpdatedAt = DateTimeOffset.UtcNow;
             WriteReceipt(receipt);
+            WriteMarker(PreserveStoragePath(), transactionId);
             WriteMarker(ConfirmedPath(transactionId), receipt.UpdatedAt.ToString("O"));
             HelperInstallationManager.ScheduleBootstrapCleanup(receipt.UpdaterPath);
             _active = receipt;
@@ -99,6 +100,23 @@ internal static partial class HelperUpdateTransactionManager
             _active = receipt;
             return true;
         }
+    }
+
+    public static bool ConsumeStoragePreservation()
+    {
+        var path = PreserveStoragePath();
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+        try
+        {
+            File.Delete(path);
+        }
+        catch
+        {
+        }
+        return true;
     }
 
     public static Task<bool> RecoverInterruptedAsync() => RecoverInterruptedAsync(restartRestored: true);
@@ -402,6 +420,8 @@ internal static partial class HelperUpdateTransactionManager
     private static string ReceiptPath() => Path.Combine(UpdateRoot(), "pending.json");
 
     private static string ConfirmedPath(string transactionId) => Path.Combine(UpdateRoot(), $"confirmed-{transactionId}.txt");
+
+    private static string PreserveStoragePath() => Path.Combine(UpdateRoot(), "preserve-storage-once.txt");
 
     private static void WriteMarker(string path, string value)
     {
