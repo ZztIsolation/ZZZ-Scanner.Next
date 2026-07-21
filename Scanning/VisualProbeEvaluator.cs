@@ -97,6 +97,30 @@ public sealed record SelectionRefreshWaitResult(
     int FrameCount,
     double ElapsedMilliseconds);
 
+public readonly record struct PanelCaptureInitialGate(
+    bool SawPanelChange,
+    bool SelectionChanged,
+    double? ChangeMilliseconds);
+
+public static class PanelCaptureGate
+{
+    public static PanelCaptureInitialGate Initialize(bool hasPanelBaseline) =>
+        new(
+            SawPanelChange: false,
+            SelectionChanged: false,
+            ChangeMilliseconds: null);
+
+    public static bool RequiresFirstCellNeighborRoundTrip(bool firstQueuedItem) => firstQueuedItem;
+
+    public static bool IsStrongChangeCurrentFrame(
+        int changeDistance,
+        double elapsedMilliseconds,
+        int strongChangeTolerance,
+        double minimumReliableChangeMilliseconds) =>
+        changeDistance > strongChangeTolerance
+        && elapsedMilliseconds >= minimumReliableChangeMilliseconds;
+}
+
 public static class SelectionRefreshWaiter
 {
     public static async Task<SelectionRefreshWaitResult> WaitAsync(

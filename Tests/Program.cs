@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Drawing;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
@@ -63,7 +64,9 @@ internal static class Program
             ("variable panel ROI layout", TestVariablePanelRoiLayoutAsync),
             ("relative row probe overhead", TestRelativeRowProbeOverheadAsync),
             ("DPI-independent client coordinates", TestDpiIndependentClientCoordinatesAsync),
+            ("first-cell panel change gate", TestFirstCellPanelChangeGateAsync),
             ("selection refresh wait", TestSelectionRefreshWaitAsync),
+            ("partial full-scan benchmark terminal", TestPartialFullScanBenchmarkTerminalAsync),
             ("luminance normalization", TestLuminanceNormalizationAsync),
             ("structured panel timeout diagnostics", TestPanelTimeoutDiagnosticsAsync),
             ("assembly-backed app version", TestAssemblyBackedAppVersionAsync)
@@ -1530,6 +1533,83 @@ internal static class Program
             maximumWaitMilliseconds: 600,
             pollMilliseconds: 5,
             cancellation.Token));
+
+        var indistinguishableNeighbor = await SelectionRefreshWaiter.WaitAsync(
+            () => new SelectionRefreshObservation(false, true),
+            maximumWaitMilliseconds: 12,
+            pollMilliseconds: 2,
+            CancellationToken.None);
+        AssertTrue(!indistinguishableNeighbor.Ready, "An indistinguishable adjacent panel must not prove a refresh.");
+        AssertTrue(!indistinguishableNeighbor.ChangedFromTarget);
+    }
+
+    private static Task TestFirstCellPanelChangeGateAsync()
+    {
+        var withBaseline = PanelCaptureGate.Initialize(hasPanelBaseline: true);
+        AssertTrue(!withBaseline.SawPanelChange);
+        AssertTrue(!withBaseline.SelectionChanged);
+        AssertTrue(withBaseline.ChangeMilliseconds is null);
+
+        var withoutBaseline = PanelCaptureGate.Initialize(hasPanelBaseline: false);
+        AssertTrue(!withoutBaseline.SawPanelChange, "A missing baseline must never imply a panel change.");
+        AssertTrue(!withoutBaseline.SelectionChanged, "A missing baseline must never imply a selection change.");
+        AssertTrue(withoutBaseline.ChangeMilliseconds is null, "The first cell must not report changeMs=0 without evidence.");
+        AssertTrue(PanelCaptureGate.RequiresFirstCellNeighborRoundTrip(firstQueuedItem: true));
+        AssertTrue(!PanelCaptureGate.RequiresFirstCellNeighborRoundTrip(firstQueuedItem: false));
+        AssertTrue(PanelCaptureGate.IsStrongChangeCurrentFrame(21, 30, 20, 25));
+        AssertTrue(!PanelCaptureGate.IsStrongChangeCurrentFrame(0, 200, 20, 25), "A transient strong frame must not keep the final frame changed.");
+        AssertTrue(!PanelCaptureGate.IsStrongChangeCurrentFrame(21, 20, 20, 25), "An early click animation must not prove a panel change.");
+        return Task.CompletedTask;
+    }
+
+    private static Task TestPartialFullScanBenchmarkTerminalAsync()
+    {
+        var scanDirectory = Path.Combine(Path.GetTempPath(), "zzz-scanner-benchmark-terminal", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(scanDirectory);
+        try
+        {
+            File.WriteAllLines(Path.Combine(scanDirectory, "scan.log"),
+            [
+                "[2026-07-22T00:00:00.0000000Z] Start scan. OcrWorkers=1, OcrBatchSize=1, OcrQueueCapacity=4, OcrIntraOpThreads=1, MaxItems=0",
+                "[2026-07-22T00:00:00.0100000Z] Traversal: overlap-signature-page. totalRows=20",
+                "[2026-07-22T00:00:01.0000000Z] Progress visited=1, queued=1, completed=0, failed=0",
+                "[2026-07-22T00:00:02.0000000Z] EVENT #1 SCAN_TERMINAL: visited=2, queued=2, completed=1, failed=0, partial=True, terminationCode=non_level_15_stop, exportFile=export.partial.json"
+            ]);
+            File.WriteAllText(
+                Path.Combine(scanDirectory, "export.partial.json"),
+                "[{\"序号\":1,\"名称\":\"啄木鸟电音\",\"槽位\":1,\"品质\":\"S\",\"等级\":15,\"最大等级\":15,\"主属性\":{\"生命值\":2200},\"副属性\":[]}]");
+            File.WriteAllText(Path.Combine(scanDirectory, "0010.non15.txt"), "level=12");
+            File.WriteAllText(
+                Path.Combine(scanDirectory, "scan-once-result.json"),
+                "{\"Visited\":1,\"Queued\":1,\"Completed\":0,\"Failed\":0}");
+
+            var originalOut = Console.Out;
+            using var capture = new StringWriter(CultureInfo.InvariantCulture);
+            try
+            {
+                Console.SetOut(capture);
+                AssertEqual(0, ScanBenchmark.Run(scanDirectory, baselineDirectory: null));
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+            }
+
+            var output = capture.ToString();
+            AssertTrue(output.Contains("current.last_completed=1", StringComparison.Ordinal));
+            AssertTrue(output.Contains("current.partial=True", StringComparison.Ordinal));
+            AssertTrue(output.Contains("current.termination_code=non_level_15_stop", StringComparison.Ordinal));
+            AssertTrue(output.Contains("current.export_file=export.partial.json", StringComparison.Ordinal));
+            AssertTrue(output.Contains("current.effective_full_scan_complete=true", StringComparison.Ordinal));
+            AssertTrue(output.Contains("acceptance.full_scan_complete=pass", StringComparison.Ordinal));
+            AssertTrue(output.Contains("acceptance.overlap_no_missing_rows=skip", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(scanDirectory, recursive: true);
+        }
+
+        return Task.CompletedTask;
     }
 
     private static Task TestDpiIndependentClientCoordinatesAsync()

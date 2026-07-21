@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Scanner 1.0.43 修复整轮首件可能把旧详情面板当成目标盘的问题。首件现在固定执行“目标格、邻格稳定、返回目标格”的验证回环，验收帧自身必须持续与邻格基线强不同；瞬时点击动画不再被锁存为有效切换。新增 `FIRST_CELL_BASELINE_CAPTURED`、`FIRST_CELL_REFRESH_REQUIRED` 和 `FIRST_CELL_REFRESH_READY` 诊断，协议 v4 和流式字段保持不变。
+- 每轮导出后统一记录 `SCAN_TERMINAL` 最终计数、partial、终止码和导出文件。Benchmark 优先使用该终态，兼容 CLI sidecar 和旧进度日志，并可读取 `export.partial.json`；`non_level_15_stop` 在保留 partial 事实的同时按有效全量正常结束统计。
 - Scanner 1.0.43 修复 1.0.42 预发布包混入旧版 app-local VC runtime 后在 PP-OCRv5 初始化阶段触发 `0xC0000005` 的发布问题。发布脚本现在只接受同一受控 layout 中不低于 14.44.35211 的运行库，Release 禁止 System32 fallback，并在 FDD 与自包含最终目录内各执行一次真实 OCR runtime smoke 后才允许打包。
 - Scanner 1.0.42 将详情面板拆为 4 个必需核心 ROI 和 0-4 组连续副词条 ROI；普通四词条盘继续使用单帧快速路径，较短的合法尾部需稳定确认，半对缺失和中间断层会被拒绝。低等级 S 盘不再因固定 12/12 ROI 门槛失败。
 - 官方网页与 WinForms 扫描入口固定为 S 级。保留“遇到非 15 级停止”：触发盘在加入结果前停止，已经完成的盘写入 `export.partial.json`；异常和主动取消也使用不可取消的收尾写入部分文件。

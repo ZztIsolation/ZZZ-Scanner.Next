@@ -327,6 +327,12 @@ public sealed class ScanController
 
             await resultConsumer;
         }
+        catch (Exception ex)
+        {
+            pendingException ??= ex;
+            scanLog.Write("Scan session failed before terminal export:");
+            scanLog.Write(ex.ToString());
+        }
         finally
         {
             fastOcrAssistRecorder?.Dispose();
@@ -342,6 +348,9 @@ public sealed class ScanController
             || !string.IsNullOrWhiteSpace(terminationCode);
         var exportFile = Path.Combine(outputDir, partial ? "export.partial.json" : "export.json");
         await File.WriteAllTextAsync(exportFile, JsonSerializer.Serialize(ordered, JsonDefaults.Write), CancellationToken.None);
+        scanLog.WriteEvent(
+            "SCAN_TERMINAL",
+            $"visited={counters.Visited}, queued={counters.Queued}, completed={counters.Completed}, failed={counters.Failed}, partial={partial}, terminationCode={terminationCode}, exportFile={Path.GetFileName(exportFile)}");
 
         if (pendingException is not null)
         {
@@ -1262,9 +1271,11 @@ public sealed class ScanController
         int startColumn = 1)
     {
         var currentY = offset.Y + step.Y * row;
-        ImageSignature[]? previousPanelSignatures = counters.Queued > 0
-            ? CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois)
-            : null;
+        ImageSignature[]? previousPanelSignatures = CaptureCurrentPanelSignatures(
+            window,
+            panelRect,
+            panelChangeProbeRect,
+            rois);
         startColumn = Math.Clamp(startColumn, 1, maxColumns);
         if (startColumn > 1)
         {
@@ -1351,6 +1362,14 @@ public sealed class ScanController
                 continue;
             }
 
+            var firstQueuedItem = counters.Queued == 0;
+            if (firstQueuedItem)
+            {
+                scanLog.WriteEvent(
+                    "FIRST_CELL_BASELINE_CAPTURED",
+                    $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}, probes={previousPanelSignatures?.Length ?? 0}");
+            }
+
             scanLog.WriteEvent("CELL_CLICK", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}, point={clickPoint}");
             var selectionProbeRect = SelectionProbeRect(window, clickPoint);
             var selectionProbeWatch = Stopwatch.StartNew();
@@ -1368,6 +1387,31 @@ public sealed class ScanController
             {
                 var refresh = new PointF(offset.X + step.X * refreshCol, currentY);
                 selectionRefreshPoint = window.ToScreenPoint(refresh);
+            }
+
+            if (PanelCaptureGate.RequiresFirstCellNeighborRoundTrip(firstQueuedItem))
+            {
+                scanLog.WriteEvent("FIRST_CELL_REFRESH_REQUIRED", $"attempt=preflight, reason=deterministic_neighbor_round_trip, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}");
+                await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
+                var refresh = await RefreshSelectionForPanelRetryAsync(window, profile, panelRect, rois, panelChangeProbeRect, scanLog, clickPoint, selectionRefreshPoint, pass, row, col, maxColumns, logicalRow, visibleTopText, viewportStateText, token);
+                if (!refresh.RefreshReady)
+                {
+                    throw new PanelCellCaptureException(
+                        pass,
+                        row,
+                        col,
+                        maxColumns,
+                        logicalRow,
+                        1,
+                        window,
+                        runtimeState.VisualProfileId,
+                        new StalePanelException("首件邻格刷新无法证明详情面板变化。"));
+                }
+
+                scanLog.WriteEvent("FIRST_CELL_REFRESH_READY", $"attempt=preflight, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}");
+                previousPanelSignatures = refresh.PanelSignatures;
+                selectionProbeRect = refresh.SelectionProbeRect;
+                beforeSelectionSignature = refresh.SelectionSignature;
             }
 
             using var panelCapture = await CaptureStablePanelWithRetryAsync(
@@ -1394,7 +1438,8 @@ public sealed class ScanController
                 viewportStateText,
                 token,
                 currentPostScrollFirstCell,
-                sceneAdaptivePanelFloorEligible);
+                sceneAdaptivePanelFloorEligible,
+                firstQueuedItem);
             var panelImage = panelCapture.TakeImage();
             var captureRois = rois.Take(panelCapture.VisibleRoiCount).ToArray();
             var debugImage = options.ShowDebugImages ? (Bitmap)panelImage.Clone() : null;
@@ -3007,7 +3052,8 @@ public sealed class ScanController
         string viewportStateText,
         CancellationToken token,
         bool postScrollFirstCell,
-        bool sceneAdaptivePanelFloorEligible)
+        bool sceneAdaptivePanelFloorEligible,
+        bool firstQueuedItem)
     {
         const int maxAttempts = 3;
         var activePreviousPanelSignatures = previousPanelSignatures;
@@ -3017,15 +3063,23 @@ public sealed class ScanController
         {
             try
             {
-                var allowSelectionOnlyFallback = !postScrollFirstCell && attempt == 1;
+                var allowSelectionOnlyFallback = !firstQueuedItem && !postScrollFirstCell && attempt == 1;
                 return await CaptureStablePanelAsync(window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect, activePreviousPanelSignatures, activeSelectionProbeRect, activeBeforeSelectionSignature, runtimeState, scanLog, token, postScrollFirstCell, sceneAdaptivePanelFloorEligible && attempt == 1, allowSelectionOnlyFallback);
             }
             catch (StalePanelException) when (attempt < maxAttempts)
             {
                 runtimeState.PanelStability.MarkSafetyFallback();
                 scanLog.WriteEvent("PANEL_STALE_RETRY", $"attempt={attempt}/{maxAttempts - 1}, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}, point={clickPoint}");
+                if (firstQueuedItem)
+                {
+                    scanLog.WriteEvent("FIRST_CELL_REFRESH_REQUIRED", $"attempt={attempt}/{maxAttempts - 1}, reason=stale_panel, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}");
+                }
                 await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
                 var refresh = await RefreshSelectionForPanelRetryAsync(window, profile, panelRect, rois, panelChangeProbeRect, scanLog, clickPoint, selectionRefreshPoint, pass, row, col, maxColumns, logicalRow, visibleTopText, viewportStateText, token);
+                if (firstQueuedItem && refresh.RefreshReady)
+                {
+                    scanLog.WriteEvent("FIRST_CELL_REFRESH_READY", $"attempt={attempt}/{maxAttempts - 1}, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}");
+                }
                 activePreviousPanelSignatures = refresh.PanelSignatures;
                 activeSelectionProbeRect = refresh.SelectionProbeRect;
                 activeBeforeSelectionSignature = refresh.SelectionSignature;
@@ -3034,8 +3088,16 @@ public sealed class ScanController
             {
                 runtimeState.PanelStability.MarkSafetyFallback();
                 scanLog.WriteEvent("PANEL_CAPTURE_RETRY", $"attempt={attempt}/{maxAttempts - 1}, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}, point={clickPoint}, reason={ex.Message}");
+                if (firstQueuedItem)
+                {
+                    scanLog.WriteEvent("FIRST_CELL_REFRESH_REQUIRED", $"attempt={attempt}/{maxAttempts - 1}, reason=capture_timeout, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}");
+                }
                 await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
                 var refresh = await RefreshSelectionForPanelRetryAsync(window, profile, panelRect, rois, panelChangeProbeRect, scanLog, clickPoint, selectionRefreshPoint, pass, row, col, maxColumns, logicalRow, visibleTopText, viewportStateText, token);
+                if (firstQueuedItem && refresh.RefreshReady)
+                {
+                    scanLog.WriteEvent("FIRST_CELL_REFRESH_READY", $"attempt={attempt}/{maxAttempts - 1}, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}");
+                }
                 activePreviousPanelSignatures = refresh.PanelSignatures;
                 activeSelectionProbeRect = refresh.SelectionProbeRect;
                 activeBeforeSelectionSignature = refresh.SelectionSignature;
@@ -3079,6 +3141,7 @@ public sealed class ScanController
         token.ThrowIfCancellationRequested();
         var targetPanelSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
         ImageSignature[] refreshedPanelSignatures = targetPanelSignatures;
+        var refreshReady = false;
         if (selectionRefreshPoint is { } refreshPoint && refreshPoint != clickPoint)
         {
             scanLog.WriteEvent("PANEL_SELECTION_REFRESH", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}, refreshPoint={refreshPoint}, targetPoint={clickPoint}");
@@ -3105,6 +3168,7 @@ public sealed class ScanController
                 token);
             if (result.Ready && latestObservedSignatures is not null)
             {
+                refreshReady = true;
                 refreshedPanelSignatures = latestObservedSignatures;
                 scanLog.WriteEvent(
                     "PANEL_SELECTION_REFRESH_READY",
@@ -3126,7 +3190,8 @@ public sealed class ScanController
         return new SelectionRefreshCapture(
             refreshedPanelSignatures,
             refreshedSelectionProbeRect,
-            refreshedSelectionSignature);
+            refreshedSelectionSignature,
+            refreshReady);
     }
 
     private static Rectangle ClampRectangle(Rectangle rect, System.Drawing.Size bounds)
@@ -3228,8 +3293,10 @@ public sealed class ScanController
         var textCoreStableProbeRects = measureTextCoreStability
             ? BuildTextCoreStableProbeRects(panelRect, rois)
             : Array.Empty<Rectangle>();
-        var sawPanelChange = previousPanelSignatures is null;
-        var selectionChanged = previousPanelSignatures is null;
+        var initialGate = PanelCaptureGate.Initialize(previousPanelSignatures is not null);
+        var sawPanelChange = initialGate.SawPanelChange;
+        var panelChangedFromBaseline = false;
+        var selectionChanged = initialGate.SelectionChanged;
         ImageSignature[]? previousStableProbeSignatures = null;
         ImageSignature[]? previousTextCoreStableProbeSignatures = null;
         var stableProbeFrames = 0;
@@ -3243,7 +3310,7 @@ public sealed class ScanController
         var frameLoopMilliseconds = 0.0;
         var frameToBitmapMilliseconds = 0.0;
         var bitmapCreatedCount = 0;
-        double? changeMilliseconds = previousPanelSignatures is null ? 0 : null;
+        double? changeMilliseconds = initialGate.ChangeMilliseconds;
         double? weakPanelChangeMilliseconds = null;
         double? selectionChangeMilliseconds = null;
         double? fullRoiMilliseconds = null;
@@ -3343,7 +3410,12 @@ public sealed class ScanController
                 var probeSignatureWatch = Stopwatch.StartNew();
                 var probeSignatures = CreateSignatures(probeImage, probeCaptureRects);
                 var probeChangeDistance = ProbeChangeDistance(previousPanelSignatures, probeSignatures);
-                if (probeChangeDistance > PanelStrongChangeTolerance && elapsedMilliseconds >= MinReliablePanelChangeMs)
+                panelChangedFromBaseline = PanelCaptureGate.IsStrongChangeCurrentFrame(
+                    probeChangeDistance,
+                    elapsedMilliseconds,
+                    PanelStrongChangeTolerance,
+                    MinReliablePanelChangeMs);
+                if (panelChangedFromBaseline)
                 {
                     sawPanelChange = true;
                     changeMilliseconds ??= elapsedMilliseconds;
@@ -3401,11 +3473,15 @@ public sealed class ScanController
 
             var signatureWatch = Stopwatch.StartNew();
             var changeProbeSignatures = CreateSignatures(image, fullPanelProbeRects);
-            if (!sawPanelChange
-                && previousPanelSignatures is not null)
+            if (previousPanelSignatures is not null)
             {
                 var fullPanelChangeDistance = ProbeChangeDistance(previousPanelSignatures, changeProbeSignatures);
-                if (fullPanelChangeDistance > PanelStrongChangeTolerance && elapsedMilliseconds >= MinReliablePanelChangeMs)
+                panelChangedFromBaseline = PanelCaptureGate.IsStrongChangeCurrentFrame(
+                    fullPanelChangeDistance,
+                    elapsedMilliseconds,
+                    PanelStrongChangeTolerance,
+                    MinReliablePanelChangeMs);
+                if (panelChangedFromBaseline)
                 {
                     sawPanelChange = true;
                     changeMilliseconds ??= elapsedMilliseconds;
@@ -3492,7 +3568,7 @@ public sealed class ScanController
                     : panelSelectedStableFrames;
                 var stableEnough = selectedStableFrames >= effectiveRequiredStableFrames;
                 var roiEnough = panelReadable;
-                acceptGateReason = !sawPanelChange
+                acceptGateReason = !panelChangedFromBaseline
                     ? "waiting_for_panel_change"
                     : !roiVisibility.ValidBoundary
                         ? roiVisibility.InvalidReason
@@ -3507,7 +3583,7 @@ public sealed class ScanController
                     && panelTiming.WarmupComplete
                     && previousPanelSignatures is not null
                     && fullPanelReadable
-                    && sawPanelChange)
+                    && panelChangedFromBaseline)
                 {
                     if (selectedStableFrames >= 1 && elapsedMilliseconds >= quickMinimumAcceptMs)
                     {
@@ -3529,13 +3605,13 @@ public sealed class ScanController
                 {
                     quickRejectReason = !panelTiming.WarmupComplete
                         ? "before_warmup_complete"
-                        : sawPanelChange
+                        : panelChangedFromBaseline
                             ? visibleCount == rois.Count ? "waiting_for_full_roi" : "variable_roi_requires_stability"
                             : "waiting_for_panel_change";
                 }
 
                 if (roiEnough
-                    && sawPanelChange
+                    && panelChangedFromBaseline
                     && elapsedMilliseconds >= changedMinimumAcceptMs
                     && stableEnough)
                 {
@@ -3560,7 +3636,7 @@ public sealed class ScanController
                     return new PanelCapture(acceptedImage, visibleCount, waitMilliseconds, usedFallback: false, changeProbeSignatures, frameCount, changeMilliseconds, selectionChangeMilliseconds, fullRoiMilliseconds, stableMilliseconds, textCoreStableMilliseconds, stabilityDecision.SourceName, stabilityDecision.Reason, captureMilliseconds, signatureMilliseconds, visibleRoiMilliseconds, frameLoopMilliseconds, frameToBitmapMilliseconds, bitmapCreatedCount, changedMinimumAcceptMs, requiredStableFrames, panelTiming.SampleCount, panelTiming.Reason, finalAcceptReason, quickAccept: false, quickRejectReason, panelTiming.EffectivePanelAcceptMode, panelTiming.EffectivePostScrollPanelAcceptMode, panelTiming.PanelFloorMode, panelTiming.PanelMinAcceptFloorMs, panelTiming.SameRowPanelFloorMs, panelTiming.PostScrollPanelFloorMs, panelFloorReason, CalculateFloorWaitLimitedMilliseconds(changedMinimumAcceptMs, changeMilliseconds, fullRoiMilliseconds, stableMilliseconds), waitMilliseconds - changedMinimumAcceptMs, roiCompleteFrames, selectedStableFrames, acceptGateReason);
                 }
 
-                if (panelReadable && !sawPanelChange && stableProbeFrames >= requiredStableFrames && DateTime.UtcNow - start >= unchangedFallbackDelay)
+                if (panelReadable && !panelChangedFromBaseline && stableProbeFrames >= requiredStableFrames && DateTime.UtcNow - start >= unchangedFallbackDelay)
                 {
                     if (!PromoteSelectionChange(elapsedMilliseconds, out var blockedReason))
                     {
@@ -4655,7 +4731,8 @@ public sealed class ScanController
     private sealed record SelectionRefreshCapture(
         ImageSignature[] PanelSignatures,
         Rectangle SelectionProbeRect,
-        ImageSignature SelectionSignature);
+        ImageSignature SelectionSignature,
+        bool RefreshReady);
 
     private sealed class StalePanelException : TimeoutException
     {

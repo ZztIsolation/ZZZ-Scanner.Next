@@ -56,6 +56,10 @@ public static class ScanBenchmark
         @"visited=(?<visited>\d+), queued=(?<queued>\d+), completed=(?<completed>\d+), failed=(?<failed>\d+)",
         RegexOptions.Compiled);
 
+    private static readonly Regex TerminalDetailRegex = new(
+        @"^visited=(?<visited>\d+), queued=(?<queued>\d+), completed=(?<completed>\d+), failed=(?<failed>\d+), partial=(?<partial>True|False), terminationCode=(?<termination>[^,]*), exportFile=(?<export>.+)$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex CellTimingIndexRegex = new(
         @"CELL_TIMING: index=(?<index>\d+)",
         RegexOptions.Compiled);
@@ -219,6 +223,7 @@ public static class ScanBenchmark
         var intervals = BuildClickIntervals(events);
         var clickPositions = ParseClickPositions(events);
         var scrollDurations = BuildScrollDurations(events);
+        var terminal = ParseScanTerminal(events);
         var lastCounters = ParseLastCounters(lines);
         var resourceCounters = ParseResourceCounters(resourceRows);
         var scanOnceCounters = ParseScanOnceCounters(Path.Combine(scanDirectory, "scan-once-result.json"));
@@ -226,7 +231,13 @@ public static class ScanBenchmark
         var startSettings = ParseStartSettings(lines);
         var traversal = ParseTraversal(lines);
         var overlapSummary = ParseOverlapTraversalSummary(lines, events);
-        var exportStats = ReadExportStats(Path.Combine(scanDirectory, "export.json"));
+        var exportFile = ResolveExportFile(scanDirectory, terminal?.ExportFile);
+        var exportStats = ReadExportStats(exportFile);
+        var non15FileCount = Directory.EnumerateFiles(scanDirectory, "*.non15.txt").Count();
+        var inferredPartial = terminal?.Partial
+            ?? string.Equals(Path.GetFileName(exportFile), "export.partial.json", StringComparison.OrdinalIgnoreCase);
+        var inferredTerminationCode = terminal?.TerminationCode
+            ?? (non15FileCount > 0 ? "non_level_15_stop" : "");
         var captureEndTime = ParseCaptureEndTime(lines);
         var overlapMode = string.Equals(traversal, "overlap-signature-page", StringComparison.OrdinalIgnoreCase);
         var sameRowClick = Stats.From(intervals.Where(x => !x.AfterScroll).Select(x => x.Milliseconds));
@@ -238,6 +249,9 @@ public static class ScanBenchmark
             StartTime = ParseStartTime(lines),
             EndTime = ParseEndTime(lines),
             StopReason = ParseStopReason(lines),
+            Partial = inferredPartial,
+            TerminationCode = inferredTerminationCode,
+            ExportFileName = Path.GetFileName(exportFile),
             CaptureEndTime = captureEndTime,
             OcrWorkers = startSettings?.Workers,
             OcrBatchSizeSetting = startSettings?.BatchSize,
@@ -266,7 +280,7 @@ public static class ScanBenchmark
             SlotMainStatViolationCount = exportStats.SlotMainStatViolationCount,
             SlotFixedValueViolationCount = exportStats.SlotFixedValueViolationCount,
             ErrorFileCount = Directory.EnumerateFiles(scanDirectory, "*.error.txt").Count(),
-            Non15FileCount = Directory.EnumerateFiles(scanDirectory, "*.non15.txt").Count(),
+            Non15FileCount = non15FileCount,
             CellTimingCount = cellTimings.Count,
             CellTimingFallbackCount = cellTimings.Count(x => x.Fallback),
             CellTimingFallbackLogCount = lines.Count(line => line.Contains("Panel probes stayed unchanged", StringComparison.Ordinal)),
@@ -298,10 +312,10 @@ public static class ScanBenchmark
             EdgeClickBlockedCount = events.Count(x => x.Kind == "EDGE_CLICK_BLOCKED"),
             MinVisibleRois = cellTimings.Count > 0 ? cellTimings.Min(x => x.VisibleRois) : null,
             IncompleteRoiCount = cellTimings.Count(x => x.VisibleRois < x.TotalRois),
-            LastVisited = scanOnceCounters?.Visited ?? lastCounters?.Visited ?? resourceCounters?.Visited,
-            LastQueued = scanOnceCounters?.Queued ?? lastCounters?.Queued ?? resourceCounters?.Queued,
-            LastCompleted = scanOnceCounters?.Completed ?? lastCounters?.Completed ?? resourceCounters?.Completed,
-            LastFailed = scanOnceCounters?.Failed ?? lastCounters?.Failed ?? resourceCounters?.Failed,
+            LastVisited = terminal?.Counters.Visited ?? scanOnceCounters?.Visited ?? lastCounters?.Visited ?? resourceCounters?.Visited,
+            LastQueued = terminal?.Counters.Queued ?? scanOnceCounters?.Queued ?? lastCounters?.Queued ?? resourceCounters?.Queued,
+            LastCompleted = terminal?.Counters.Completed ?? scanOnceCounters?.Completed ?? lastCounters?.Completed ?? resourceCounters?.Completed,
+            LastFailed = terminal?.Counters.Failed ?? scanOnceCounters?.Failed ?? lastCounters?.Failed ?? resourceCounters?.Failed,
             ClickSameRow = sameRowClick,
             ClickAfterScroll = afterScrollClick,
             AfterScrollExtra = Stats.From(sameRowClick.Average is null
@@ -366,6 +380,14 @@ public static class ScanBenchmark
         };
         report.FullScanExpected = report.MaxItemsSetting == 0
             && string.Equals(report.Traversal, "overlap-signature-page", StringComparison.OrdinalIgnoreCase);
+        report.EffectiveFullScanComplete = report.FullScanComplete
+            || (report.FullScanExpected
+                && report.Partial == true
+                && string.Equals(report.TerminationCode, "non_level_15_stop", StringComparison.OrdinalIgnoreCase)
+                && report.Non15FileCount > 0
+                && report.LastFailed == 0
+                && ExportMatchesCompleted(report) is not false
+                && report.OverlapHardStopCount == 0);
         report.QuickAcceptCount = cellTimings.Count(x => x.QuickAccept == true);
         report.QuickRejectCount = cellTimings.Count(x => x.QuickAccept == false);
         report.AcceptGateReasons = cellTimings
@@ -876,6 +898,23 @@ public static class ScanBenchmark
         }
     }
 
+    private static string ResolveExportFile(string scanDirectory, string? terminalExportFile)
+    {
+        if (!string.IsNullOrWhiteSpace(terminalExportFile))
+        {
+            var terminalCandidate = Path.Combine(scanDirectory, Path.GetFileName(terminalExportFile));
+            if (File.Exists(terminalCandidate))
+            {
+                return terminalCandidate;
+            }
+        }
+
+        var complete = Path.Combine(scanDirectory, "export.json");
+        return File.Exists(complete)
+            ? complete
+            : Path.Combine(scanDirectory, "export.partial.json");
+    }
+
     private static string ExportFingerprint(JsonElement element)
     {
         return element.ValueKind switch
@@ -907,6 +946,35 @@ public static class ScanBenchmark
                     ParseInt(match.Groups["completed"].Value),
                     ParseInt(match.Groups["failed"].Value));
             }
+        }
+
+        return null;
+    }
+
+    private static ScanTerminalSnapshot? ParseScanTerminal(IReadOnlyList<ScanEvent> events)
+    {
+        for (var i = events.Count - 1; i >= 0; i--)
+        {
+            if (!string.Equals(events[i].Kind, "SCAN_TERMINAL", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var match = TerminalDetailRegex.Match(events[i].Detail);
+            if (!match.Success)
+            {
+                continue;
+            }
+
+            return new ScanTerminalSnapshot(
+                new CounterSnapshot(
+                    ParseInt(match.Groups["visited"].Value),
+                    ParseInt(match.Groups["queued"].Value),
+                    ParseInt(match.Groups["completed"].Value),
+                    ParseInt(match.Groups["failed"].Value)),
+                bool.Parse(match.Groups["partial"].Value),
+                match.Groups["termination"].Value,
+                match.Groups["export"].Value.Trim());
         }
 
         return null;
@@ -1019,6 +1087,9 @@ public static class ScanBenchmark
         Write(prefix, "completed_per_sec", report.CompletedPerSecond);
         Write(prefix, "capture_limited", report.CaptureLimited.ToString(CultureInfo.InvariantCulture).ToLowerInvariant());
         Write(prefix, "stop_reason", report.StopReason);
+        Write(prefix, "partial", report.Partial);
+        Write(prefix, "termination_code", report.TerminationCode);
+        Write(prefix, "export_file", report.ExportFileName);
         Write(prefix, "traversal", report.Traversal);
         Write(prefix, "ocr_workers", report.OcrWorkers);
         Write(prefix, "ocr_batch_setting", report.OcrBatchSizeSetting);
@@ -1083,6 +1154,7 @@ public static class ScanBenchmark
         Write(prefix, "overlap_hard_stop_count", report.OverlapHardStopCount);
         Write(prefix, "full_scan_expected", report.FullScanExpected.ToString(CultureInfo.InvariantCulture).ToLowerInvariant());
         Write(prefix, "full_scan_complete", report.FullScanComplete.ToString(CultureInfo.InvariantCulture).ToLowerInvariant());
+        Write(prefix, "effective_full_scan_complete", report.EffectiveFullScanComplete.ToString(CultureInfo.InvariantCulture).ToLowerInvariant());
         Write(prefix, "missing_logical_rows_count", report.OverlapMissingLogicalRowsCount);
         Write(prefix, "scanned_logical_rows_count", report.OverlapScannedLogicalRowsCount);
         Write(prefix, "total_rows", report.TotalLogicalRows);
@@ -1225,8 +1297,10 @@ public static class ScanBenchmark
         Write("acceptance", "no_unsafe_visual_row2", report.UnsafeVisualRow2ClickCount == 0 ? "pass" : "fail");
         Write("acceptance", "overlap_rows_complete", string.Equals(report.Traversal, "overlap-signature-page", StringComparison.OrdinalIgnoreCase) && report.OverlapRowScannedCount > 0 && report.LastQueued == report.ExportItemCount ? "pass" : "skip");
         Write("acceptance", "overlap_no_hard_stop", report.OverlapHardStopCount == 0 ? "pass" : "fail");
-        Write("acceptance", "overlap_no_missing_rows", !report.FullScanExpected ? "skip" : report.OverlapMissingLogicalRowsCount == 0 ? "pass" : "fail");
-        Write("acceptance", "full_scan_complete", !report.FullScanExpected ? "skip" : report.FullScanComplete ? "pass" : "fail");
+        var validNonLevel15Stop = report.EffectiveFullScanComplete
+            && string.Equals(report.TerminationCode, "non_level_15_stop", StringComparison.OrdinalIgnoreCase);
+        Write("acceptance", "overlap_no_missing_rows", !report.FullScanExpected || validNonLevel15Stop ? "skip" : report.OverlapMissingLogicalRowsCount == 0 ? "pass" : "fail");
+        Write("acceptance", "full_scan_complete", !report.FullScanExpected ? "skip" : report.EffectiveFullScanComplete ? "pass" : "fail");
         Write("acceptance", "strict_one_way_scroll", report.RowScrollOvershotCount == 0 && report.RowScrollRecoveryAcceptedCount == 0 && report.RowScrollStrictStopCount == 0 ? "pass" : "risk");
         Write("acceptance", "scroll_overshot_recovered", report.RowScrollRecoveryFailCount == 0 && report.RowScrollOvershotCount <= report.RowScrollRecoveryAcceptedCount ? "pass" : "risk");
     }
@@ -1462,6 +1536,9 @@ public static class ScanBenchmark
         public double? CompletedPerSecond { get; set; }
         public bool CaptureLimited { get; set; }
         public string StopReason { get; set; } = "";
+        public bool? Partial { get; set; }
+        public string TerminationCode { get; set; } = "";
+        public string ExportFileName { get; set; } = "";
         public string Traversal { get; set; } = "unknown";
         public int? OcrWorkers { get; set; }
         public int? OcrBatchSizeSetting { get; set; }
@@ -1524,6 +1601,7 @@ public static class ScanBenchmark
         public int OverlapMissingLogicalRowsCount { get; set; }
         public bool FullScanExpected { get; set; }
         public bool FullScanComplete { get; set; }
+        public bool EffectiveFullScanComplete { get; set; }
         public int RowScrollOvershotCount { get; set; }
         public int RowScrollRecoveryAcceptedCount { get; set; }
         public int RowScrollRecoveryFailCount { get; set; }
@@ -1618,6 +1696,12 @@ public static class ScanBenchmark
     private readonly record struct ScrollTiming(double ScrollTickWaitMs, double ListStableMs, double RowSignatureMs, double PostScrollViewportMs);
 
     private readonly record struct CounterSnapshot(int Visited, int Queued, int Completed, int Failed);
+
+    private readonly record struct ScanTerminalSnapshot(
+        CounterSnapshot Counters,
+        bool Partial,
+        string TerminationCode,
+        string ExportFile);
 
     private readonly record struct StartSettings(int Workers, int BatchSize, int QueueCapacity, int IntraOpThreads);
 
