@@ -48,6 +48,10 @@ $parsedHelperVersion = $null
 if (-not [System.Version]::TryParse($helperVersion, [ref]$parsedHelperVersion)) {
     throw "Helper project Version is invalid: $helperVersion"
 }
+$immutableHelperSourceRevisions = @{
+    "1.3.1" = "7f88ad9c0e8fbcf4baf0f9f39d51af4fa85b13f1"
+}
+$helperSourceRevisionId = $immutableHelperSourceRevisions[$helperVersion]
 if ([string]::IsNullOrWhiteSpace($HelperReleaseTag)) {
     $HelperReleaseTag = "helper-$helperVersion"
 }
@@ -601,10 +605,14 @@ if (-not $HelperOnly) {
     $vcRedist = Find-VCRedistDirectory
 }
 
-Invoke-DotnetPublish @(
+$helperPublishArguments = @(
     "publish", "Launcher\ZZZ-Scanner.Helper.csproj", "-c", "Release", "-r", "win-x64",
     "--self-contained", "true", "-o", $helperOut
-) "Helper publish"
+)
+if (-not [string]::IsNullOrWhiteSpace($helperSourceRevisionId)) {
+    $helperPublishArguments += "-p:SourceRevisionId=$helperSourceRevisionId"
+}
+Invoke-DotnetPublish $helperPublishArguments "Helper publish"
 $helperExe = Join-Path $helperOut "ZZZ-Scanner-Helper.exe"
 Set-DeterministicPeTimestamps $helperExe
 
@@ -740,6 +748,7 @@ $helperManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $helperMani
 $report = [ordered]@{
     version = $Version
     helperReleaseTag = $HelperReleaseTag
+    helperSourceRevisionId = $helperSourceRevisionId
     createdAt = [DateTimeOffset]::Now.ToString("O")
     vcRuntimeSource = $vcRedist.Source
     vcRuntimePath = $vcRedist.Path
