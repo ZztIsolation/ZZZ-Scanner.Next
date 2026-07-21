@@ -28,6 +28,8 @@ internal static class Program
             ("installed runtime verification", TestInstalledRuntimeVerificationAsync),
             ("single-version storage cleanup", TestSingleVersionStorageCleanupAsync),
             ("legacy Helper takeover selection", TestLegacyHelperTakeoverSelectionAsync),
+            ("Helper update transaction confirmation", TestHelperUpdateTransactionConfirmationAsync),
+            ("Helper update interruption recovery", TestHelperUpdateInterruptionRecoveryAsync),
             ("managed output root", TestManagedOutputRootAsync),
             ("managed OCR preprocessing", TestManagedOcrPreprocessingAsync),
             ("OCR output equivalence", TestOcrOutputEquivalenceAsync),
@@ -272,6 +274,123 @@ internal static class Program
         AssertTrue(missing.Candidate is null);
         AssertTrue(missing.Reason.Contains("未找到", StringComparison.Ordinal));
         return Task.CompletedTask;
+    }
+
+    private static async Task TestHelperUpdateTransactionConfirmationAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "zzz-helper-update-test", Guid.NewGuid().ToString("N"));
+        var previousRoot = Environment.GetEnvironmentVariable("ZZZ_SCANNER_DATA_ROOT");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZZZ_SCANNER_DATA_ROOT", root);
+            var target = HelperInstallationManager.ManagedHelperPath();
+            var backup = target + ".previous";
+            var updater = Path.Combine(root, "helper", ".staging", "helper-1.3.1.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(updater)!);
+            await File.WriteAllTextAsync(target, "candidate");
+            await File.WriteAllTextAsync(backup, "previous");
+            await File.WriteAllTextAsync(updater, "candidate");
+
+            var receipt = new HelperUpdateTransactionReceipt
+            {
+                TransactionId = "0123456789abcdef0123456789abcdef",
+                State = "pending",
+                Stage = "helper-started",
+                PreviousVersion = "1.2.1",
+                TargetPath = target,
+                BackupPath = backup,
+                UpdaterPath = updater,
+                CandidateSha256 = "test",
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            };
+            HelperUpdateTransactionManager.WriteReceiptForTests(receipt);
+            HelperUpdateTransactionManager.ResetForTests();
+
+            var info = HelperUpdateTransactionManager.CurrentInfo();
+            AssertTrue(info is not null);
+            AssertEqual("pending_confirmation", info!.State);
+            AssertEqual("1.2.1", info.PreviousVersion);
+            AssertThrows<InvalidDataException>(() => HelperUpdateTransactionManager.Confirm("wrong"));
+
+            var committed = HelperUpdateTransactionManager.Confirm(receipt.TransactionId);
+            AssertTrue(committed.Committed);
+            AssertEqual(receipt.TransactionId, committed.TransactionId);
+            AssertTrue(HelperUpdateTransactionManager.CurrentInfo() is null);
+            AssertTrue(HelperUpdateTransactionManager.Confirm(receipt.TransactionId).Committed);
+
+            HelperUpdateTransactionManager.ResetForTests();
+            AssertTrue(!await HelperUpdateTransactionManager.RecoverInterruptedAsync());
+            AssertTrue(HelperUpdateTransactionManager.ReadReceiptForTests() is null);
+            AssertTrue(!File.Exists(backup));
+        }
+        finally
+        {
+            HelperUpdateTransactionManager.ResetForTests();
+            Environment.SetEnvironmentVariable("ZZZ_SCANNER_DATA_ROOT", previousRoot);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task TestHelperUpdateInterruptionRecoveryAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "zzz-helper-update-recovery-test", Guid.NewGuid().ToString("N"));
+        var previousRoot = Environment.GetEnvironmentVariable("ZZZ_SCANNER_DATA_ROOT");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZZZ_SCANNER_DATA_ROOT", root);
+            var target = HelperInstallationManager.ManagedHelperPath();
+            var backup = target + ".previous";
+            var updater = Path.Combine(root, "helper", ".staging", "helper-1.3.1.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(updater)!);
+            await File.WriteAllTextAsync(updater, "candidate");
+
+            HelperUpdateTransactionReceipt Receipt(string id, string state = "pending") => new()
+            {
+                TransactionId = id,
+                State = state,
+                Stage = "prepared",
+                PreviousVersion = "1.2.1",
+                TargetPath = target,
+                BackupPath = backup,
+                UpdaterPath = updater,
+                CandidateSha256 = "test",
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            };
+
+            await File.WriteAllTextAsync(target, "previous-before-replace");
+            HelperUpdateTransactionManager.WriteReceiptForTests(Receipt("11111111111111111111111111111111"));
+            HelperUpdateTransactionManager.ResetForTests();
+            AssertTrue(!await HelperUpdateTransactionManager.RecoverInterruptedForTestsAsync());
+            AssertEqual("previous-before-replace", await File.ReadAllTextAsync(target));
+
+            await File.WriteAllTextAsync(target, "candidate-after-replace");
+            await File.WriteAllTextAsync(backup, "previous-after-replace");
+            HelperUpdateTransactionManager.WriteReceiptForTests(Receipt("22222222222222222222222222222222"));
+            HelperUpdateTransactionManager.ResetForTests();
+            AssertTrue(await HelperUpdateTransactionManager.RecoverInterruptedForTestsAsync());
+            AssertEqual("previous-after-replace", await File.ReadAllTextAsync(target));
+            AssertTrue(!File.Exists(backup));
+
+            await File.WriteAllTextAsync(target, "confirmed-candidate");
+            await File.WriteAllTextAsync(backup, "previous-confirmed");
+            var confirmed = Receipt("33333333333333333333333333333333", "confirmed");
+            HelperUpdateTransactionManager.WriteReceiptForTests(confirmed);
+            HelperUpdateTransactionManager.ResetForTests();
+            AssertTrue(!await HelperUpdateTransactionManager.RecoverInterruptedForTestsAsync());
+            AssertEqual("confirmed-candidate", await File.ReadAllTextAsync(target));
+            AssertTrue(!File.Exists(backup));
+            AssertTrue(HelperUpdateTransactionManager.ReadReceiptForTests() is null);
+        }
+        finally
+        {
+            HelperUpdateTransactionManager.ResetForTests();
+            Environment.SetEnvironmentVariable("ZZZ_SCANNER_DATA_ROOT", previousRoot);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     private static Task TestManagedOutputRootAsync()

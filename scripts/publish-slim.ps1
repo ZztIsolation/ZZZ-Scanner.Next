@@ -562,6 +562,8 @@ if ($HelperOnly) {
         schemaVersion = 1
         version = $helperVersion
         packageUrls = @(
+            "https://download.zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
+            "https://zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
             "https://github.com/ZztIsolation/zzz_calculator/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
         )
         sha256 = (Get-FileHash -Algorithm SHA256 $helperExe).Hash.ToLowerInvariant()
@@ -624,6 +626,8 @@ function New-PackageManifest([string]$Id, [string]$Mode, [string]$ZipPath, [stri
         id = $Id
         mode = $Mode
         packageUrls = @(
+            "https://download.zzzcaculator.top/downloads/zzz-scanner/$Version/$name",
+            "https://zzzcaculator.top/downloads/zzz-scanner/$Version/$name",
             "./$Version/$name",
             "https://github.com/ZztIsolation/zzz_calculator/releases/download/scanner-$Version/$name"
         )
@@ -670,6 +674,8 @@ $helperManifest = [ordered]@{
     schemaVersion = 1
     version = $helperVersion
     packageUrls = @(
+        "https://download.zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
+        "https://zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
         "https://github.com/ZztIsolation/zzz_calculator/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
     )
     sha256 = (Get-FileHash -Algorithm SHA256 $helperExe).Hash.ToLowerInvariant()

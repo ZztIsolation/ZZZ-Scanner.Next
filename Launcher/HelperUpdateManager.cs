@@ -8,6 +8,8 @@ namespace ZZZScannerHelper;
 
 internal static partial class HelperUpdateManager
 {
+    private const int MaxAttemptsPerSource = 3;
+
     public static async Task<HelperUpdatePreparation> PrepareAsync(
         Uri manifestUri,
         string currentVersion,
@@ -56,36 +58,66 @@ internal static partial class HelperUpdateManager
         {
             var packageUri = new Uri(manifestUri, value);
             HelperSecurity.EnsureTrustedDownloadUri(packageUri, "Helper update package");
-            try
+            for (var attempt = 1; attempt <= MaxAttemptsPerSource; attempt++)
             {
-                await DownloadAsync(http, packageUri, downloadPath, manifest.Size, manifest.Version, report, token);
-                await VerifyAsync(downloadPath, manifest.Size, manifest.Sha256, token);
-                if (File.Exists(executablePath))
+                try
                 {
-                    File.Delete(executablePath);
+                    await DownloadAsync(
+                        http,
+                        packageUri,
+                        downloadPath,
+                        manifest.Size,
+                        manifest.Version,
+                        attempt,
+                        report,
+                        token);
+                    await VerifyAsync(downloadPath, manifest.Size, manifest.Sha256, token);
+                    if (File.Exists(executablePath))
+                    {
+                        File.Delete(executablePath);
+                    }
+                    File.Move(downloadPath, executablePath);
+                    await report(new HelperUpdateProgress
+                    {
+                        Stage = "ready",
+                        Message = $"扫描助手 {manifest.Version} 已校验，正在重启...",
+                        Version = manifest.Version,
+                        TotalBytes = manifest.Size,
+                        BytesDownloaded = manifest.Size,
+                        Percent = 100,
+                        Attempt = attempt,
+                        MaxAttempts = MaxAttemptsPerSource,
+                    }, token);
+                    return new HelperUpdatePreparation
+                    {
+                        UpdateAvailable = true,
+                        CurrentVersion = currentVersion,
+                        AvailableVersion = manifest.Version,
+                        ExecutablePath = executablePath,
+                    };
                 }
-                File.Move(downloadPath, executablePath);
-                await report(new HelperUpdateProgress
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    Stage = "ready",
-                    Message = $"扫描助手 {manifest.Version} 已校验，正在重启...",
-                    Version = manifest.Version,
-                    TotalBytes = manifest.Size,
-                    BytesDownloaded = manifest.Size,
-                    Percent = 100,
-                }, token);
-                return new HelperUpdatePreparation
-                {
-                    UpdateAvailable = true,
-                    CurrentVersion = currentVersion,
-                    AvailableVersion = manifest.Version,
-                    ExecutablePath = executablePath,
-                };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                lastError = ex;
-                try { File.Delete(downloadPath); } catch { }
+                    lastError = ex;
+                    if (ex is InvalidDataException)
+                    {
+                        try { File.Delete(downloadPath); } catch { }
+                    }
+                    if (attempt < MaxAttemptsPerSource)
+                    {
+                        await report(new HelperUpdateProgress
+                        {
+                            Stage = "retry",
+                            Message = $"下载中断，正在重试（{attempt + 1}/{MaxAttemptsPerSource}）...",
+                            Version = manifest.Version,
+                            BytesDownloaded = File.Exists(downloadPath) ? new FileInfo(downloadPath).Length : 0,
+                            TotalBytes = manifest.Size,
+                            Attempt = attempt + 1,
+                            MaxAttempts = MaxAttemptsPerSource,
+                        }, token);
+                        await Task.Delay(TimeSpan.FromMilliseconds(500 * attempt), token);
+                    }
+                }
             }
         }
 
@@ -98,18 +130,48 @@ internal static partial class HelperUpdateManager
         string destination,
         long expectedSize,
         string version,
+        int attempt,
         Func<HelperUpdateProgress, CancellationToken, Task> report,
         CancellationToken token)
     {
+        var existingBytes = File.Exists(destination) ? new FileInfo(destination).Length : 0;
+        if (existingBytes < 0 || existingBytes > expectedSize)
+        {
+            File.Delete(destination);
+            existingBytes = 0;
+        }
+        if (existingBytes == expectedSize)
+        {
+            return;
+        }
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
         request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true };
+        if (existingBytes > 0)
+        {
+            request.Headers.Range = new RangeHeaderValue(existingBytes, null);
+        }
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
         HelperSecurity.EnsureTrustedDownloadUri(response.RequestMessage?.RequestUri ?? uri, "Helper update redirect");
         response.EnsureSuccessStatusCode();
+        var appending = existingBytes > 0 && response.StatusCode == System.Net.HttpStatusCode.PartialContent;
+        if (appending && response.Content.Headers.ContentRange?.From != existingBytes)
+        {
+            throw new InvalidDataException("Helper update resume offset mismatch.");
+        }
+        if (!appending)
+        {
+            existingBytes = 0;
+        }
         await using var input = await response.Content.ReadAsStreamAsync(token);
-        await using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, true);
+        await using var output = new FileStream(
+            destination,
+            appending ? FileMode.Append : FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            128 * 1024,
+            true);
         var buffer = new byte[128 * 1024];
-        long downloaded = 0;
+        var downloaded = existingBytes;
         var lastReport = Stopwatch.StartNew();
         while (true)
         {
@@ -120,6 +182,10 @@ internal static partial class HelperUpdateManager
             }
             await output.WriteAsync(buffer.AsMemory(0, read), token);
             downloaded += read;
+            if (downloaded > expectedSize)
+            {
+                throw new InvalidDataException("Helper update exceeded the manifest size.");
+            }
             if (lastReport.ElapsedMilliseconds >= 300 || downloaded == expectedSize)
             {
                 await report(new HelperUpdateProgress
@@ -130,6 +196,8 @@ internal static partial class HelperUpdateManager
                     BytesDownloaded = downloaded,
                     TotalBytes = expectedSize,
                     Percent = expectedSize > 0 ? Math.Clamp(downloaded * 100d / expectedSize, 0, 100) : null,
+                    Attempt = attempt,
+                    MaxAttempts = MaxAttemptsPerSource,
                 }, token);
                 lastReport.Restart();
             }
@@ -190,6 +258,8 @@ internal sealed class HelperUpdateProgress
     public long? BytesDownloaded { get; set; }
     public long? TotalBytes { get; set; }
     public double? Percent { get; set; }
+    public int? Attempt { get; set; }
+    public int? MaxAttempts { get; set; }
 }
 
 internal sealed class HelperUpdatePreparation

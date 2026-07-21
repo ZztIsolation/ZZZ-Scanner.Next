@@ -16,34 +16,25 @@ internal static class HelperInstallationManager
     private const string CompleteUpdateArgument = "--complete-helper-update";
     private const string RestoreUpdateArgument = "--restore-helper-update";
     private const string PendingBootstrapCleanupFile = "bootstrap-cleanup-pending.txt";
-    private static string? _pendingUpdateBackup;
-    private static string? _pendingUpdateTarget;
-
     public static async Task<HelperLifecycleResult> PrepareAsync(string[] args)
     {
         await RetryPendingBootstrapCleanupAsync();
 
         if (args.Length >= 3 && args[0].Equals(ApplyUpdateArgument, StringComparison.Ordinal))
         {
-            await ApplyUpdateAsync(args);
+            await HelperUpdateTransactionManager.ApplyAsync(int.Parse(args[1]), args[2]);
             return new HelperLifecycleResult(true, []);
         }
 
         if (args.Length >= 4 && args[0].Equals(CompleteUpdateArgument, StringComparison.Ordinal))
         {
-            if (int.TryParse(args[1], out var updaterPid))
-            {
-                await WaitForExitAsync(updaterPid);
-            }
-            TryDelete(args[2]);
-            _pendingUpdateBackup = args[3];
-            _pendingUpdateTarget = ManagedHelperPath();
+            HelperUpdateTransactionManager.BeginManagedStart(args[1], args[2], args[3]);
             return new HelperLifecycleResult(false, args.Skip(4).ToArray());
         }
 
-        if (args.Length >= 3 && args[0].Equals(RestoreUpdateArgument, StringComparison.Ordinal))
+        if (args.Length >= 4 && args[0].Equals(RestoreUpdateArgument, StringComparison.Ordinal))
         {
-            await RestoreUpdateAsync(args);
+            await HelperUpdateTransactionManager.RestoreAsync(int.Parse(args[1]), args[2], args[3]);
             return new HelperLifecycleResult(true, []);
         }
 
@@ -55,6 +46,11 @@ internal static class HelperInstallationManager
             }
             await TryDeleteVerifiedBootstrapAsync(args[2]);
             return new HelperLifecycleResult(false, args.Skip(3).ToArray());
+        }
+
+        if (await HelperUpdateTransactionManager.RecoverInterruptedAsync())
+        {
+            return new HelperLifecycleResult(true, []);
         }
 
         if (Environment.GetEnvironmentVariable(SkipManagedInstallEnvironmentVariable) == "1")
@@ -165,34 +161,21 @@ internal static class HelperInstallationManager
 
     public static void CompletePendingUpdate()
     {
-        if (!string.IsNullOrWhiteSpace(_pendingUpdateBackup))
-        {
-            TryDelete(_pendingUpdateBackup);
-        }
-        _pendingUpdateBackup = null;
-        _pendingUpdateTarget = null;
+        // The updater remains pending until the browser confirms health, token,
+        // WebSocket, and diagnostics on the new managed Helper.
     }
 
     public static bool TryRollbackPendingUpdate()
     {
-        if (string.IsNullOrWhiteSpace(_pendingUpdateBackup)
-            || string.IsNullOrWhiteSpace(_pendingUpdateTarget)
-            || !File.Exists(_pendingUpdateBackup))
-        {
-            return false;
-        }
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = _pendingUpdateBackup,
-            UseShellExecute = false,
-        };
-        startInfo.ArgumentList.Add(RestoreUpdateArgument);
-        startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
-        startInfo.ArgumentList.Add(_pendingUpdateTarget);
-        Process.Start(startInfo);
-        return true;
+        return HelperUpdateTransactionManager.SignalStartupFailure();
     }
+
+    public static HelperUpdateTransactionInfo? CurrentPendingUpdate() => HelperUpdateTransactionManager.CurrentInfo();
+
+    public static HelperUpdateCommitResult ConfirmPendingUpdate(string transactionId) =>
+        HelperUpdateTransactionManager.Confirm(transactionId);
+
+    internal static void ScheduleBootstrapCleanup(string path) => RecordPendingBootstrapCleanup(path);
 
     public static string ManagedHelperPath()
     {
@@ -475,76 +458,6 @@ internal static class HelperInstallationManager
         catch (TimeoutException)
         {
         }
-    }
-
-    private static async Task ApplyUpdateAsync(string[] args)
-    {
-        var oldProcessId = int.Parse(args[1]);
-        var targetPath = Path.GetFullPath(args[2]);
-        var managedPath = Path.GetFullPath(ManagedHelperPath());
-        if (!targetPath.Equals(managedPath, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException("Helper update target is outside the managed installation path.");
-        }
-
-        await WaitForExitAsync(oldProcessId);
-        var updaterPath = Environment.ProcessPath
-            ?? throw new InvalidOperationException("Helper updater path is unavailable.");
-        var backupPath = targetPath + ".previous";
-        TryDelete(backupPath);
-        try
-        {
-            if (File.Exists(targetPath))
-            {
-                File.Move(targetPath, backupPath);
-            }
-            File.Copy(updaterPath, targetPath, overwrite: false);
-            await VerifySameFileAsync(updaterPath, targetPath);
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = targetPath,
-                UseShellExecute = false,
-            };
-            startInfo.ArgumentList.Add(CompleteUpdateArgument);
-            startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
-            startInfo.ArgumentList.Add(updaterPath);
-            startInfo.ArgumentList.Add(backupPath);
-            _ = Process.Start(startInfo)
-                ?? throw new InvalidOperationException("Cannot start the updated Helper.");
-        }
-        catch
-        {
-            TryDelete(targetPath);
-            if (File.Exists(backupPath))
-            {
-                File.Move(backupPath, targetPath);
-                Process.Start(new ProcessStartInfo { FileName = targetPath, UseShellExecute = false });
-            }
-            throw;
-        }
-    }
-
-    private static async Task RestoreUpdateAsync(string[] args)
-    {
-        var failedProcessId = int.Parse(args[1]);
-        var targetPath = Path.GetFullPath(args[2]);
-        if (!targetPath.Equals(Path.GetFullPath(ManagedHelperPath()), StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException("Helper rollback target is outside the managed installation path.");
-        }
-        await WaitForExitAsync(failedProcessId);
-        var backupPath = Environment.ProcessPath
-            ?? throw new InvalidOperationException("Helper rollback path is unavailable.");
-        TryDelete(targetPath);
-        File.Copy(backupPath, targetPath, overwrite: false);
-        await VerifySameFileAsync(backupPath, targetPath);
-
-        var startInfo = new ProcessStartInfo { FileName = targetPath, UseShellExecute = false };
-        startInfo.ArgumentList.Add(BootstrapArgument);
-        startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
-        startInfo.ArgumentList.Add(backupPath);
-        Process.Start(startInfo);
     }
 
     private static void TryDelete(string path)

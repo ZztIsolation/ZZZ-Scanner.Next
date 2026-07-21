@@ -311,7 +311,8 @@ internal static partial class Program
                 Service = ServiceName,
                 Version = HelperVersion,
                 ProtocolVersion = ProtocolVersion,
-                Scanner = CurrentScannerState()
+                Scanner = CurrentScannerState(),
+                HelperUpdate = HelperInstallationManager.CurrentPendingUpdate(),
             };
         }
 
@@ -983,7 +984,8 @@ internal static partial class Program
                 Service = ServiceName,
                 Version = HelperVersion,
                 ProtocolVersion = ProtocolVersion,
-                Scanner = _server.CurrentScannerState()
+                Scanner = _server.CurrentScannerState(),
+                HelperUpdate = HelperInstallationManager.CurrentPendingUpdate(),
             }, token);
 
             while (_browser.State == WebSocketState.Open && !token.IsCancellationRequested)
@@ -1076,11 +1078,40 @@ internal static partial class Program
                 case "get_diagnostics":
                     await SendAsync("helper_diagnostics", new HelperDiagnosticsResponse
                     {
+                        RequestId = RequestId(envelope.Data),
                         HelperVersion = HelperVersion,
                         ProtocolVersion = ProtocolVersion,
                         LogDirectory = HelperLog.DirectoryPath,
-                        Scanner = _server.CurrentScannerState()
+                        Scanner = _server.CurrentScannerState(),
+                        HelperUpdate = HelperInstallationManager.CurrentPendingUpdate(),
                     }, token);
+                    break;
+
+                case "confirm_helper_update":
+                    var confirmRequestId = RequestId(envelope.Data);
+                    try
+                    {
+                        var transactionId = StringProperty(envelope.Data, "transactionId");
+                        var commit = HelperInstallationManager.ConfirmPendingUpdate(transactionId);
+                        await SendAsync("helper_update_commit_result", new HelperUpdateCommitResponse
+                        {
+                            RequestId = confirmRequestId,
+                            TransactionId = commit.TransactionId,
+                            Committed = commit.Committed,
+                            PreviousVersion = commit.PreviousVersion,
+                        }, token);
+                    }
+                    catch (Exception ex)
+                    {
+                        var error = HelperErrors.FromException(ex, "helper_update");
+                        error.Code = "helper_update_confirmation_failed";
+                        error.Phase = "helper";
+                        error.Title = "扫描助手更新确认失败";
+                        error.Remedy = "旧版 Helper 会自动恢复；请等待网页重新连接后重试。";
+                        error.Retryable = true;
+                        error.Details["requestId"] = confirmRequestId;
+                        await SendAsync("helper_update_error", error, CancellationToken.None);
+                    }
                     break;
 
                 case "get_storage_info":
@@ -1259,6 +1290,14 @@ internal static partial class Program
             return data.ValueKind == JsonValueKind.Object
                 && data.TryGetProperty("requestId", out var requestId)
                 ? requestId.GetString() ?? ""
+                : "";
+        }
+
+        private static string StringProperty(JsonElement data, string name)
+        {
+            return data.ValueKind == JsonValueKind.Object
+                && data.TryGetProperty(name, out var value)
+                ? value.GetString() ?? ""
                 : "";
         }
 
@@ -1979,6 +2018,7 @@ internal static partial class Program
         public string Version { get; set; } = "";
         public int ProtocolVersion { get; set; }
         public ScannerState Scanner { get; set; } = new();
+        public HelperUpdateTransactionInfo? HelperUpdate { get; set; }
     }
 
     private sealed class HelperHello
@@ -1987,6 +2027,7 @@ internal static partial class Program
         public string Version { get; set; } = "";
         public int ProtocolVersion { get; set; }
         public ScannerState Scanner { get; set; } = new();
+        public HelperUpdateTransactionInfo? HelperUpdate { get; set; }
     }
 
     private sealed class ScannerState
@@ -2019,10 +2060,20 @@ internal static partial class Program
 
     private sealed class HelperDiagnosticsResponse
     {
+        public string RequestId { get; set; } = "";
         public string HelperVersion { get; set; } = "";
         public int ProtocolVersion { get; set; }
         public string LogDirectory { get; set; } = "";
         public ScannerState Scanner { get; set; } = new();
+        public HelperUpdateTransactionInfo? HelperUpdate { get; set; }
+    }
+
+    private sealed class HelperUpdateCommitResponse
+    {
+        public string RequestId { get; set; } = "";
+        public string TransactionId { get; set; } = "";
+        public bool Committed { get; set; }
+        public string PreviousVersion { get; set; } = "";
     }
 
     private sealed class StorageInfoResponse
@@ -2065,6 +2116,8 @@ internal static partial class Program
     [JsonSerializable(typeof(StorageCleanupResponse))]
     [JsonSerializable(typeof(HelperUpdateProgress))]
     [JsonSerializable(typeof(HelperUpdateResponse))]
+    [JsonSerializable(typeof(HelperUpdateTransactionInfo))]
+    [JsonSerializable(typeof(HelperUpdateCommitResponse))]
     [JsonSerializable(typeof(PongMessage))]
     [JsonSourceGenerationOptions(
         PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
