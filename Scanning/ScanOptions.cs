@@ -143,6 +143,8 @@ public sealed class ScanSessionResult
     public int Queued { get; init; }
     public int Completed { get; init; }
     public int Failed { get; init; }
+    public bool Partial { get; init; }
+    public string TerminationCode { get; init; } = "";
     public ScanSessionDiagnostics? Diagnostics { get; init; }
 }
 

@@ -20,6 +20,8 @@ public sealed class ScanController
     private const double MinReliablePanelChangeMs = 25.0;
     private const int ListMovementTolerance = 6;
     private const int ListStableTolerance = 4;
+    private const int ScrollTopThumbMinimumLuminance = 24;
+    private const int ScrollTopThumbMinimumContrast = 16;
     private const int RowShiftMatchTolerance = 36;
     private const int RowShiftClearMargin = 8;
     private const int RowShiftLooseMargin = 12;
@@ -172,7 +174,6 @@ public sealed class ScanController
                 Volatile.Read(ref counters.Completed),
                 Volatile.Read(ref counters.Failed)),
             scanLog.Write);
-        Task monitor = Task.CompletedTask;
         Exception? pendingException = null;
         Exception? ocrException = null;
         ScanSessionDiagnostics? sessionDiagnostics = null;
@@ -233,8 +234,13 @@ public sealed class ScanController
                     PreflightState = "accepted",
                     VisualTransformClass = transformClass,
                     AnchorScore = preflight.Anchor.Score,
-                    GridScore = preflight.GridScore,
+                    GridScore = preflight.GridStructureScore,
+                    WarehouseHeaderDetected = preflight.HeaderDetected,
+                    HeaderScore = preflight.HeaderScore,
+                    GridStructureScore = preflight.GridStructureScore,
+                    LayoutScore = preflight.LayoutScore,
                     InventoryCountDetected = preflight.InventoryCount.HasValue,
+                    CountConsensusFrames = preflight.CountConsensusFrames,
                     HueDelta = preflight.Anchor.HueDelta,
                     SaturationDeltaPct = preflight.Anchor.SaturationDeltaPercent,
                     ValueDeltaPct = preflight.Anchor.ValueDeltaPercent
@@ -257,11 +263,22 @@ public sealed class ScanController
                     }
                 }
 
+                var warehousePolicy = (profile.VisualProbes ?? new VisualProbeOptions()).WarehousePreflight ?? new WarehousePreflightPolicy();
+                var contextGuard = new WarehouseContextGuard(
+                    window,
+                    preflight.MonitorPlan,
+                    warehousePolicy,
+                    inventoryRecognizer,
+                    scanLog);
+                window.ConfigureInputGuard(contextGuard.EnsureHealthy);
+                window.LeftClick(window.ToScreenPoint(profile.Point("driveDiscTab")));
+                await Task.Delay(profile.ClickDelayMs, linked.Token);
+                await ResetListToTopAsync(window, profile, progress, counters, scanLog, linked.Token);
+                Report(progress, counters, "已定位到驱动盘列表顶部。");
+
                 ocrWorkers = StartOcrWorkers(queue, ocrResults, outputDir, options, scanLog, ocrWorkerCount, ocrIntraOpThreads, counters, ocrDiagnostics, ocrShadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder, shiftedVisualEnvironment);
                 resultConsumer = Task.Run(() => ConsumeOcrResults(ocrResults, results, counters, outputDir, progress, scanLog, duplicateGuard, options, linked));
-                monitor = Task.Run(() => MonitorBackpackAsync(window, profile, linked, progress, counters, scanLog), cancellationToken);
-                var inventoryCount = preflight.InventoryCount ?? TryReadInventoryCount(window, profile, inventoryRecognizer, scanLog);
-                await ProduceCapturesAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog, inventoryCount, traversalMode, linked.Token);
+                await ProduceCapturesAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog, preflight.InventoryCount, traversalMode, linked.Token);
                 captureCompleted = true;
                 Report(progress, counters, "截图采集完成，后台 OCR 正在收尾。");
             }
@@ -309,13 +326,22 @@ public sealed class ScanController
             }
 
             await resultConsumer;
-            await SafeAwait(monitor);
         }
         finally
         {
             fastOcrAssistRecorder?.Dispose();
             await resourceMonitor.StopAsync();
         }
+
+        var ordered = results.OrderBy(x => x.Index).ToList();
+        var terminationCode = Volatile.Read(ref counters.StopReason) ?? "";
+        var partial = pendingException is not null
+            || ocrException is not null
+            || cancellationToken.IsCancellationRequested
+            || counters.Failed > 0
+            || !string.IsNullOrWhiteSpace(terminationCode);
+        var exportFile = Path.Combine(outputDir, partial ? "export.partial.json" : "export.json");
+        await File.WriteAllTextAsync(exportFile, JsonSerializer.Serialize(ordered, JsonDefaults.Write), CancellationToken.None);
 
         if (pendingException is not null)
         {
@@ -329,12 +355,13 @@ public sealed class ScanController
 
         if (ocrException is not null)
         {
-            ExceptionDispatchInfo.Capture(ocrException).Throw();
+            throw new ScannerFailureException(
+                "ocr_worker_failed",
+                "OCR 识别进程失败",
+                "后台 OCR 工作线程发生异常。",
+                "请重新扫描；如果持续发生，请打开日志并提供诊断信息。",
+                innerException: ocrException);
         }
-
-        var ordered = results.OrderBy(x => x.Index).ToList();
-        var exportFile = Path.Combine(outputDir, "export.json");
-        await File.WriteAllTextAsync(exportFile, JsonSerializer.Serialize(ordered, JsonDefaults.Write), cancellationToken);
 
         Report(progress, counters, $"完成：输出 {ordered.Count} 条，失败 {counters.Failed} 条。");
         return new ScanSessionResult
@@ -346,6 +373,8 @@ public sealed class ScanController
             Queued = counters.Queued,
             Completed = counters.Completed,
             Failed = counters.Failed,
+            Partial = partial,
+            TerminationCode = terminationCode,
             Diagnostics = sessionDiagnostics
         };
     }
@@ -362,109 +391,160 @@ public sealed class ScanController
     {
         Report(progress, counters, "等待背包驱动盘界面。");
         var visualOptions = profile.VisualProbes ?? new VisualProbeOptions();
+        var warehousePolicy = visualOptions.WarehousePreflight ?? new WarehousePreflightPolicy();
         var aspectRatio = window.ClientScreenRect.Height <= 0
             ? 0
             : window.ClientScreenRect.Width / (double)window.ClientScreenRect.Height;
         if (Math.Abs(aspectRatio - (16d / 9d)) > 0.03)
         {
             throw VisualPreflightException.Create(
-                "layout_mismatch",
+                "unsupported_display_layout",
                 "游戏客户区不是受支持的 16:9 布局，本次没有继续点击或滚动。",
                 default,
-                gridScore: 0,
+                headerDetected: false,
+                headerScore: 0,
+                gridStructureScore: 0,
+                layoutScore: 0,
                 inventoryCountDetected: false,
+                countConsensusFrames: 0,
                 stableFrames: 0,
-                visualOptions.RequiredStableFrames,
+                warehousePolicy.RequiredStableFrames,
                 window,
                 visualProfileId);
         }
 
-        var backpackPolicy = visualOptions.BackpackReady ?? new ChromaticProbePolicy();
-        var center = window.ToScreenPoint(profile.Point("dismantleButton"));
-        var radiusX = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Width / (double)profile.StandardScreen[0]));
-        var radiusY = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Height / (double)profile.StandardScreen[1]));
-        var anchorRect = Rectangle.Intersect(
-            window.ClientScreenRect,
-            Rectangle.FromLTRB(center.X - radiusX, center.Y - radiusY, center.X + radiusX + 1, center.Y + radiusY + 1));
-        var expected = profile.Color("dismantleButton");
-        var requiredSignals = Math.Clamp(visualOptions.RequiredSignals, 1, 3);
-        var requiredStableFrames = Math.Max(1, visualOptions.RequiredStableFrames);
-        var poll = TimeSpan.FromMilliseconds(Math.Clamp(visualOptions.PollMilliseconds, 100, 1000));
+        var headerRect = window.ToScreenRectangle(profile.Rectangle("inventoryCount"));
+        var listGridRect = ProfileRectangleOrFallback(
+            window,
+            profile,
+            "listGridRect",
+            BuildListGridFallback(window, profile, Math.Max(1, profile.VisibleRows), Math.Max(1, profile.VisibleColumns)));
+        var detailPanelRect = window.ToScreenRectangle(profile.Rectangle("detailPanel"));
+        var probeBounds = Rectangle.Union(Rectangle.Union(headerRect, listGridRect), detailPanelRect);
+        probeBounds = Rectangle.Intersect(window.ClientScreenRect, probeBounds);
+        var driveDiscOffset = window.ToScreenPoint(profile.Point("driveDiscOffset"));
+        var driveDiscStepNormalized = profile.Point("driveDiscStep");
+        var driveDiscStep = window.ToClientSize(new SizeF(driveDiscStepNormalized.X, driveDiscStepNormalized.Y));
+        var requiredStableFrames = Math.Max(1, warehousePolicy.RequiredStableFrames);
+        var poll = TimeSpan.FromMilliseconds(Math.Clamp(warehousePolicy.PollMilliseconds, 100, 1000));
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Max(1, profile.WaitForBackpackSeconds));
-        var nextInventoryProbe = DateTime.MinValue;
-        var gate = new VisualPreflightGate(requiredSignals, requiredStableFrames);
-        int? inventoryCount = null;
-        var lastAnchor = new ChromaticProbeResult(false, 0, 0, 0, 0, 0, 180, 100, 100, Color.Empty, VisualTransformClass.Unknown, 0, 0);
-        var lastGridScore = 0;
+        var gate = new VisualPreflightGate(requiredStableFrames);
+        var lastHealth = new CaptureHealthResult(false, 0, 0, 0, 100, 0, 0);
+        var lastHeader = new WarehouseHeaderProbeResult(false, 0, 4, 0, null, null, false, string.Empty);
+        var lastStructure = new WarehouseStructureProbeResult(0, 0, 0, 0, 0, 0, 0);
 
         while (DateTime.UtcNow < deadline)
         {
             token.ThrowIfCancellationRequested();
-            using var anchorImage = window.Capture(anchorRect);
-            lastAnchor = VisualProbeEvaluator.EvaluateChromaticAnchor(anchorImage, expected, backpackPolicy);
-            if (!inventoryCount.HasValue && DateTime.UtcNow >= nextInventoryProbe)
-            {
-                inventoryCount = TryReadInventoryCount(window, profile, inventoryRecognizer, scanLog);
-                nextInventoryProbe = DateTime.UtcNow + TimeSpan.FromSeconds(1);
-            }
-
-            var recognizedGridCells = CountRecognizedFirstRowCells(window, profile, 3);
-            lastGridScore = (int)Math.Round(recognizedGridCells / 3d * 100);
-            var passedSignals = (lastAnchor.Passed ? 1 : 0)
-                + (inventoryCount.HasValue ? 1 : 0)
-                + (recognizedGridCells >= 2 ? 1 : 0);
-            var accepted = gate.Observe(lastAnchor.Passed, inventoryCount.HasValue, recognizedGridCells >= 2);
-            var transformClass = VisualProbeEvaluator.TransformClassName(lastAnchor.TransformClass);
+            using var frame = window.Capture(probeBounds);
+            lastHealth = WarehousePreflightEvaluator.EvaluateCaptureHealth(frame);
+            var localHeaderRect = ToLocalRectangle(headerRect, probeBounds, frame.Size);
+            var localListGridRect = ToLocalRectangle(listGridRect, probeBounds, frame.Size);
+            var localDetailPanelRect = ToLocalRectangle(detailPanelRect, probeBounds, frame.Size);
+            lastHeader = lastHealth.Passed
+                ? ReadWarehouseHeader(frame, localHeaderRect, inventoryRecognizer, warehousePolicy, scanLog)
+                : new WarehouseHeaderProbeResult(false, 0, 4, 0, null, null, false, string.Empty);
+            lastStructure = lastHealth.Passed
+                ? WarehousePreflightEvaluator.EvaluateStructure(
+                    frame,
+                    localListGridRect,
+                    localDetailPanelRect,
+                    new Point(driveDiscOffset.X - probeBounds.Left, driveDiscOffset.Y - probeBounds.Top),
+                    driveDiscStep)
+                : new WarehouseStructureProbeResult(0, 0, 0, 0, 0, 0, 0);
+            var gridPassed = lastStructure.GridStructureScore >= warehousePolicy.GridMinimumScore;
+            var layoutPassed = lastStructure.LayoutScore >= warehousePolicy.LayoutMinimumScore;
+            var accepted = gate.Observe(lastHealth.Passed, lastHeader.HeaderDetected, gridPassed, layoutPassed);
             scanLog.WriteEvent(
                 "VISUAL_PREFLIGHT",
-                $"signals={passedSignals}/3, requiredSignals={requiredSignals}, stableFrames={gate.StableFrames}/{requiredStableFrames}, anchorPassed={lastAnchor.Passed}, anchorScore={lastAnchor.Score}, coverage={lastAnchor.Coverage:F3}, median={ColorText(lastAnchor.MedianColor)}, medianHsv=({lastAnchor.MedianHue:F1},{lastAnchor.MedianSaturation:F3},{lastAnchor.MedianValue:F3}), hueDelta={lastAnchor.HueDelta}, saturationDeltaPct={lastAnchor.SaturationDeltaPercent}, valueDeltaPct={lastAnchor.ValueDeltaPercent}, transform={transformClass}, inventoryCountDetected={inventoryCount.HasValue}, gridCells={recognizedGridCells}/3, gridScore={lastGridScore}, capture={window.ActiveCaptureMode}, anchorRect={anchorRect}");
+                $"captureHealthy={lastHealth.Passed}, captureScore={lastHealth.Score}, meanLuma={lastHealth.MeanLuminance}, lumaStdDev={lastHealth.LuminanceStandardDeviation}, darkPct={lastHealth.DarkPixelPercent}, brightPct={lastHealth.BrightPixelPercent}, edgeDensityPermille={lastHealth.EdgeDensityPermille}, headerDetected={lastHeader.HeaderDetected}, headerScore={lastHeader.HeaderScore}, titleEditDistance={lastHeader.TitleEditDistance}, headerConfidence={lastHeader.Confidence:F3}, normalizedRetry={lastHeader.UsedNormalizedImage}, inventoryCountDetected={lastHeader.InventoryCountDetected}, gridCells={lastStructure.RecognizedGridCells}/6, gridStructureScore={lastStructure.GridStructureScore}, gridEdgeDensityPermille={lastStructure.GridEdgeDensityPermille}, layoutScore={lastStructure.LayoutScore}, layoutEdgeDensityPermille={lastStructure.LayoutEdgeDensityPermille}, verticalLineScore={lastStructure.VerticalLineScore}, horizontalLineScore={lastStructure.HorizontalLineScore}, stableFrames={gate.StableFrames}/{requiredStableFrames}, capture={window.ActiveCaptureMode}");
 
             if (accepted)
             {
-                scanLog.Write($"Visual preflight accepted. transform={transformClass}, anchorScore={lastAnchor.Score}, gridScore={lastGridScore}, inventoryCountDetected={inventoryCount.HasValue}.");
-                window.LeftClick(window.ToScreenPoint(profile.Point("driveDiscTab")));
-                await Task.Delay(profile.ClickDelayMs, token);
-                await ResetListToTopAsync(window, profile, progress, counters, scanLog, token);
-                Report(progress, counters, "已定位到驱动盘列表顶部。");
-                return new VisualPreflightResult(lastAnchor, lastGridScore, inventoryCount);
+                scanLog.Write($"Warehouse page confirmed without input. headerScore={lastHeader.HeaderScore}, gridStructureScore={lastStructure.GridStructureScore}, layoutScore={lastStructure.LayoutScore}.");
+                var consensus = await ReadInventoryCountConsensusAsync(
+                    window,
+                    profile,
+                    inventoryRecognizer,
+                    warehousePolicy,
+                    scanLog,
+                    token);
+                if (!consensus.InventoryCount.HasValue)
+                {
+                    throw InventoryCountOcrFailure(
+                        "已确认驱动盘仓库，但仓库数量未能在独立画面中形成一致结果；本次没有继续点击或滚动。",
+                        ScanDiagnosticDetails.Preflight(
+                            "inventory_count_ocr_failed",
+                            "unknown",
+                            anchorScore: 0,
+                            lastStructure.GridStructureScore,
+                            lastHeader.HeaderDetected,
+                            lastHeader.HeaderScore,
+                            lastStructure.GridStructureScore,
+                            lastStructure.LayoutScore,
+                            inventoryCountDetected: false,
+                            consensus.ConsensusFrames,
+                            hueDelta: 0,
+                            saturationDeltaPct: 0,
+                            valueDeltaPct: 0,
+                            gate.StableFrames,
+                            requiredStableFrames,
+                            window.ClientScreenRect.Width,
+                            window.ClientScreenRect.Height,
+                            window.Dpi,
+                            window.ActiveCaptureMode,
+                            visualProfileId));
+                }
+
+                var monitorPlan = CreateWarehouseMonitorPlan(window, profile);
+                var backpackPolicy = visualOptions.BackpackReady ?? new ChromaticProbePolicy();
+                var center = window.ToScreenPoint(profile.Point("dismantleButton"));
+                var radiusX = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Width / (double)profile.StandardScreen[0]));
+                var radiusY = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Height / (double)profile.StandardScreen[1]));
+                var anchorRect = Rectangle.Intersect(
+                    window.ClientScreenRect,
+                    Rectangle.FromLTRB(center.X - radiusX, center.Y - radiusY, center.X + radiusX + 1, center.Y + radiusY + 1));
+                using var anchorImage = window.Capture(anchorRect);
+                var anchor = VisualProbeEvaluator.EvaluateChromaticAnchor(anchorImage, profile.Color("dismantleButton"), backpackPolicy);
+                scanLog.Write($"Post-confirmation color diagnostic. passed={anchor.Passed}, score={anchor.Score}, transform={VisualProbeEvaluator.TransformClassName(anchor.TransformClass)}. This result does not affect warehouse readiness.");
+                return new VisualPreflightResult(
+                    anchor,
+                    lastHeader.HeaderDetected,
+                    lastHeader.HeaderScore,
+                    lastStructure.GridStructureScore,
+                    lastStructure.LayoutScore,
+                    consensus.InventoryCount,
+                    consensus.InventoryCapacity,
+                    consensus.ConsensusFrames,
+                    monitorPlan);
             }
 
             await Task.Delay(poll, token);
         }
 
-        var reason = lastAnchor.MeanLuminance < 4 && lastAnchor.LuminanceStandardDeviation < 3
+        var structuralEvidence = lastStructure.GridStructureScore >= warehousePolicy.GridMinimumScore
+            || lastStructure.LayoutScore >= warehousePolicy.LayoutMinimumScore;
+        var partialWarehouseEvidence = lastHeader.HeaderDetected || structuralEvidence;
+        var reason = !lastHealth.Passed
             ? "capture_unavailable"
-            : !lastAnchor.Passed && (inventoryCount.HasValue || lastGridScore > 0)
-                ? "color_unsupported"
-                : "layout_mismatch";
-        scanLog.Write($"Visual preflight failed. reason={reason}, anchorScore={lastAnchor.Score}, gridScore={lastGridScore}, inventoryCountDetected={inventoryCount.HasValue}, stableFrames={gate.StableFrames}/{requiredStableFrames}.");
+            : partialWarehouseEvidence
+                ? "inventory_screen_unreadable"
+                : "inventory_screen_not_detected";
+        scanLog.Write($"Visual preflight failed. reason={reason}, captureScore={lastHealth.Score}, headerScore={lastHeader.HeaderScore}, gridStructureScore={lastStructure.GridStructureScore}, layoutScore={lastStructure.LayoutScore}, stableFrames={gate.StableFrames}/{requiredStableFrames}.");
         throw VisualPreflightException.Create(
             reason,
             "未能安全确认驱动盘仓库界面。请保持游戏可见并确认仓库布局正常；本次没有继续点击或滚动。",
-            lastAnchor,
-            lastGridScore,
-            inventoryCount.HasValue,
+            default,
+            lastHeader.HeaderDetected,
+            lastHeader.HeaderScore,
+            lastStructure.GridStructureScore,
+            lastStructure.LayoutScore,
+            lastHeader.InventoryCountDetected,
+            countConsensusFrames: 0,
             gate.StableFrames,
             requiredStableFrames,
             window,
             visualProfileId);
-    }
-
-    private static int CountRecognizedFirstRowCells(GameWindow window, ScanProfile profile, int maximumCells)
-    {
-        var offset = profile.Point("driveDiscOffset");
-        var step = profile.Point("driveDiscStep");
-        var count = 0;
-        for (var column = 0; column < Math.Min(maximumCells, Math.Max(1, profile.VisibleColumns)); column++)
-        {
-            var point = window.ToScreenPoint(new PointF(offset.X + (step.X * column), offset.Y));
-            if (DetectRarityAround(window, profile, point).Rarity is not null)
-            {
-                count++;
-            }
-        }
-
-        return count;
     }
 
     private static async Task ResetListToTopAsync(
@@ -477,19 +557,16 @@ public sealed class ScanController
     {
         Report(progress, counters, "正在将驱动盘列表拉到最上方。");
         var scrollTop = window.ToScreenPoint(profile.Point("scrollBarTop"));
-        var listGridRect = ProfileRectangleOrFallback(
-            window,
-            profile,
-            "listGridRect",
-            BuildListGridFallback(window, profile, Math.Max(1, profile.VisibleRows), Math.Max(1, profile.VisibleColumns)));
         window.MoveCursor(window.ToScreenPoint(profile.Point("listWheelArea")));
-        var resetDelay = Math.Max(80, profile.ResetToTopWheelDelayMs);
-        var reachedTop = false;
-        var consecutiveNoMovement = 0;
-        for (var i = 0; i < profile.ResetToTopWheelTicks; i++)
+        var resetDelay = Math.Clamp(profile.ResetToTopWheelDelayMs, 20, 80);
+        var initialProbe = CaptureScrollTopProbe(window, profile);
+        scanLog.WriteEvent(
+            "RESET_TOP_PROBE",
+            $"phase=initial, detected={initialProbe.Detected}, topLuma={initialProbe.TopLuminance}, trackLuma={initialProbe.TrackLuminance}");
+        var reachedTop = initialProbe.Detected;
+        for (var i = 0; !reachedTop && i < profile.ResetToTopWheelTicks; i++)
         {
             token.ThrowIfCancellationRequested();
-            var before = CaptureSignature(window, listGridRect);
             scanLog.WriteEvent("RESET_WHEEL", $"tick={i + 1}/{profile.ResetToTopWheelTicks}, delta=120, cursor={window.ToScreenPoint(profile.Point("listWheelArea"))}");
             window.MouseWheel(120);
             if (resetDelay > 0)
@@ -497,26 +574,87 @@ public sealed class ScanController
                 await Task.Delay(resetDelay, token);
             }
 
-            var after = CaptureSignature(window, listGridRect);
-            var distance = SignatureDistance(before, after);
-            consecutiveNoMovement = distance <= ListStableTolerance ? consecutiveNoMovement + 1 : 0;
-            scanLog.WriteEvent("RESET_TOP_MOTION", $"tick={i + 1}, signatureDistance={distance}, noMovementFrames={consecutiveNoMovement}/2");
-            if (consecutiveNoMovement >= 2)
+            if ((i + 1) % 4 != 0 && i + 1 < profile.ResetToTopWheelTicks)
             {
-                scanLog.Write($"Reset reached top after {i + 1} wheel ticks.");
-                reachedTop = true;
-                break;
+                continue;
+            }
+
+            var probe = CaptureScrollTopProbe(window, profile);
+            scanLog.WriteEvent(
+                "RESET_TOP_PROBE",
+                $"phase=wheel, tick={i + 1}, detected={probe.Detected}, topLuma={probe.TopLuminance}, trackLuma={probe.TrackLuminance}");
+            reachedTop = probe.Detected;
+        }
+
+        if (reachedTop)
+        {
+            scanLog.Write("Reset confirmed the scrollbar thumb at the top.");
+        }
+        else
+        {
+            scanLog.Write($"Reset top probe did not confirm after {profile.ResetToTopWheelTicks} ticks; using explicit top click fallback.");
+            scanLog.WriteEvent("RESET_TOP_CLICK", $"point={scrollTop}");
+            window.LeftClick(scrollTop, durationMs: 30);
+            await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
+            var fallbackProbe = CaptureScrollTopProbe(window, profile);
+            scanLog.WriteEvent(
+                "RESET_TOP_PROBE",
+                $"phase=fallback, detected={fallbackProbe.Detected}, topLuma={fallbackProbe.TopLuminance}, trackLuma={fallbackProbe.TrackLuminance}");
+        }
+    }
+
+    private static ScrollTopProbeResult CaptureScrollTopProbe(GameWindow window, ScanProfile profile)
+    {
+        var point = window.ToScreenPoint(profile.Point("scrollBarTop"));
+        var scaleX = window.ClientScreenRect.Width / (double)profile.StandardScreen[0];
+        var scaleY = window.ClientScreenRect.Height / (double)profile.StandardScreen[1];
+        var width = Math.Max(5, (int)Math.Round(9 * scaleX));
+        var topHeight = Math.Max(10, (int)Math.Round(18 * scaleY));
+        var trackOffset = Math.Max(topHeight + 8, (int)Math.Round(38 * scaleY));
+        var trackHeight = topHeight;
+        var requested = new Rectangle(
+            point.X - width / 2,
+            point.Y,
+            width,
+            trackOffset + trackHeight);
+        var captureRect = Rectangle.Intersect(window.ClientScreenRect, requested);
+        using var frame = window.CaptureFrame(captureRect);
+        var topRect = new Rectangle(0, 0, frame.Width, Math.Min(topHeight, frame.Height));
+        var trackTop = Math.Min(trackOffset, Math.Max(0, frame.Height - 1));
+        var trackRect = new Rectangle(0, trackTop, frame.Width, Math.Min(trackHeight, frame.Height - trackTop));
+        return EvaluateScrollTopProbe(frame, topRect, trackRect);
+    }
+
+    internal static ScrollTopProbeResult EvaluateScrollTopProbe(
+        CapturedFrame image,
+        Rectangle topRect,
+        Rectangle trackRect)
+    {
+        var topLuminance = MeanLuminance(image, topRect);
+        var trackLuminance = MeanLuminance(image, trackRect);
+        return new ScrollTopProbeResult(
+            topLuminance >= ScrollTopThumbMinimumLuminance
+                && topLuminance - trackLuminance >= ScrollTopThumbMinimumContrast,
+            topLuminance,
+            trackLuminance);
+    }
+
+    private static int MeanLuminance(CapturedFrame image, Rectangle rect)
+    {
+        rect = ClampRectangle(rect, image.Size);
+        var sum = 0L;
+        var count = 0;
+        for (var y = rect.Top; y < rect.Bottom; y++)
+        {
+            for (var x = rect.Left; x < rect.Right; x++)
+            {
+                var color = image.GetPixel(x, y);
+                sum += (color.R * 299 + color.G * 587 + color.B * 114) / 1000;
+                count++;
             }
         }
 
-        if (!reachedTop)
-        {
-            scanLog.Write($"Reset top probe did not confirm after {profile.ResetToTopWheelTicks} ticks; continuing with explicit top click.");
-        }
-
-        scanLog.WriteEvent("RESET_TOP_CLICK", $"point={scrollTop}");
-        window.LeftClick(scrollTop, durationMs: 30);
-        await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
+        return count == 0 ? 0 : (int)(sum / count);
     }
 
     private static async Task ProduceCapturesAsync(
@@ -542,7 +680,7 @@ public sealed class ScanController
         {
             scanLog.Write("OverlapSignaturePage requires an inventory count. Inventory count OCR failed; refusing to fall back to LegacyThirdRow.");
             Report(progress, counters, "仓库数量 OCR 失败，重叠签名扫描无法计算总行数。");
-            throw new InvalidOperationException("仓库数量 OCR 失败，重叠签名扫描无法计算总行数。请确认数量区域可见后重试，或手动选择旧版第3行兼容模式。");
+            throw InventoryCountOcrFailure("仓库数量 OCR 失败，重叠签名扫描无法计算总行数。请确认数量区域可见后重试。");
         }
 
         if (traversalMode == ScanTraversalMode.SafeBandViewport && inventoryCount is > 0)
@@ -555,7 +693,7 @@ public sealed class ScanController
         {
             scanLog.Write("SafeBandViewport requires an inventory count. Inventory count OCR failed; refusing to fall back to LegacyThirdRow.");
             Report(progress, counters, "仓库数量 OCR 失败，安全带扫描无法计算总行数。");
-            throw new InvalidOperationException("仓库数量 OCR 失败，安全带扫描无法计算总行数。请确认数量区域可见后重试，或手动选择旧版第3行兼容模式。");
+            throw InventoryCountOcrFailure("仓库数量 OCR 失败，安全带扫描无法计算总行数。请确认数量区域可见后重试。");
         }
 
         if (traversalMode == ScanTraversalMode.CalibratedPage && inventoryCount is > 0)
@@ -568,7 +706,7 @@ public sealed class ScanController
         {
             scanLog.Write("CalibratedPage requires an inventory count. Inventory count OCR failed; refusing to fall back to LegacyThirdRow.");
             Report(progress, counters, "仓库数量 OCR 失败，校准翻页无法计算总行数。");
-            throw new InvalidOperationException("仓库数量 OCR 失败，校准翻页无法计算总行数。请确认数量区域可见后重试，或手动选择旧版第3行兼容模式。");
+            throw InventoryCountOcrFailure("仓库数量 OCR 失败，校准翻页无法计算总行数。请确认数量区域可见后重试。");
         }
 
         await ProduceCapturesLegacyThirdRowAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog, inventoryCount, token);
@@ -700,7 +838,7 @@ public sealed class ScanController
             if (visibleTopLogicalRow >= maxVisibleTop)
             {
                 var missing = Enumerable.Range(1, totalRows).Where(row => !scannedLogicalRows.Contains(row)).Take(8).ToArray();
-                throw new InvalidOperationException($"重叠签名扫描到达底部但仍有逻辑行未扫：{string.Join(",", missing)}。为避免漏扫，本次停止。");
+                throw NavigationFailure($"重叠签名扫描到达底部但仍有逻辑行未扫：{string.Join(",", missing)}。为避免漏扫，本次停止。");
             }
 
             var beforeTop = visibleTopLogicalRow;
@@ -718,7 +856,7 @@ public sealed class ScanController
                 token);
             if (!scroll.Success)
             {
-                throw new InvalidOperationException($"重叠签名扫描滚动失败：{scroll.Message}");
+                throw NavigationFailure($"重叠签名扫描滚动失败：{scroll.Message}");
             }
 
             ImageSignature[] afterRows;
@@ -757,7 +895,7 @@ public sealed class ScanController
                 if (!resolution.Success)
                 {
                     scanLog.WriteEvent("OVERLAP_SCROLL_CONFLICT_HARD_STOP", $"iteration={iteration}, fromTop={beforeTop}, requestedToTop={beforeTop + 1}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced.Value}, mode={options.OverlapConflictMode}, reason={resolution.Reason}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-                    throw new InvalidOperationException($"重叠签名扫描检测到滚动估计与下一屏签名不一致：previousTop={beforeTop}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced.Value}。为避免重复或漏扫，本次停止。");
+                    throw NavigationFailure($"重叠签名扫描检测到滚动估计与下一屏签名不一致：previousTop={beforeTop}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced.Value}。为避免重复或漏扫，本次停止。");
                 }
 
                 afterRows = resolution.Rows ?? afterRows;
@@ -772,7 +910,7 @@ public sealed class ScanController
                 if (!coverage.Safe)
                 {
                     scanLog.WriteEvent("OVERLAP_SCROLL_UNCONFIRMED_OVERSHOT", $"iteration={iteration}, fromTop={beforeTop}, requestedToTop={beforeTop + 1}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced?.ToString() ?? "NA"}, rowsAdvanced={scrollRowsAdvanced}, missingRows={string.Join("|", coverage.MissingRows)}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-                    throw new InvalidOperationException($"重叠签名扫描检测到未被下一屏签名确认的越行滚动：previousTop={beforeTop}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced?.ToString() ?? "NA"}。为避免重复读取，本次停止。");
+                    throw NavigationFailure($"重叠签名扫描检测到未被下一屏签名确认的越行滚动：previousTop={beforeTop}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced?.ToString() ?? "NA"}。为避免重复读取，本次停止。");
                 }
 
                 scanLog.WriteEvent("OVERLAP_SCROLL_TWO_ROW_COVERAGE_ACCEPTED", $"iteration={iteration}, fromTop={beforeTop}, toTop={Math.Min(maxVisibleTop, beforeTop + scrollRowsAdvanced)}, rowsAdvanced={scrollRowsAdvanced}, signatureRows={signatureAdvanced?.ToString() ?? "NA"}, signatureBestScore={signatureEvidence.BestScore}, signatureSecondScore={signatureEvidence.SecondScore}, signatureMargin={signatureEvidence.Margin}, coveredRows={string.Join("|", coverage.CoveredRows)}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
@@ -792,7 +930,7 @@ public sealed class ScanController
         if (scannedLogicalRows.Count < totalRows)
         {
             var missing = Enumerable.Range(1, totalRows).Where(row => !scannedLogicalRows.Contains(row)).Take(8).ToArray();
-            throw new InvalidOperationException($"重叠签名扫描达到保护上限仍未完成：scannedRows={scannedLogicalRows.Count}/{totalRows}, missing={string.Join(",", missing)}。");
+            throw NavigationFailure($"重叠签名扫描达到保护上限仍未完成：scannedRows={scannedLogicalRows.Count}/{totalRows}, missing={string.Join(",", missing)}。");
         }
 
         scanLog.Write($"End: overlap-signature-page completed. visited={counters.Visited}, expectedInventory={inventoryCount}, queued={counters.Queued}, completed={counters.Completed}, failed={counters.Failed}.");
@@ -988,7 +1126,7 @@ public sealed class ScanController
             var scrollResult = await ScrollRowsWithRetryAsync(window, profile, listGridRect, rowAlignProbeRect, calibration, scrollRows, scanLog, token);
             if (!scrollResult.Success)
             {
-                throw new InvalidOperationException($"滚动失败：{scrollResult.Message}");
+                throw NavigationFailure($"滚动失败：{scrollResult.Message}");
             }
 
             page++;
@@ -1154,7 +1292,7 @@ public sealed class ScanController
             if (enforceSafeBand && !IsSafeBandClick(row, visibleTopLogicalRow, maxVisibleTop, logicalRow ?? -1))
             {
                 scanLog.WriteEvent("EDGE_CLICK_BLOCKED", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, visibleTopLogicalRow={visibleTopLogicalRow}, maxVisibleTop={maxVisibleTop}, state={ViewportStateLabel(visibleTopLogicalRow, maxVisibleTop)}");
-                throw new InvalidOperationException($"安全带保护阻止点击：逻辑行 {logicalRow} 当前位于视觉第 {row} 行。");
+                throw NavigationFailure($"安全带保护阻止点击：逻辑行 {logicalRow} 当前位于视觉第 {row} 行。");
             }
 
             var ocrBacklogBeforeClick = CurrentOcrBacklog(counters);
@@ -1203,7 +1341,7 @@ public sealed class ScanController
                     return RowScanResult.Stop;
                 }
 
-                throw new InvalidOperationException($"预期存在驱动盘，但第 {logicalRow} 行第 {col} 列未检测到品质颜色。可能发生漏扫或列表未稳定。");
+                throw NavigationFailure($"预期存在驱动盘，但第 {logicalRow} 行第 {col} 列未检测到品质颜色。可能发生漏扫或列表未稳定。");
             }
 
             counters.Visited++;
@@ -1398,7 +1536,7 @@ public sealed class ScanController
                 token);
             if (!result.Success)
             {
-                throw new InvalidOperationException($"安全带逐行滚动失败：{result.Message}");
+                throw NavigationFailure($"安全带逐行滚动失败：{result.Message}");
             }
 
             var rowsAdvanced = Math.Max(1, result.RowsAdvanced);
@@ -1411,7 +1549,7 @@ public sealed class ScanController
                     if (!profile.AllowScrollRecovery)
                     {
                         scanLog.WriteEvent("ROW_SCROLL_STRICT_STOP", $"previousTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, nextTop={nextVisibleTop}, desiredTop={desiredTop}, recoveryAllowed={profile.AllowScrollRecovery}");
-                        throw new InvalidOperationException($"安全带逐行滚动越过目标行：previousTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, nextTop={nextVisibleTop}, desiredTop={desiredTop}。当前为单向严格模式，已禁止自动上翻恢复；请降低 scrollTickDelta 或增大 scrollTickDelayMs 后重试。");
+                        throw NavigationFailure($"安全带逐行滚动越过目标行：previousTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, nextTop={nextVisibleTop}, desiredTop={desiredTop}。当前为单向严格模式，已禁止自动上翻恢复；请重试。");
                     }
 
                     var recovery = await ScrollSafeBandOneRowUpAsync(
@@ -1425,14 +1563,14 @@ public sealed class ScanController
                         token);
                     if (!recovery.Success)
                     {
-                        throw new InvalidOperationException($"安全带逐行滚动越过目标行且回退失败：previousTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, nextTop={nextVisibleTop}, desiredTop={desiredTop}, recovery={recovery.Message}。为避免读取视觉第2行导致重复，本次停止。");
+                        throw NavigationFailure($"安全带逐行滚动越过目标行且回退失败：previousTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, nextTop={nextVisibleTop}, desiredTop={desiredTop}, recovery={recovery.Message}。为避免重复读取，本次停止。");
                     }
 
                     var rowsRecovered = Math.Max(1, recovery.RowsAdvanced);
                     nextVisibleTop = Math.Max(1, nextVisibleTop - rowsRecovered);
                     if (nextVisibleTop > desiredTop)
                     {
-                        throw new InvalidOperationException($"安全带逐行滚动越过目标行且回退后仍越过目标行：previousTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, rowsRecovered={rowsRecovered}, recoveredTop={nextVisibleTop}, desiredTop={desiredTop}。为避免读取视觉第2行导致重复，本次停止。");
+                        throw NavigationFailure($"安全带逐行滚动越过目标行且回退后仍越过目标行：previousTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, rowsRecovered={rowsRecovered}, recoveredTop={nextVisibleTop}, desiredTop={desiredTop}。为避免重复读取，本次停止。");
                     }
 
                     scanLog.WriteEvent("ROW_SCROLL_RECOVERY_ACCEPTED", $"previousTop={visibleTopLogicalRow}, desiredTop={desiredTop}, recoveredTop={nextVisibleTop}, rowsAdvanced={rowsAdvanced}, rowsRecovered={rowsRecovered}");
@@ -1447,7 +1585,7 @@ public sealed class ScanController
         if (!IsSafeBandClick(visualRow, visibleTopLogicalRow, maxVisibleTop, logicalRow))
         {
             scanLog.WriteEvent("EDGE_CLICK_BLOCKED", $"logicalRow={logicalRow}, visualRow={visualRow}, visibleTopLogicalRow={visibleTopLogicalRow}, maxVisibleTop={maxVisibleTop}, state={ViewportStateLabel(visibleTopLogicalRow, maxVisibleTop)}");
-            throw new InvalidOperationException($"安全带保护阻止点击：逻辑行 {logicalRow} 当前位于视觉第 {visualRow} 行。");
+            throw NavigationFailure($"安全带保护阻止点击：逻辑行 {logicalRow} 当前位于视觉第 {visualRow} 行。");
         }
 
         return new SafeBandMoveResult(visibleTopLogicalRow, scrolled);
@@ -2313,37 +2451,180 @@ public sealed class ScanController
         scanLog.Write($"List stable wait timed out after {timeout.TotalMilliseconds:F0}ms; continuing with best effort.");
     }
 
-    private static int? TryReadInventoryCount(GameWindow window, ScanProfile profile, PaddleOcrRecognizer recognizer, ScanLog scanLog)
+    private static WarehouseHeaderProbeResult ReadWarehouseHeader(
+        Bitmap source,
+        Rectangle headerRect,
+        PaddleOcrRecognizer recognizer,
+        WarehousePreflightPolicy policy,
+        ScanLog scanLog)
     {
+        headerRect = ClampRectangle(headerRect, source.Size);
+        if (headerRect.IsEmpty)
+        {
+            return new WarehouseHeaderProbeResult(false, 0, 4, 0, null, null, false, string.Empty);
+        }
+
         try
         {
-            var rect = window.ToScreenRectangle(profile.Rectangle("inventoryCount"));
-            using var image = window.Capture(rect);
-            var ocr = recognizer.Recognize(image, [new CvRect(0, 0, image.Width, image.Height)]);
-            var text = ocr.Count > 0 ? ocr[0].Text : "";
-            var match = Regex.Match(text, @"(\d{1,4})\s*/\s*\d{2,5}");
-            if (match.Success && int.TryParse(match.Groups[1].Value, out var count))
+            using var header = source.Clone(headerRect, source.PixelFormat);
+            var rawOcr = recognizer.Recognize(header, [new CvRect(0, 0, header.Width, header.Height)]);
+            var raw = rawOcr.Count > 0
+                ? WarehousePreflightEvaluator.EvaluateHeader(rawOcr[0].Text, rawOcr[0].Score, policy)
+                : WarehousePreflightEvaluator.EvaluateHeader(string.Empty, 0, policy);
+            if (raw.HeaderDetected && raw.InventoryCountDetected)
             {
-                scanLog.Write($"Inventory count OCR: '{text}' => {count}.");
-                return count;
+                scanLog.Write($"Warehouse header OCR raw accepted. text='{SanitizeLogValue(raw.NormalizedText)}', confidence={raw.Confidence:F3}, headerScore={raw.HeaderScore}, inventoryCountDetected=True.");
+                return raw;
             }
 
-            var numbers = Regex.Matches(text, @"\d+").Select(m => m.Value).ToArray();
-            if (numbers.Length >= 2 && int.TryParse(numbers[0], out count))
-            {
-                scanLog.Write($"Inventory count OCR fallback: '{text}' => {count}.");
-                return count;
-            }
-
-            scanLog.Write($"Inventory count OCR failed: '{text}'.");
+            using var normalizedImage = VisualProbeEvaluator.NormalizeLuminance(header);
+            var normalizedOcr = recognizer.Recognize(normalizedImage, [new CvRect(0, 0, normalizedImage.Width, normalizedImage.Height)]);
+            var normalized = normalizedOcr.Count > 0
+                ? WarehousePreflightEvaluator.EvaluateHeader(normalizedOcr[0].Text, normalizedOcr[0].Score, policy, usedNormalizedImage: true)
+                : WarehousePreflightEvaluator.EvaluateHeader(string.Empty, 0, policy, usedNormalizedImage: true);
+            var selected = WarehousePreflightEvaluator.ChooseHeaderResult(raw, normalized);
+            scanLog.Write($"Warehouse header OCR evaluated. rawText='{SanitizeLogValue(raw.NormalizedText)}', rawConfidence={raw.Confidence:F3}, normalizedText='{SanitizeLogValue(normalized.NormalizedText)}', normalizedConfidence={normalized.Confidence:F3}, selected={(selected.UsedNormalizedImage ? "normalized" : "raw")}, headerDetected={selected.HeaderDetected}, headerScore={selected.HeaderScore}, inventoryCountDetected={selected.InventoryCountDetected}.");
+            return selected;
         }
         catch (Exception ex)
         {
-            scanLog.Write($"Inventory count OCR exception: {ex.Message}");
+            scanLog.Write($"Warehouse header OCR exception: {ex.GetType().Name}: {SanitizeLogValue(ex.Message)}");
+            return new WarehouseHeaderProbeResult(false, 0, 4, 0, null, null, false, string.Empty);
+        }
+    }
+
+    private static async Task<InventoryCountConsensusResult> ReadInventoryCountConsensusAsync(
+        GameWindow window,
+        ScanProfile profile,
+        PaddleOcrRecognizer recognizer,
+        WarehousePreflightPolicy policy,
+        ScanLog scanLog,
+        CancellationToken token)
+    {
+        var required = Math.Clamp(policy.CountConsensusFrames, 2, 3);
+        var maximumAttempts = Math.Clamp(policy.CountMaximumAttempts, required, 5);
+        var poll = TimeSpan.FromMilliseconds(Math.Clamp(policy.PollMilliseconds, 100, 1000));
+        var headerRect = window.ToScreenRectangle(profile.Rectangle("inventoryCount"));
+        var votes = new Dictionary<(int Current, int Capacity), int>();
+        var bestConsensus = 0;
+
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            using var headerImage = window.Capture(headerRect);
+            var result = ReadWarehouseHeader(
+                headerImage,
+                new Rectangle(Point.Empty, headerImage.Size),
+                recognizer,
+                policy,
+                scanLog);
+            if (result.HeaderDetected && result.InventoryCount is int current && result.InventoryCapacity is int capacity)
+            {
+                var key = (current, capacity);
+                var count = votes.TryGetValue(key, out var existing) ? existing + 1 : 1;
+                votes[key] = count;
+                bestConsensus = Math.Max(bestConsensus, count);
+                scanLog.WriteEvent("INVENTORY_COUNT_CONSENSUS", $"attempt={attempt}/{maximumAttempts}, accepted=True, countDetected=True, consensusFrames={count}/{required}, normalizedRetry={result.UsedNormalizedImage}, headerScore={result.HeaderScore}");
+                if (count >= required)
+                {
+                    return new InventoryCountConsensusResult(current, capacity, count, attempt);
+                }
+            }
+            else
+            {
+                scanLog.WriteEvent("INVENTORY_COUNT_CONSENSUS", $"attempt={attempt}/{maximumAttempts}, accepted=False, countDetected={result.InventoryCountDetected}, consensusFrames={bestConsensus}/{required}, normalizedRetry={result.UsedNormalizedImage}, headerScore={result.HeaderScore}");
+            }
+
+            if (attempt < maximumAttempts)
+            {
+                await Task.Delay(poll, token);
+            }
         }
 
-        return null;
+        return new InventoryCountConsensusResult(null, null, bestConsensus, maximumAttempts);
     }
+
+    private static WarehouseMonitorPlan CreateWarehouseMonitorPlan(GameWindow window, ScanProfile profile)
+    {
+        var headerRect = window.ToScreenRectangle(profile.Rectangle("inventoryCount"));
+        var listGridRect = ProfileRectangleOrFallback(
+            window,
+            profile,
+            "listGridRect",
+            BuildListGridFallback(window, profile, Math.Max(1, profile.VisibleRows), Math.Max(1, profile.VisibleColumns)));
+        var detailRect = window.ToScreenRectangle(profile.Rectangle("detailPanel"));
+        var confirmationBounds = Rectangle.Intersect(
+            window.ClientScreenRect,
+            Rectangle.Union(Rectangle.Union(headerRect, listGridRect), detailRect));
+        var driveDiscOffset = window.ToScreenPoint(profile.Point("driveDiscOffset"));
+        var driveDiscStepNormalized = profile.Point("driveDiscStep");
+        var driveDiscStep = window.ToClientSize(new SizeF(driveDiscStepNormalized.X, driveDiscStepNormalized.Y));
+        using var headerImage = window.Capture(headerRect);
+        var baseline = WarehousePreflightEvaluator.CreateMonitorSignature(
+            headerImage,
+            [new Rectangle(Point.Empty, headerImage.Size)]);
+        return new WarehouseMonitorPlan(
+            headerRect,
+            baseline,
+            confirmationBounds,
+            ToLocalRectangle(headerRect, confirmationBounds, confirmationBounds.Size),
+            ToLocalRectangle(listGridRect, confirmationBounds, confirmationBounds.Size),
+            ToLocalRectangle(detailRect, confirmationBounds, confirmationBounds.Size),
+            new Point(driveDiscOffset.X - confirmationBounds.Left, driveDiscOffset.Y - confirmationBounds.Top),
+            driveDiscStep);
+    }
+
+    private static WarehouseFastProbe CaptureWarehouseFastProbe(
+        GameWindow window,
+        WarehouseMonitorPlan plan,
+        WarehouseMonitorSignature baseline)
+    {
+        using var image = window.Capture(plan.FastScreenBounds);
+        var health = WarehousePreflightEvaluator.EvaluateCaptureHealth(image);
+        var signature = health.Passed
+            ? WarehousePreflightEvaluator.CreateMonitorSignature(
+                image,
+                [new Rectangle(Point.Empty, image.Size)])
+            : new WarehouseMonitorSignature([]);
+        var score = health.Passed
+            ? WarehousePreflightEvaluator.CompareMonitorSignature(baseline, signature)
+            : 0;
+        return new WarehouseFastProbe(health.Passed, score, health, signature);
+    }
+
+    private static WarehouseStrongProbe CaptureWarehouseStrongProbe(
+        GameWindow window,
+        WarehouseMonitorPlan plan,
+        PaddleOcrRecognizer recognizer,
+        WarehousePreflightPolicy policy,
+        ScanLog scanLog)
+    {
+        using var image = window.Capture(plan.ConfirmationScreenBounds);
+        var health = WarehousePreflightEvaluator.EvaluateCaptureHealth(image);
+        var header = health.Passed
+            ? ReadWarehouseHeader(image, plan.ConfirmationHeaderRect, recognizer, policy, scanLog)
+            : default;
+        var structure = health.Passed
+            ? WarehousePreflightEvaluator.EvaluateStructure(
+                image,
+                plan.ConfirmationListGridRect,
+                plan.ConfirmationDetailPanelRect,
+                plan.ConfirmationDriveDiscOffset,
+                plan.DriveDiscStep)
+            : default;
+        var headerSignature = health.Passed
+            ? WarehousePreflightEvaluator.CreateMonitorSignature(image, [plan.ConfirmationHeaderRect])
+            : new WarehouseMonitorSignature([]);
+        return new WarehouseStrongProbe(
+            WarehousePreflightEvaluator.IsStrongConfirmationAccepted(health, header, structure, policy),
+            health,
+            header,
+            structure,
+            headerSignature);
+    }
+
+    private static Rectangle ToLocalRectangle(Rectangle screenRect, Rectangle captureBounds, Size imageSize) =>
+        RelativeIntersection(screenRect, captureBounds, imageSize);
 
     private static RarityProbe DetectRarityAround(GameWindow window, ScanProfile profile, System.Drawing.Point center)
     {
@@ -2971,8 +3252,9 @@ public sealed class ScanController
         var acceptReason = "changed_stable_full_roi";
         var acceptGateReason = "waiting_for_panel_change";
         var lastVisibleCount = 0;
+        var lastReadableRoiCount = -1;
         var roiKeys = profile.OrderedRoiKeys();
-        var lastRoiVisibility = new VisibleRoiEvaluation(0, roiKeys.FirstOrDefault(), null);
+        var lastRoiVisibility = new VisibleRoiEvaluation(0, roiKeys.FirstOrDefault(), null, false, "not_sampled");
         var quickRejectReason = runtimeState.QuickPanelAcceptEnabled ? "waiting_for_panel_change" : "disabled";
         var unchangedFallbackDelay = TimeSpan.FromMilliseconds(Math.Clamp(
             profile.PanelUnchangedFallbackMs,
@@ -3176,37 +3458,46 @@ public sealed class ScanController
             lastRoiVisibility = roiVisibility;
             visibleWatch.Stop();
             visibleRoiMilliseconds += visibleWatch.Elapsed.TotalMilliseconds;
-            if (visibleCount == rois.Count)
+            if (roiVisibility.ValidBoundary)
             {
-                fullRoiMilliseconds ??= elapsedMilliseconds;
-                roiCompleteFrames++;
+                roiCompleteFrames = lastReadableRoiCount == visibleCount
+                    ? roiCompleteFrames + 1
+                    : 1;
+                lastReadableRoiCount = visibleCount;
+                var requiredLayoutFrames = RequiredRoiBoundaryFrames(visibleCount, rois.Count, requiredStableFrames);
+                if (roiCompleteFrames >= requiredLayoutFrames)
+                {
+                    fullRoiMilliseconds ??= elapsedMilliseconds;
+                }
             }
             else
             {
                 roiCompleteFrames = 0;
+                lastReadableRoiCount = -1;
             }
 
             if (visibleCount > 0)
             {
-                var fullPanelReadable = visibleCount == rois.Count && roiCompleteFrames >= 1;
+                var requiredRoiCompleteFrames = RequiredRoiBoundaryFrames(visibleCount, rois.Count, requiredStableFrames);
+                var panelReadable = roiVisibility.ValidBoundary && roiCompleteFrames >= requiredRoiCompleteFrames;
+                var fullPanelReadable = visibleCount == rois.Count && panelReadable;
                 var panelSelectedStableFrames = stabilityDecision.Source == PanelStabilitySource.TextCore
                     ? textCoreStableProbeFrames
                     : stableProbeFrames;
                 var effectiveRequiredStableFrames = panelTiming.EffectivePanelAcceptMode == PanelAcceptMode.AdaptiveEarlyFullRoi
                     ? 1
                     : requiredStableFrames;
-                var requiredRoiCompleteFrames = 1;
                 var selectedStableFrames = panelTiming.EffectivePanelAcceptMode == PanelAcceptMode.AdaptiveEarlyFullRoi
                     ? roiCompleteFrames
                     : panelSelectedStableFrames;
                 var stableEnough = selectedStableFrames >= effectiveRequiredStableFrames;
-                var roiEnough = visibleCount == rois.Count && roiCompleteFrames >= requiredRoiCompleteFrames;
+                var roiEnough = panelReadable;
                 acceptGateReason = !sawPanelChange
                     ? "waiting_for_panel_change"
-                    : visibleCount != rois.Count
-                        ? "waiting_for_full_roi"
+                    : !roiVisibility.ValidBoundary
+                        ? roiVisibility.InvalidReason
                         : roiCompleteFrames < requiredRoiCompleteFrames
-                            ? "waiting_for_roi_complete_frames"
+                            ? "waiting_for_variable_roi_stability"
                             : !stableEnough
                                 ? "waiting_for_stable_frame"
                                 : elapsedMilliseconds < changedMinimumAcceptMs
@@ -3238,7 +3529,9 @@ public sealed class ScanController
                 {
                     quickRejectReason = !panelTiming.WarmupComplete
                         ? "before_warmup_complete"
-                        : sawPanelChange ? "waiting_for_full_roi" : "waiting_for_panel_change";
+                        : sawPanelChange
+                            ? visibleCount == rois.Count ? "waiting_for_full_roi" : "variable_roi_requires_stability"
+                            : "waiting_for_panel_change";
                 }
 
                 if (roiEnough
@@ -3267,7 +3560,7 @@ public sealed class ScanController
                     return new PanelCapture(acceptedImage, visibleCount, waitMilliseconds, usedFallback: false, changeProbeSignatures, frameCount, changeMilliseconds, selectionChangeMilliseconds, fullRoiMilliseconds, stableMilliseconds, textCoreStableMilliseconds, stabilityDecision.SourceName, stabilityDecision.Reason, captureMilliseconds, signatureMilliseconds, visibleRoiMilliseconds, frameLoopMilliseconds, frameToBitmapMilliseconds, bitmapCreatedCount, changedMinimumAcceptMs, requiredStableFrames, panelTiming.SampleCount, panelTiming.Reason, finalAcceptReason, quickAccept: false, quickRejectReason, panelTiming.EffectivePanelAcceptMode, panelTiming.EffectivePostScrollPanelAcceptMode, panelTiming.PanelFloorMode, panelTiming.PanelMinAcceptFloorMs, panelTiming.SameRowPanelFloorMs, panelTiming.PostScrollPanelFloorMs, panelFloorReason, CalculateFloorWaitLimitedMilliseconds(changedMinimumAcceptMs, changeMilliseconds, fullRoiMilliseconds, stableMilliseconds), waitMilliseconds - changedMinimumAcceptMs, roiCompleteFrames, selectedStableFrames, acceptGateReason);
                 }
 
-                if (fullPanelReadable && !sawPanelChange && stableProbeFrames >= requiredStableFrames && DateTime.UtcNow - start >= unchangedFallbackDelay)
+                if (panelReadable && !sawPanelChange && stableProbeFrames >= requiredStableFrames && DateTime.UtcNow - start >= unchangedFallbackDelay)
                 {
                     if (!PromoteSelectionChange(elapsedMilliseconds, out var blockedReason))
                     {
@@ -3324,10 +3617,82 @@ public sealed class ScanController
             .ToArray();
     }
 
-    private sealed record VisibleRoiEvaluation(
+    internal sealed record VisibleRoiEvaluation(
         int Count,
         string? FirstMissingRoi,
-        RowPresenceProbeResult? FirstMissingProbe);
+        RowPresenceProbeResult? FirstMissingProbe,
+        bool ValidBoundary,
+        string InvalidReason);
+
+    internal static VisibleRoiEvaluation EvaluateVariableRoiLayout(
+        IReadOnlyList<bool> presence,
+        IReadOnlyList<string> roiKeys,
+        IReadOnlyList<RowPresenceProbeResult?>? probes = null)
+    {
+        const int requiredCoreRois = 4;
+        if (presence.Count < requiredCoreRois || roiKeys.Count != presence.Count)
+        {
+            return new VisibleRoiEvaluation(0, roiKeys.FirstOrDefault(), null, false, "invalid_roi_layout");
+        }
+
+        for (var index = 0; index < requiredCoreRois; index++)
+        {
+            if (!presence[index])
+            {
+                return new VisibleRoiEvaluation(
+                    index,
+                    roiKeys[index],
+                    probes?.ElementAtOrDefault(index),
+                    false,
+                    "required_core_missing");
+            }
+        }
+
+        var readableCount = requiredCoreRois;
+        var boundaryFound = false;
+        string? firstMissing = null;
+        RowPresenceProbeResult? firstMissingProbe = null;
+        for (var index = requiredCoreRois; index + 1 < presence.Count; index += 2)
+        {
+            var namePresent = presence[index];
+            var valuePresent = presence[index + 1];
+            if (namePresent != valuePresent)
+            {
+                var missingIndex = namePresent ? index + 1 : index;
+                return new VisibleRoiEvaluation(
+                    readableCount,
+                    roiKeys[missingIndex],
+                    probes?.ElementAtOrDefault(missingIndex),
+                    false,
+                    "incomplete_substat_pair");
+            }
+
+            if (!namePresent)
+            {
+                boundaryFound = true;
+                firstMissing ??= roiKeys[index];
+                firstMissingProbe ??= probes?.ElementAtOrDefault(index);
+                continue;
+            }
+
+            if (boundaryFound)
+            {
+                return new VisibleRoiEvaluation(
+                    readableCount,
+                    firstMissing,
+                    firstMissingProbe,
+                    false,
+                    "substat_gap");
+            }
+
+            readableCount += 2;
+        }
+
+        return new VisibleRoiEvaluation(readableCount, firstMissing, firstMissingProbe, true, "");
+    }
+
+    internal static int RequiredRoiBoundaryFrames(int visibleCount, int totalCount, int configuredStableFrames) =>
+        visibleCount == totalCount ? 1 : Math.Max(3, configuredStableFrames);
 
     private static VisibleRoiEvaluation EvaluateVisibleRois(
         Bitmap image,
@@ -3336,24 +3701,19 @@ public sealed class ScanController
         System.Drawing.Point statOffset,
         RowPresenceProbePolicy policy)
     {
-        var count = 0;
         var referenceRoi = rois.Count > 2 ? rois[2] : rois[0];
-        foreach (var roi in rois)
+        var presence = new bool[rois.Count];
+        var probes = new RowPresenceProbeResult?[rois.Count];
+        for (var index = 0; index < rois.Count; index++)
         {
-            RowPresenceProbeResult? probe = count <= 3
+            RowPresenceProbeResult? probe = index <= 3
                 ? null
-                : VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, referenceRoi, roi, statOffset, policy);
-            if (probe is null || probe.Value.Present)
-            {
-                count++;
-            }
-            else
-            {
-                return new VisibleRoiEvaluation(count, roiKeys.ElementAtOrDefault(count), probe);
-            }
+                : VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, referenceRoi, rois[index], statOffset, policy);
+            probes[index] = probe;
+            presence[index] = probe is null || probe.Value.Present;
         }
 
-        return new VisibleRoiEvaluation(count, null, null);
+        return EvaluateVariableRoiLayout(presence, roiKeys, probes);
     }
 
     private static VisibleRoiEvaluation EvaluateVisibleRois(
@@ -3363,24 +3723,19 @@ public sealed class ScanController
         System.Drawing.Point statOffset,
         RowPresenceProbePolicy policy)
     {
-        var count = 0;
         var referenceRoi = rois.Count > 2 ? rois[2] : rois[0];
-        foreach (var roi in rois)
+        var presence = new bool[rois.Count];
+        var probes = new RowPresenceProbeResult?[rois.Count];
+        for (var index = 0; index < rois.Count; index++)
         {
-            RowPresenceProbeResult? probe = count <= 3
+            RowPresenceProbeResult? probe = index <= 3
                 ? null
-                : VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, referenceRoi, roi, statOffset, policy);
-            if (probe is null || probe.Value.Present)
-            {
-                count++;
-            }
-            else
-            {
-                return new VisibleRoiEvaluation(count, roiKeys.ElementAtOrDefault(count), probe);
-            }
+                : VisualProbeEvaluator.EvaluateRelativeTextRowPresence(image, referenceRoi, rois[index], statOffset, policy);
+            probes[index] = probe;
+            presence[index] = probe is null || probe.Value.Present;
         }
 
-        return new VisibleRoiEvaluation(count, null, null);
+        return EvaluateVariableRoiLayout(presence, roiKeys, probes);
     }
 
     private Task[] StartOcrWorkers(
@@ -3621,6 +3976,7 @@ public sealed class ScanController
                 if (options.StopAtNonLevel15 && result.Export.Level != 15)
                 {
                     Interlocked.CompareExchange(ref counters.StopAfterIndex, result.Index, 0);
+                    Interlocked.CompareExchange(ref counters.StopReason, "non_level_15_stop", null);
                     pending.Clear();
                     var detail = result.ErrorDetail ?? BuildExportDetail(result.Export);
                     File.WriteAllText(Path.Combine(outputDir, $"{result.Index:0000}.non15.txt"), detail);
@@ -3633,6 +3989,7 @@ public sealed class ScanController
                 if (!duplicateGuard.Observe(result.Export, out var duplicateReason))
                 {
                     Interlocked.CompareExchange(ref counters.StopAfterIndex, result.Index, 0);
+                    Interlocked.CompareExchange(ref counters.StopReason, "duplicate_guard", null);
                     scanLog.Write($"Duplicate guard canceled scan at #{result.Index}: {duplicateReason}");
                     Report(progress, counters, $"重复保护触发：{duplicateReason}");
                     linked.Cancel();
@@ -3796,42 +4153,6 @@ public sealed class ScanController
         ]);
     }
 
-    private static async Task MonitorBackpackAsync(
-        GameWindow window,
-        ScanProfile profile,
-        CancellationTokenSource linked,
-        IProgress<ScanProgress> progress,
-        Counters counters,
-        ScanLog scanLog)
-    {
-        var visualOptions = profile.VisualProbes ?? new VisualProbeOptions();
-        var backpackPolicy = visualOptions.BackpackReady ?? new ChromaticProbePolicy();
-        var dismantlePoint = window.ToScreenPoint(profile.Point("dismantleButton"));
-        var dismantleColor = profile.Color("dismantleButton");
-        var radiusX = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Width / (double)profile.StandardScreen[0]));
-        var radiusY = Math.Max(4, (int)Math.Round(backpackPolicy.Radius * window.ClientScreenRect.Height / (double)profile.StandardScreen[1]));
-        var probeRect = Rectangle.Intersect(
-            window.ClientScreenRect,
-            Rectangle.FromLTRB(dismantlePoint.X - radiusX, dismantlePoint.Y - radiusY, dismantlePoint.X + radiusX + 1, dismantlePoint.Y + radiusY + 1));
-        var failedFrames = 0;
-
-        while (!linked.IsCancellationRequested)
-        {
-            using var image = window.Capture(probeRect);
-            var probe = VisualProbeEvaluator.EvaluateChromaticAnchor(image, dismantleColor, backpackPolicy);
-            failedFrames = probe.Passed ? 0 : failedFrames + 1;
-            if (failedFrames >= 2)
-            {
-                scanLog.Write($"Backpack monitor canceled scan. rect={probeRect}, anchorScore={probe.Score}, coverage={probe.Coverage:F3}, median={ColorText(probe.MedianColor)}, expected={ColorText(dismantleColor)}, failedFrames={failedFrames}");
-                Report(progress, counters, "检测到背包界面已退出。");
-                linked.Cancel();
-                return;
-            }
-
-            await Task.Delay(150, linked.Token);
-        }
-    }
-
     private static async Task WaitUntilAsync(
         Func<bool> condition,
         TimeSpan timeout,
@@ -3862,17 +4183,6 @@ public sealed class ScanController
         throw new TimeoutException("等待界面加载超时。");
     }
 
-    private static async Task SafeAwait(Task task)
-    {
-        try
-        {
-            await task;
-        }
-        catch (OperationCanceledException)
-        {
-        }
-    }
-
     private static int CurrentOcrBacklog(Counters counters)
     {
         return Math.Max(
@@ -3881,6 +4191,21 @@ public sealed class ScanController
             - Volatile.Read(ref counters.Completed)
             - Volatile.Read(ref counters.Failed));
     }
+
+    private static ScannerFailureException InventoryCountOcrFailure(
+        string message,
+        IReadOnlyDictionary<string, object?>? details = null) => new(
+        "inventory_count_ocr_failed",
+        "仓库数量识别失败",
+        message,
+        "请确认仓库数量区域完整可见，并关闭遮挡或缩放后重试。",
+        details);
+
+    private static ScannerFailureException NavigationFailure(string message) => new(
+        "scan_navigation_failed",
+        "驱动盘列表滚动失败",
+        message,
+        "请保持游戏前台且不要操作鼠标滚轮，然后重新扫描。");
 
     private static void Report(IProgress<ScanProgress> progress, Counters counters, string message, DriveDiscExport? item = null, Bitmap? debugImage = null)
     {
@@ -4389,7 +4714,7 @@ public sealed class ScanController
         public int FrameCount { get; }
     }
 
-    private sealed class PanelCellCaptureException : TimeoutException, IScanDiagnosticException
+    private sealed class PanelCellCaptureException : TimeoutException, IScannerFailureException
     {
         public PanelCellCaptureException(
             int pass,
@@ -4443,6 +4768,10 @@ public sealed class ScanController
         public int MaxColumns { get; }
         public int? LogicalRow { get; }
         public IReadOnlyDictionary<string, object?> DiagnosticDetails { get; }
+        public string Code => "panel_capture_timeout";
+        public string Title => "驱动盘详情读取超时";
+        public string Remedy => "请保持游戏前台且无遮挡后重试；持续发生时请打开日志。";
+        public bool Retryable => true;
     }
 
     private sealed record OcrWorkResult(int Index, DriveDiscExport? Export, string? ErrorDetail, string? ErrorMessage)
@@ -4465,6 +4794,7 @@ public sealed class ScanController
         public int Completed;
         public int Failed;
         public int StopAfterIndex;
+        public string? StopReason;
     }
 
     private enum RowScanResult
@@ -4624,6 +4954,204 @@ public sealed class ScanController
         }
     }
 
+    private sealed class WarehouseContextGuard
+    {
+        private readonly object _sync = new();
+        private readonly GameWindow _window;
+        private readonly WarehouseMonitorPlan _plan;
+        private readonly WarehousePreflightPolicy _policy;
+        private readonly PaddleOcrRecognizer _recognizer;
+        private readonly ScanLog _scanLog;
+        private readonly WarehouseInputGuardState _state;
+        private WarehouseFastProbe _lastFastProbe;
+        private WarehouseStrongProbe _lastStrongProbe;
+
+        public WarehouseContextGuard(
+            GameWindow window,
+            WarehouseMonitorPlan plan,
+            WarehousePreflightPolicy policy,
+            PaddleOcrRecognizer recognizer,
+            ScanLog scanLog)
+        {
+            _window = window;
+            _plan = plan;
+            _policy = policy;
+            _recognizer = recognizer;
+            _scanLog = scanLog;
+            PollMilliseconds = Math.Clamp(policy.MonitorPollMilliseconds, 100, 1000);
+            RequiredFailureFrames = Math.Clamp(policy.MonitorFailureFrames, 2, 5);
+            MinimumScore = Math.Clamp(policy.MonitorMinimumScore, 1, 100);
+            _state = new WarehouseInputGuardState(
+                Math.Clamp(policy.MonitorMaximumAgeMilliseconds, 100, 2000),
+                RequiredFailureFrames,
+                plan.FastBaseline);
+            _lastFastProbe = new WarehouseFastProbe(true, 100, default, plan.FastBaseline);
+        }
+
+        public int PollMilliseconds { get; }
+        public int RequiredFailureFrames { get; }
+        public int MinimumScore { get; }
+
+        public void EnsureHealthy()
+        {
+            lock (_sync)
+            {
+                if (_state.IsFresh())
+                {
+                    return;
+                }
+
+                _lastFastProbe = CaptureWarehouseFastProbe(_window, _plan, _state.FastBaseline);
+                if (_state.AcceptFast(
+                    _lastFastProbe.CaptureHealthy,
+                    _lastFastProbe.Score,
+                    MinimumScore))
+                {
+                    return;
+                }
+
+                _scanLog.WriteEvent(
+                    "WAREHOUSE_INPUT_GUARD_FAST",
+                    $"passed=False, score={_lastFastProbe.Score}, requiredScore={MinimumScore}, captureHealthy={_lastFastProbe.CaptureHealthy}, captureScore={_lastFastProbe.Health.Score}");
+                _state.BeginStrongConfirmation();
+                while (true)
+                {
+                    _lastStrongProbe = CaptureWarehouseStrongProbe(
+                        _window,
+                        _plan,
+                        _recognizer,
+                        _policy,
+                        _scanLog);
+                    if (_state.AcceptStrong(
+                        _lastStrongProbe.Passed,
+                        _lastStrongProbe.HeaderSignature))
+                    {
+                        _scanLog.WriteEvent(
+                            "WAREHOUSE_INPUT_GUARD_CONFIRM",
+                            $"passed=True, confirmationFailures=0/{RequiredFailureFrames}, captureHealthy={_lastStrongProbe.Health.Passed}, headerDetected={_lastStrongProbe.Header.HeaderDetected}, headerScore={_lastStrongProbe.Header.HeaderScore}, gridStructureScore={_lastStrongProbe.Structure.GridStructureScore}, layoutScore={_lastStrongProbe.Structure.LayoutScore}, baselineRebuilt=True");
+                        return;
+                    }
+
+                    _scanLog.WriteEvent(
+                        "WAREHOUSE_INPUT_GUARD_CONFIRM",
+                        $"passed=False, confirmationFailures={_state.StrongFailures}/{RequiredFailureFrames}, captureHealthy={_lastStrongProbe.Health.Passed}, headerDetected={_lastStrongProbe.Header.HeaderDetected}, headerScore={_lastStrongProbe.Header.HeaderScore}, gridStructureScore={_lastStrongProbe.Structure.GridStructureScore}, layoutScore={_lastStrongProbe.Structure.LayoutScore}");
+                    if (_state.ShouldBlock)
+                    {
+                        _scanLog.Write($"Warehouse input guard blocked input after {_state.StrongFailures} strong confirmation failures.");
+                        throw CreateFailureCore();
+                    }
+
+                    Thread.Sleep(PollMilliseconds);
+                }
+            }
+        }
+
+        private ScannerFailureException CreateFailureCore()
+        {
+            var details = new Dictionary<string, object?>
+            {
+                ["preflightState"] = "warehouse_context_lost",
+                ["fastScore"] = Math.Clamp(_lastFastProbe.Score, 0, 100),
+                ["headerScore"] = Math.Clamp(_lastStrongProbe.Header.HeaderScore, 0, 100),
+                ["gridStructureScore"] = Math.Clamp(_lastStrongProbe.Structure.GridStructureScore, 0, 100),
+                ["layoutScore"] = Math.Clamp(_lastStrongProbe.Structure.LayoutScore, 0, 100),
+                ["confirmationFailures"] = _state.StrongFailures,
+                ["stableFrames"] = 0,
+                ["requiredStableFrames"] = RequiredFailureFrames,
+                ["captureMode"] = _window.ActiveCaptureMode,
+                ["clientWidth"] = _window.ClientScreenRect.Width,
+                ["clientHeight"] = _window.ClientScreenRect.Height,
+                ["dpi"] = _window.Dpi
+            };
+            return new ScannerFailureException(
+                "warehouse_context_lost",
+                "无法确认驱动盘仓库界面",
+                "扫描期间无法继续确认驱动盘仓库界面，已在下一次输入前停止。",
+                "请确保游戏可见、未被遮挡并停留在背包中的驱动盘页面后重试。",
+                details);
+        }
+    }
+
+    internal sealed class WarehouseInputGuardState
+    {
+        private readonly long _maximumAgeTicks;
+        private readonly int _requiredStrongFailures;
+        private long _lastHealthyTimestamp;
+
+        public WarehouseInputGuardState(
+            int maximumAgeMilliseconds,
+            int requiredStrongFailures,
+            WarehouseMonitorSignature fastBaseline)
+        {
+            _maximumAgeTicks = (long)Math.Ceiling(
+                Math.Max(1, maximumAgeMilliseconds) / 1000d * Stopwatch.Frequency);
+            _requiredStrongFailures = Math.Max(1, requiredStrongFailures);
+            _lastHealthyTimestamp = Stopwatch.GetTimestamp();
+            FastBaseline = fastBaseline;
+        }
+
+        public WarehouseMonitorSignature FastBaseline { get; private set; }
+        public int StrongFailures { get; private set; }
+        public bool ShouldBlock => StrongFailures >= _requiredStrongFailures;
+
+        public bool IsFresh() => Stopwatch.GetTimestamp() - _lastHealthyTimestamp <= _maximumAgeTicks;
+
+        public bool AcceptFast(bool captureHealthy, int score, int minimumScore)
+        {
+            if (!captureHealthy || score < minimumScore)
+            {
+                return false;
+            }
+
+            MarkHealthy();
+            return true;
+        }
+
+        public bool AcceptStrong(bool passed, WarehouseMonitorSignature headerSignature)
+        {
+            if (!passed)
+            {
+                StrongFailures++;
+                return false;
+            }
+
+            FastBaseline = headerSignature;
+            MarkHealthy();
+            return true;
+        }
+
+        private void MarkHealthy()
+        {
+            StrongFailures = 0;
+            _lastHealthyTimestamp = Stopwatch.GetTimestamp();
+        }
+
+        public void BeginStrongConfirmation()
+        {
+            StrongFailures = 0;
+        }
+
+    }
+
+    private readonly record struct InventoryCountConsensusResult(
+        int? InventoryCount,
+        int? InventoryCapacity,
+        int ConsensusFrames,
+        int Attempts);
+
+    private readonly record struct WarehouseFastProbe(
+        bool CaptureHealthy,
+        int Score,
+        CaptureHealthResult Health,
+        WarehouseMonitorSignature Signature);
+
+    private readonly record struct WarehouseStrongProbe(
+        bool Passed,
+        CaptureHealthResult Health,
+        WarehouseHeaderProbeResult Header,
+        WarehouseStructureProbeResult Structure,
+        WarehouseMonitorSignature HeaderSignature);
+
     private readonly record struct ImageSignature(ulong Hash, int[] Samples);
 
     private readonly record struct ViewportSignatures(ImageSignature Grid, ImageSignature[] Rows);
@@ -4675,5 +5203,10 @@ public sealed class ScanController
         public static ScrollRowsResult Ok(string message, int rowsAdvanced = 0, ImageSignature[]? afterRows = null) => new(true, message, rowsAdvanced, AfterRows: afterRows);
         public static ScrollRowsResult Fail(string message, bool retryable = true) => new(false, message, Retryable: retryable);
     }
+
+    internal readonly record struct ScrollTopProbeResult(
+        bool Detected,
+        int TopLuminance,
+        int TrackLuminance);
 
 }

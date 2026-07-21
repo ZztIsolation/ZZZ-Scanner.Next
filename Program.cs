@@ -106,6 +106,24 @@ static class Program
             return true;
         }
 
+        if (string.Equals(args[0], "--ocr-runtime-smoke", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args.Length != 2)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new
+                {
+                    ok = false,
+                    command = "ocr-runtime-smoke",
+                    error = "Usage: ZZZ-Scanner.Next.exe --ocr-runtime-smoke <fixture>"
+                }));
+                exitCode = 2;
+                return true;
+            }
+
+            exitCode = OcrRuntimeSmoke.Run(args[1], Console.Out);
+            return true;
+        }
+
         if (string.Equals(args[0], "--ocr-fast-calibrate", StringComparison.OrdinalIgnoreCase))
         {
             var outputFile = ReadOption(args, "--output");

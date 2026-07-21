@@ -16,7 +16,12 @@ public sealed class ScanSessionDiagnostics
     public string VisualTransformClass { get; init; } = "";
     public int AnchorScore { get; init; }
     public int GridScore { get; init; }
+    public bool WarehouseHeaderDetected { get; init; }
+    public int HeaderScore { get; init; }
+    public int GridStructureScore { get; init; }
+    public int LayoutScore { get; init; }
     public bool InventoryCountDetected { get; init; }
+    public int CountConsensusFrames { get; init; }
     public int HueDelta { get; init; }
     public int SaturationDeltaPct { get; init; }
     public int ValueDeltaPct { get; init; }
@@ -32,7 +37,12 @@ internal static class ScanDiagnosticDetails
             ["visualTransformClass"] = diagnostics.VisualTransformClass,
             ["anchorScore"] = diagnostics.AnchorScore,
             ["gridScore"] = diagnostics.GridScore,
+            ["warehouseHeaderDetected"] = diagnostics.WarehouseHeaderDetected,
+            ["headerScore"] = diagnostics.HeaderScore,
+            ["gridStructureScore"] = diagnostics.GridStructureScore,
+            ["layoutScore"] = diagnostics.LayoutScore,
             ["inventoryCountDetected"] = diagnostics.InventoryCountDetected,
+            ["countConsensusFrames"] = diagnostics.CountConsensusFrames,
             ["hueDelta"] = diagnostics.HueDelta,
             ["saturationDeltaPct"] = diagnostics.SaturationDeltaPct,
             ["valueDeltaPct"] = diagnostics.ValueDeltaPct,
@@ -62,7 +72,12 @@ internal static class ScanDiagnosticDetails
         string visualTransformClass,
         int anchorScore,
         int gridScore,
+        bool warehouseHeaderDetected,
+        int headerScore,
+        int gridStructureScore,
+        int layoutScore,
         bool inventoryCountDetected,
+        int countConsensusFrames,
         int hueDelta,
         int saturationDeltaPct,
         int valueDeltaPct,
@@ -80,7 +95,12 @@ internal static class ScanDiagnosticDetails
             ["visualTransformClass"] = visualTransformClass,
             ["anchorScore"] = anchorScore,
             ["gridScore"] = gridScore,
+            ["warehouseHeaderDetected"] = warehouseHeaderDetected,
+            ["headerScore"] = headerScore,
+            ["gridStructureScore"] = gridStructureScore,
+            ["layoutScore"] = layoutScore,
             ["inventoryCountDetected"] = inventoryCountDetected,
+            ["countConsensusFrames"] = countConsensusFrames,
             ["hueDelta"] = hueDelta,
             ["saturationDeltaPct"] = saturationDeltaPct,
             ["valueDeltaPct"] = valueDeltaPct,

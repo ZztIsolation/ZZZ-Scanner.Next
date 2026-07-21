@@ -2,6 +2,10 @@ param(
     [string]$Version,
     [string]$OutputRoot,
     [string]$HelperReleaseTag,
+    [string]$VCRedistDirectory,
+    [string]$MinimumVCRuntimeVersion = "14.44.35211",
+    [string]$OcrRuntimeSmokeFixture,
+    [int]$OcrRuntimeSmokeTimeoutSeconds = 120,
     [switch]$HelperOnly,
     [switch]$RequireVCRedistLayout,
     [int]$MaxFddMiB = 25,
@@ -28,6 +32,13 @@ if (-not [System.Version]::TryParse($Version, [ref]$parsedVersion) -or $Version.
 }
 
 $assemblyVersion = "$($parsedVersion.Major).$($parsedVersion.Minor).$($parsedVersion.Build).0"
+$minimumVCRuntime = $null
+if (-not [System.Version]::TryParse($MinimumVCRuntimeVersion, [ref]$minimumVCRuntime)) {
+    throw "MinimumVCRuntimeVersion must be a valid version. Got: $MinimumVCRuntimeVersion"
+}
+if ($OcrRuntimeSmokeTimeoutSeconds -lt 1 -or $OcrRuntimeSmokeTimeoutSeconds -gt 600) {
+    throw "OcrRuntimeSmokeTimeoutSeconds must be between 1 and 600."
+}
 [xml]$helperProject = Get-Content (Join-Path $repoRoot "Launcher\ZZZ-Scanner.Helper.csproj")
 $helperVersion = $helperProject.Project.PropertyGroup |
     ForEach-Object { [string]$_.Version } |
@@ -61,6 +72,15 @@ $selfContainedZip = Join-Path $distRoot "ZZZ-Scanner.Next-win-x64-self-contained
 $manifestPath = Join-Path $distRoot "scanner-manifest-$Version.json"
 $helperManifestPath = Join-Path $distRoot "helper-manifest.json"
 $reportPath = Join-Path $distRoot "publish-report-$Version.json"
+$smokeFixturePath = if ([string]::IsNullOrWhiteSpace($OcrRuntimeSmokeFixture)) {
+    Join-Path $repoRoot "Tests\Fixtures\ocr-equivalence.png.b64"
+}
+elseif ([System.IO.Path]::IsPathRooted($OcrRuntimeSmokeFixture)) {
+    [System.IO.Path]::GetFullPath($OcrRuntimeSmokeFixture)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OcrRuntimeSmokeFixture))
+}
 
 function Remove-OutputPath([string]$Path) {
     if (Test-Path $Path) {
@@ -75,44 +95,116 @@ function Invoke-DotnetPublish([string[]]$Arguments, [string]$Label) {
     }
 }
 
-function Find-VCRedistDirectory {
-    $candidates = @()
-    if (-not [string]::IsNullOrWhiteSpace($env:VCToolsRedistDir)) {
-        $candidates += (Join-Path $env:VCToolsRedistDir "x64\Microsoft.VC143.CRT")
+function Get-VCRedistCandidateDirectories([string]$Root) {
+    if ([string]::IsNullOrWhiteSpace($Root) -or -not (Test-Path -LiteralPath $Root -PathType Container)) {
+        return @()
     }
 
-    foreach ($visualStudioRoot in @(
-        "$env:ProgramFiles\Microsoft Visual Studio\2022",
-        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022"
-    )) {
-        if (Test-Path $visualStudioRoot) {
-            $candidates += Get-ChildItem $visualStudioRoot -Directory -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -match '\\x64\\Microsoft\.VC14[0-9]\.CRT$' } |
-                Sort-Object FullName -Descending |
-                Select-Object -ExpandProperty FullName
+    $fullRoot = [System.IO.Path]::GetFullPath($Root)
+    $candidates = @(
+        $fullRoot,
+        (Join-Path $fullRoot "x64\Microsoft.VC143.CRT")
+    )
+    foreach ($redistRoot in @($fullRoot, (Join-Path $fullRoot "VC\Redist\MSVC"))) {
+        if (-not (Test-Path -LiteralPath $redistRoot -PathType Container)) {
+            continue
         }
+        $candidates += Get-ChildItem -LiteralPath $redistRoot -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName "x64\Microsoft.VC143.CRT" }
     }
-
-    foreach ($candidate in $candidates | Select-Object -Unique) {
-        if (Test-Path (Join-Path $candidate "msvcp140.dll")) {
-            return @{ Path = $candidate; Source = "vc-redist-layout" }
-        }
-    }
-
-    if ($RequireVCRedistLayout) {
-        throw "VC143 Redistributable layout was not found. Install Visual Studio Build Tools with the C++ runtime or set VCToolsRedistDir."
-    }
-
-    $system32 = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
-    if (Test-Path (Join-Path $system32 "msvcp140.dll")) {
-        Write-Warning "VC Redist layout was not found; using the installed System32 redistributable for this local build. Release CI must use -RequireVCRedistLayout."
-        return @{ Path = $system32; Source = "system32-fallback" }
-    }
-
-    throw "Microsoft VC++ x64 runtime files were not found."
+    return @($candidates | Where-Object { Test-Path (Join-Path $_ "msvcp140.dll") } | Select-Object -Unique)
 }
 
-function Copy-AppLocalVCRuntime([string]$Destination, [hashtable]$VCRedist) {
+function Get-VCRuntimeFileVersion([System.IO.FileInfo]$File) {
+    $match = [regex]::Match([string]$File.VersionInfo.FileVersion, '\d+(?:\.\d+){2,3}')
+    if (-not $match.Success) {
+        throw "VC runtime file has no parseable version: $($File.FullName)"
+    }
+    return [System.Version]$match.Value
+}
+
+function Get-VCRedistLayoutInfo([string]$Path, [string]$Selection) {
+    $required = @("msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+    $optional = @("msvcp140_2.dll", "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll", "vcruntime140_threads.dll")
+    $files = @()
+    foreach ($name in $required + $optional) {
+        $filePath = Join-Path $Path $name
+        if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+            if ($required -contains $name) {
+                return $null
+            }
+            continue
+        }
+        $item = Get-Item -LiteralPath $filePath
+        $files += [pscustomobject]@{ Name = $name; Version = Get-VCRuntimeFileVersion $item }
+    }
+
+    $runtimeVersion = ($files | Where-Object Name -eq "msvcp140.dll" | Select-Object -First 1).Version
+    $lowestFileVersion = ($files | Sort-Object Version | Select-Object -First 1).Version
+    return [pscustomobject]@{
+        Path = [System.IO.Path]::GetFullPath($Path)
+        Source = "vc-redist-layout"
+        Selection = $Selection
+        RuntimeVersion = $runtimeVersion
+        RuntimeVersionText = $runtimeVersion.ToString()
+        LowestFileVersion = $lowestFileVersion
+        LowestFileVersionText = $lowestFileVersion.ToString()
+    }
+}
+
+function Find-VCRedistDirectory {
+    $candidateRoots = @()
+    if (-not [string]::IsNullOrWhiteSpace($VCRedistDirectory)) {
+        $candidateRoots += [pscustomobject]@{ Path = $VCRedistDirectory; Selection = "explicit" }
+    }
+    else {
+        if (-not [string]::IsNullOrWhiteSpace($env:VCToolsRedistDir)) {
+            $candidateRoots += [pscustomobject]@{ Path = $env:VCToolsRedistDir; Selection = "environment" }
+        }
+
+        $vswherePaths = @(
+            (Get-Command vswhere.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -Unique
+        foreach ($vswherePath in $vswherePaths) {
+            $installations = & $vswherePath -all -products * -property installationPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "vswhere failed with exit code $LASTEXITCODE."
+            }
+            foreach ($installation in $installations) {
+                if (-not [string]::IsNullOrWhiteSpace($installation)) {
+                    $candidateRoots += [pscustomobject]@{ Path = $installation.Trim(); Selection = "vswhere" }
+                }
+            }
+        }
+    }
+
+    $layouts = @()
+    foreach ($root in $candidateRoots) {
+        foreach ($candidate in Get-VCRedistCandidateDirectories $root.Path) {
+            $info = Get-VCRedistLayoutInfo $candidate $root.Selection
+            if ($null -ne $info) {
+                $layouts += $info
+            }
+        }
+    }
+    $layouts = @($layouts | Sort-Object Path -Unique)
+    $eligible = @($layouts | Where-Object { $_.LowestFileVersion -ge $minimumVCRuntime } | Sort-Object RuntimeVersion -Descending)
+    if ($eligible.Count -gt 0) {
+        return $eligible[0]
+    }
+
+    $found = if ($layouts.Count -eq 0) {
+        "none"
+    }
+    else {
+        ($layouts | ForEach-Object { "$($_.Path)=$($_.RuntimeVersionText)" }) -join "; "
+    }
+    $explicitHint = if ([string]::IsNullOrWhiteSpace($VCRedistDirectory)) { "" } else { " Explicit path: $VCRedistDirectory." }
+    throw "Release publishing requires one app-local VC runtime layout at version $MinimumVCRuntimeVersion or newer; System32 fallback is forbidden. Found: $found.$explicitHint"
+}
+
+function Copy-AppLocalVCRuntime([string]$Destination, [object]$VCRedist) {
     $required = @("msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll")
     $optional = @("msvcp140_2.dll", "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll", "vcruntime140_threads.dll")
     $copied = @()
@@ -139,6 +231,8 @@ function Copy-AppLocalVCRuntime([string]$Destination, [hashtable]$VCRedist) {
     $notice = @(
         "Microsoft Visual C++ Runtime - app-local deployment",
         "Source: $($VCRedist.Source)",
+        "Runtime version: $($VCRedist.RuntimeVersionText)",
+        "Minimum required version: $MinimumVCRuntimeVersion",
         "The runtime files are redistributed under the applicable Microsoft Visual Studio license.",
         "They are refreshed and hashed by every scanner release build."
     ) -join [Environment]::NewLine
@@ -383,6 +477,56 @@ $outputPaths = @($helperOut, $helperManifestPath)
 if (-not $HelperOnly) {
     $outputPaths += @($fddOut, $selfContainedOut, $fddZip, $selfContainedZip, $manifestPath, $reportPath)
 }
+
+function Invoke-OcrRuntimeSmoke([string]$Directory, [string]$Label) {
+    $scannerExe = Join-Path $Directory "ZZZ-Scanner.Next.exe"
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $scannerExe
+    $startInfo.WorkingDirectory = $Directory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    [void]$startInfo.ArgumentList.Add("--ocr-runtime-smoke")
+    [void]$startInfo.ArgumentList.Add($smokeFixturePath)
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw "$Label OCR runtime smoke could not start."
+    }
+    try {
+        if (-not $process.WaitForExit($OcrRuntimeSmokeTimeoutSeconds * 1000)) {
+            $process.Kill($true)
+            $process.WaitForExit()
+            throw "$Label OCR runtime smoke timed out after $OcrRuntimeSmokeTimeoutSeconds seconds."
+        }
+        $stdout = $process.StandardOutput.ReadToEnd().Trim()
+        $stderr = $process.StandardError.ReadToEnd().Trim()
+        $exitCode = $process.ExitCode
+        if ($exitCode -ne 0) {
+            $unsignedExitCode = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$exitCode), 0)
+            throw "$Label OCR runtime smoke failed with exit code $exitCode (0x$($unsignedExitCode.ToString('X8'))). stdout=$stdout stderr=$stderr"
+        }
+        if ([string]::IsNullOrWhiteSpace($stdout)) {
+            throw "$Label OCR runtime smoke returned no JSON output. stderr=$stderr"
+        }
+        try {
+            $result = $stdout | ConvertFrom-Json
+        }
+        catch {
+            throw "$Label OCR runtime smoke returned invalid JSON: $stdout"
+        }
+        if ($result.ok -ne $true) {
+            throw "$Label OCR runtime smoke reported failure: $stdout"
+        }
+        Write-Host "$Label OCR runtime smoke passed in $($result.elapsedMs) ms."
+        return $result
+    }
+    finally {
+        $process.Dispose()
+    }
+}
 foreach ($path in $outputPaths) {
     Remove-OutputPath $path
 }
@@ -396,6 +540,14 @@ $commonProperties = @(
     "-p:PublishReadyToRun=false",
     "-p:SatelliteResourceLanguages=zh-Hans"
 )
+
+$vcRedist = $null
+if (-not $HelperOnly) {
+    if (-not (Test-Path -LiteralPath $smokeFixturePath -PathType Leaf)) {
+        throw "OCR runtime smoke fixture was not found: $smokeFixturePath"
+    }
+    $vcRedist = Find-VCRedistDirectory
+}
 
 Invoke-DotnetPublish @(
     "publish", "Launcher\ZZZ-Scanner.Helper.csproj", "-c", "Release", "-r", "win-x64",
@@ -431,9 +583,11 @@ Invoke-DotnetPublish (@(
     "--self-contained", "true", "-o", $selfContainedOut
 ) + $commonProperties) "Self-contained scanner publish"
 
-$vcRedist = Find-VCRedistDirectory
 $fddVcFiles = Copy-AppLocalVCRuntime $fddOut $vcRedist
 $selfContainedVcFiles = Copy-AppLocalVCRuntime $selfContainedOut $vcRedist
+if (($fddVcFiles | ConvertTo-Json -Depth 4 -Compress) -ne ($selfContainedVcFiles | ConvertTo-Json -Depth 4 -Compress)) {
+    throw "FDD and self-contained packages received different app-local VC runtime files."
+}
 
 foreach ($directory in @($fddOut, $selfContainedOut)) {
     $scannerExe = Join-Path $directory "ZZZ-Scanner.Next.exe"
@@ -454,6 +608,9 @@ $selfContainedModelHash = (Get-FileHash -Algorithm SHA256 (Join-Path $selfContai
 if ($fddModelHash -ne $selfContainedModelHash) {
     throw "FDD and self-contained packages contain different OCR models."
 }
+
+$fddSmoke = Invoke-OcrRuntimeSmoke $fddOut "Framework-dependent scanner"
+$selfContainedSmoke = Invoke-OcrRuntimeSmoke $selfContainedOut "Self-contained scanner"
 
 New-Zip $fddOut $fddZip
 New-Zip $selfContainedOut $selfContainedZip
@@ -526,8 +683,18 @@ $report = [ordered]@{
     createdAt = [DateTimeOffset]::Now.ToString("O")
     vcRuntimeSource = $vcRedist.Source
     vcRuntimePath = $vcRedist.Path
+    vcRuntimeSelection = $vcRedist.Selection
+    vcRuntimeVersion = $vcRedist.RuntimeVersionText
+    vcRuntimeLowestFileVersion = $vcRedist.LowestFileVersionText
+    vcRuntimeMinimumVersion = $MinimumVCRuntimeVersion
     vcRuntimeLicense = "Microsoft Visual Studio redistributable license; VC-RUNTIME-NOTICE.txt is included in each scanner package."
     vcRuntimeFiles = $fddVcFiles
+    ocrRuntimeSmoke = [ordered]@{
+        fixture = $smokeFixturePath
+        timeoutSeconds = $OcrRuntimeSmokeTimeoutSeconds
+        frameworkDependent = $fddSmoke
+        selfContained = $selfContainedSmoke
+    }
     peDependencies = [ordered]@{
         helper = $helperDependencyReport
         frameworkDependent = $fddDependencyReport

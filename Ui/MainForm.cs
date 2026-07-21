@@ -15,8 +15,6 @@ public sealed class MainForm : Form
     private readonly ComboBox _traversalModeCombo = new();
     private readonly TextBox _processBox = new();
     private readonly NumericUpDown _maxItems = new();
-    private readonly CheckBox _rarityS = new();
-    private readonly CheckBox _rarityA = new();
     private readonly CheckBox _onlyLevel15 = new();
     private readonly CheckBox _bringToFront = new();
     private readonly CheckBox _showDebugImages = new();
@@ -100,18 +98,14 @@ public sealed class MainForm : Form
         basic.Controls.Add(_maxItems);
 
         AddLabel(basic, "品质");
-        var rarityPanel = new FlowLayoutPanel
+        var rarityLabel = new Label
         {
+            Text = "S",
             AutoSize = true,
             Dock = DockStyle.Top,
             Margin = new Padding(0, 0, 0, 2)
         };
-        _rarityS.Text = "S";
-        _rarityS.AutoSize = true;
-        _rarityA.Text = "A";
-        _rarityA.AutoSize = true;
-        rarityPanel.Controls.AddRange([_rarityS, _rarityA]);
-        basic.Controls.Add(rarityPanel);
+        basic.Controls.Add(rarityLabel);
 
         _onlyLevel15.Text = "只读取15级驱动盘";
         _onlyLevel15.AutoSize = true;
@@ -268,8 +262,6 @@ public sealed class MainForm : Form
 
         _processBox.Text = defaults.ProcessName;
         _maxItems.Value = defaults.MaxItems;
-        _rarityS.Checked = defaults.Rarities.Contains("S");
-        _rarityA.Checked = defaults.Rarities.Contains("A");
         _onlyLevel15.Checked = defaults.StopAtNonLevel15;
         _bringToFront.Checked = defaults.BringToFront;
         _highSpeedOcr.Checked = defaults.HighSpeedOcr;
@@ -409,8 +401,7 @@ public sealed class MainForm : Form
             OcrIntraOpThreads = (int)_ocrIntraOpThreads.Value
         };
         options.Rarities.Clear();
-        if (_rarityS.Checked) options.Rarities.Add("S");
-        if (_rarityA.Checked) options.Rarities.Add("A");
+        options.Rarities.Add("S");
         return options;
     }
 

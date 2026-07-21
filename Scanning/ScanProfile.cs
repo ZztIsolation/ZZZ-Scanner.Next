@@ -140,12 +140,33 @@ public sealed class ScanProfile
 
 public sealed class VisualProbeOptions
 {
+    // Kept for backward-compatible profile deserialization. Warehouse readiness no longer uses a signal vote.
     public int RequiredSignals { get; set; } = 2;
     public int RequiredStableFrames { get; set; } = 2;
     public int PollMilliseconds { get; set; } = 250;
     public ChromaticProbePolicy BackpackReady { get; set; } = new();
+    public WarehousePreflightPolicy WarehousePreflight { get; set; } = new();
     public RarityProbePolicy Rarity { get; set; } = new();
     public RowPresenceProbePolicy RowPresence { get; set; } = new();
+}
+
+public sealed class WarehousePreflightPolicy
+{
+    public int RequiredStableFrames { get; set; } = 2;
+    public int PollMilliseconds { get; set; } = 250;
+    public double ExactTitleMinimumConfidence { get; set; } = 0.55;
+    public double FuzzyTitleMinimumConfidence { get; set; } = 0.75;
+    public int MaximumTitleEditDistance { get; set; } = 1;
+    public int GridMinimumScore { get; set; } = 70;
+    public int LayoutMinimumScore { get; set; } = 70;
+    public int CountConsensusFrames { get; set; } = 2;
+    public int CountMaximumAttempts { get; set; } = 3;
+    public int MinimumInventoryCapacity { get; set; } = 100;
+    public int MaximumInventoryCapacity { get; set; } = 9999;
+    public int MonitorPollMilliseconds { get; set; } = 150;
+    public int MonitorFailureFrames { get; set; } = 2;
+    public int MonitorMaximumAgeMilliseconds { get; set; } = 300;
+    public int MonitorMinimumScore { get; set; } = 70;
 }
 
 public sealed class ChromaticProbePolicy

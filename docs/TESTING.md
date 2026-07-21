@@ -1,5 +1,76 @@
 # Testing
 
+## 2026-07-21 1.0.42 可变副词条、流式恢复与 Helper 1.3.1
+
+已执行：
+
+```powershell
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release
+.\scripts\publish-slim.ps1 -Version 1.0.42
+cd E:\yan1\zzz\zzz_calculator
+npm test
+npm --prefix webapp run build
+cd webapp
+npx playwright test e2e/scanner-browser-feedback.e2e.ts --project=desktop-1366
+npx playwright test e2e/helper-upgrade.e2e.ts --project=desktop-1366
+```
+
+结果：
+
+- 原生回归 45 项全部通过，覆盖 4/6/8/10/12 ROI 边界、半对缺失、中间断层、变量副词条清洗、短布局至少三帧稳定、12/12 ROI 单帧路径、截图协调与原子降级、Helper 8 MiB 边界、9999 条紧凑旧格式容量、消息泵/进程终态去重和协议 v4。
+- Calculator 全量 `npm test` 通过，包括仓库导入、S 级范围同步删除、Helper/Scanner Bridge、后端 API、遥测、优化器与 Webapp 31 个测试文件 330 项；其中自动测试构造了前 549 件成功、最后一件失败，确认 549 件自动安全导入且重复终态不重复写入。生产 Webapp 构建通过，浏览器 Scanner 反馈 E2E 5 项、Helper 旧版升级 E2E 2 项全部通过。
+- 第一轮关闭非 15 级停止的实机完整扫描发现后半段 30 件被瞬时 `4/12` ROI 帧误判为 0 副词条，核心 OCR 均为动画残影 `1`。根因是自适应模式将短布局稳定帧降为 1；最终候选将短布局独立限制为至少连续 3 帧，完整 12/12 ROI 仍保持单帧路径。
+- 最终候选在当前本地游戏窗口完成 740 件全扫描：流式结果、`itemCount` 和 `completed` 均为 740，`failed=0`、`partial=false`。第 467 件 `云岿如我 S 12/15` 正常识别并继续；实机共识别 212 件三词条和 528 件四词条 S 盘。账号中没有 0-2 词条样本，因此这些数量只由自动测试覆盖。
+- 开启非 15 级停止后，在第 467 件触发 `non_level_15_stop`；只发送并写入前 466 件，触发盘未进入结果。终态为 `scan_complete`、`partial=true`，`export.partial.json` 为 466 件并生成一份 `.non15.txt`。
+- 约 30 件与 200 件主动停止均收到 `scan_stop_ack`，分别在 70ms 和 64ms 后返回唯一 `scan_cancelled` 终态；流式缓冲和 `export.partial.json` 分别严格为 30 与 200 件。一次遍历重复保护在 242 件安全结束并保留 242 件部分结果，未卡在扫描中或停止中。
+- 扫描到 30 件后强制结束 Scanner PID，Helper 在 53ms 返回唯一 `scanner_transport_failed`；消息泵终态先赢得原子门禁，未追加 `scanner_process_exited` 或 `scan_stop_timeout`，此前 30 个 `scan_item` 已全部发送。
+- 三次同口径 30 件扫描阶段为 `9.267s / 8.897s / 9.391s`，中位数 `9.267s`，相对 1.0.41 基线 `9.663s` 快约 4.1%。从第 467 件附近回顶的首次冷状态另有约 6 秒回顶成本，不计入相同起点的性能样本。
+- 自 05:00 起没有新增相关 Application Error、.NET Runtime 或 Windows Error Reporting 事件，没有新 CrashDump，扫描日志未出现 `0xC0000005`、AccessViolation、未处理异常或 `scan_stop_timeout`。
+- 本机健康接口最终报告 Helper `1.3.1`、协议 v4、Scanner `1.0.42`；安装 Scanner DLL SHA-256 `191785788de20efd75603986857d80699a5caf1c9c4cbb31cc7eb45d39126372` 与 manifest 一致，安装 Helper SHA-256 `b2ae9e201f33fd1710dcb9c8b9854037bc569ad679fef5f81b194cb7cb46cfc1` 与本地 Helper manifest 一致。
+- 最终 FDD ZIP 为 `21830766` 字节、SHA-256 `c6bd84a7f5c0dfbaa11a41f217205c3f829310bfbd192f58f2b39f5afe69fb3a`；自包含 ZIP 为 `84880671` 字节、SHA-256 `92187d9e94a6229bc6e220062be076ff9c1d52d2c7efb91768341e8270eed3b0`。本机仍使用 `system32-fallback` VC runtime，仅适合本地验证，正式 Release 必须用 `-RequireVCRedistLayout` 重建。
+- Windows Computer Use 内核仍以 `failed to write kernel assets` 初始化失败，因此没有执行人工按 Esc 离开仓库的 UI 输入阻断项；Scanner 自身输入守卫自动回归已通过。未推送 GitHub、未创建 Release、未更新服务器或线上 manifest。
+
+## 2026-07-21 1.0.41 DXGI 协调、列表置顶与 Helper 终态
+
+已执行：
+
+```powershell
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release --no-restore -p:NuGetAudit=false
+.\scripts\publish-slim.ps1 -Version 1.0.41
+cd E:\yan1\zzz\zzz_calculator\webapp
+npm run test -- src/runtime/scanner-bridge.test.ts src/runtime/scanner-errors.test.ts
+```
+
+结果：
+
+- 原生回归 41 项全部通过，覆盖截图串行化、捕获源切换/释放等待、原子 DXGI 到 GDI 降级、滚动条顶部探针、输入守卫静态区域隔离、强确认状态、Scanner 进程退出/WebSocket 异常/正常关闭、终态去重和取消后的进度转发。网页 Scanner Bridge 与错误目录定向测试 16 项全部通过，`scanner_process_exited` 会清除停止计时器，不再追加 `scan_stop_timeout`，`warehouse_context_lost` 使用中性提示语。
+- 当前副屏本地游戏、`1920x1080`、DPI 120、DXGI、高速模式和 30 件上限下，1.0.40 三次成功扫描耗时为 `25.957s / 26.431s / 26.214s`，中位数 `26.214s`；修复版为 `10.031s / 10.596s / 10.486s`，中位数 `10.486s`，下降约 `60.0%`，满足“不得变慢超过 5%”门禁。两组三次成功样本均为 30 件、失败 0。
+- 1.0.40 另一次对照扫描在第 2 件复现 `0xC0000005`。Windows Application 事件堆栈为 `MonitorBackpackAsync -> GameWindow.Capture -> DxgiDesktopCaptureSource.CaptureFromDesktop`，与并发访问 DXGI 的根因一致；修复版的三次 30 件扫描、停止测试和故障注入没有新增 AccessViolation 或 CrashDump。
+- 修复版已在顶部时初始探针直接确认，置顶耗时 `2-4ms` 且滚轮为 0；列表略有偏移时只执行 4 个刻度并在约 `232ms` 确认顶部，不再出现 180 次重复滚动。置顶阶段停止在 `221ms` 返回 `scan_cancelled`，首件后停止在 `53ms` 返回 `scan_cancelled`。
+- 主动结束 Scanner 进程后，Helper 在 `365ms` 返回 `scanner_process_exited` 和退出码，网页不会进入 15 秒停止超时。正常会话、主动停止和强制退出都只收到一个终态。
+- 最终安装包的三次 30 件扫描为 `14.124s / 9.589s / 9.663s`，中位数 `9.663s`，比同机修改前 `10.486s` 快约 `7.8%`；三轮均为 30 件、失败 0，日志中的 `WAREHOUSE_CONTEXT_MONITOR` 为 0。
+- 最终安装包的默认完整扫描目录 `2026-07-21-04-17-16-112-p3f38-459e` 成功通过此前误报的第 443 件，在第 467 件识别到非 15 级 `S 12/15` 后按规则停止；耗时 `122.8s`，导出 466 件、访问 468 件、失败 0，未出现 `warehouse_context_lost`，后台监控、快速失败和强确认事件均为 0。
+- 本地 FDD ZIP 为 `21828718` 字节、SHA-256 `717d670e248dabebcc33d8552b361e761ed440db6b84f73eb5e0f17b52092880`；Scanner DLL SHA-256 `c54820e0cc012cea3f3639931769f8042bd29b97f4df354a7dc67b06bf5a8114`。Helper 保持 `8168448` 字节、SHA-256 `364d6b8cfa5a07c7f79270aded3da52e268f83d669f9b46b078ca9f0267ee8c6`。本机发布使用 `system32-fallback` VC runtime，仅用于本地测试，正式发布仍必须使用 `-RequireVCRedistLayout`。
+- 当前 Windows 应用控制通道连续两次初始化失败，因此没有执行真实按 Esc 离开仓库的输入阻断实测；自动测试已覆盖连续强确认失败状态，但该项仍保留为本地发布前实机门禁，不以未验证状态标记通过。
+- Scanner 1.0.41、Helper 1.3.0 和本地 manifest 只安装/更新到当前开发机；未推送 GitHub、未创建 Release、未修改服务器或线上 manifest。
+
+## 2026-07-20 1.0.41 仓库语义与灰度结构预检
+
+已执行：
+
+```powershell
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release --no-restore
+dotnet build ZZZ-Scanner.Next.csproj -c Release --no-restore
+```
+
+结果：
+
+- 原生回归 32 项全部通过；新增标题完全匹配/单字符容错/低置信度拒绝、数字不作为页面身份、数量范围校验、黑帧健康度、任意重着色、灰度结构和上下文签名测试。
+- 新门禁只接受 `标题语义通过 &&（网格结构通过 || 布局结构通过）` 的连续两帧，不再读取拆解按钮或前三格品质颜色；数量必须在最多三个独立帧中出现两次一致结果后才安装输入守卫。
+- 使用本次用户截图在仓库客户区做只读离线验证，捕获健康度得分 100、网格结构得分 100、布局得分 87；验证过程未把完整截图、UID 或 OCR 文本加入仓库。
+- 计算器服务端遥测测试与网页 `scan-telemetry/scanner-errors` 11 项定向测试通过，新增字段仍限制为布尔值和 0-100 分数，实际仓库数量及 OCR 文本不会上传。
+- 当前未运行真实游戏，因此扫描中退出页面、4K/200% 的 30 次实机预检和完整仓库一致性仍属于发布前人工验收，不能用离线分数替代。
+
 ## 2026-07-20 1.0.40 显示色彩兼容与 Windows 正式包
 
 已执行：

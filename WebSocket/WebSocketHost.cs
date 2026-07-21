@@ -201,6 +201,12 @@ public sealed class WebSocketHost : IDisposable
                     break;
 
                 case "scan_stop":
+                    await SendAsync(socket, sendGate, "scan_stop_ack", new
+                    {
+                        accepted = scanTask is { IsCompleted: false },
+                        time = DateTimeOffset.UtcNow,
+                        scanner = AppInfo.DiagnosticPayload()
+                    }, CancellationToken.None);
                     scanCts?.Cancel();
                     break;
             }
@@ -233,39 +239,102 @@ public sealed class WebSocketHost : IDisposable
 
     private async Task RunScanAsync(System.Net.WebSockets.WebSocket socket, SemaphoreSlim sendGate, ScanRequestPayload payload, CancellationToken token)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var lastProgressTicks = DateTime.UtcNow.Ticks;
+        var timeoutTriggered = 0;
+        var visited = 0;
+        var queued = 0;
+        var completed = 0;
+        var failed = 0;
+        var heartbeatTask = Task.Run(async () =>
+        {
+            try
+            {
+                while (!linked.IsCancellationRequested)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), linked.Token);
+                    var inactiveFor = TimeSpan.FromTicks(Math.Max(0, DateTime.UtcNow.Ticks - Interlocked.Read(ref lastProgressTicks)));
+                    await SendAsync(socket, sendGate, "scan_heartbeat", new
+                    {
+                        time = DateTimeOffset.UtcNow,
+                        inactiveMs = (long)inactiveFor.TotalMilliseconds,
+                        visited = Volatile.Read(ref visited),
+                        queued = Volatile.Read(ref queued),
+                        completed = Volatile.Read(ref completed),
+                        failed = Volatile.Read(ref failed),
+                        scanner = AppInfo.DiagnosticPayload()
+                    }, CancellationToken.None);
+                    if (inactiveFor < TimeSpan.FromSeconds(180))
+                    {
+                        continue;
+                    }
+
+                    Interlocked.Exchange(ref timeoutTriggered, 1);
+                    linked.Cancel();
+                    break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }, CancellationToken.None);
+
         try
         {
             var options = BuildOptions(payload);
-            var progress = new Progress<ScanProgress>(progress =>
+            var progress = new InlineProgress<ScanProgress>(progress =>
             {
-                SendProgressAsync(socket, sendGate, progress, token).GetAwaiter().GetResult();
+                Interlocked.Exchange(ref lastProgressTicks, DateTime.UtcNow.Ticks);
+                Volatile.Write(ref visited, progress.Visited);
+                Volatile.Write(ref queued, progress.Queued);
+                Volatile.Write(ref completed, progress.Completed);
+                Volatile.Write(ref failed, progress.Failed);
+                ForwardProgressSafely(
+                    () => SendProgressAsync(socket, sendGate, progress, linked.Token),
+                    linked);
             });
 
-            var result = await _controller.ScanAsync(options, progress, token);
+            var result = await _controller.ScanAsync(options, progress, linked.Token);
+            linked.Token.ThrowIfCancellationRequested();
+            var streamedResult = string.Equals(payload.ResultDelivery, "stream-items-v1", StringComparison.OrdinalIgnoreCase);
             await SendAsync(socket, sendGate, "scan_complete", new
             {
-                items = result.Items,
+                resultDelivery = streamedResult ? "stream-items-v1" : "legacy-items",
+                items = streamedResult ? null : result.Items,
+                itemCount = result.Items.Count,
                 visited = result.Visited,
                 queued = result.Queued,
                 completed = result.Completed,
                 failed = result.Failed,
+                partial = result.Partial,
+                terminationCode = string.IsNullOrWhiteSpace(result.TerminationCode) ? null : result.TerminationCode,
                 outputDirectory = result.OutputDirectory,
                 exportFile = result.ExportFile,
                 scanner = AppInfo.DiagnosticPayload(),
                 diagnostics = result.Diagnostics
-            }, token);
+            }, linked.Token);
         }
         catch (OperationCanceledException)
         {
+            var noProgress = Volatile.Read(ref timeoutTriggered) == 1;
             await SendAsync(socket, sendGate, "scan_error", new
             {
-                code = "scan_cancelled",
+                code = noProgress ? "scan_no_progress_timeout" : "scan_cancelled",
                 phase = "scan",
-                title = "扫描已停止",
-                message = "扫描已停止。",
-                remedy = "可以调整选项后重新开始扫描。",
+                severity = noProgress ? "error" : "warning",
+                title = noProgress ? "扫描长时间没有进展" : "扫描已停止",
+                message = noProgress ? "Scanner 连续 180 秒没有产生新的扫描进展，任务已停止。" : "扫描已停止。",
+                remedy = noProgress ? "请确认游戏仍在驱动盘仓库且未被遮挡，然后重新扫描。" : "可以调整选项后重新开始扫描。",
                 retryable = true,
                 actions = new[] { new { kind = "retry_scan", label = "重新扫描" } },
+                details = new
+                {
+                    inactiveMs = noProgress ? 180_000 : 0,
+                    visited = Volatile.Read(ref visited),
+                    queued = Volatile.Read(ref queued),
+                    completed = Volatile.Read(ref completed),
+                    failed = Volatile.Read(ref failed)
+                },
                 scanner = AppInfo.DiagnosticPayload()
             }, CancellationToken.None);
         }
@@ -289,23 +358,35 @@ public sealed class WebSocketHost : IDisposable
         }
         catch (VisualPreflightException ex)
         {
-            var captureUnavailable = string.Equals(ex.Reason, "capture_unavailable", StringComparison.Ordinal);
-            var colorUnsupported = string.Equals(ex.Reason, "color_unsupported", StringComparison.Ordinal);
             await SendAsync(socket, sendGate, "scan_error", new
             {
-                code = "visual_preflight_failed",
+                code = ex.Code,
                 phase = "scan",
-                title = captureUnavailable
-                    ? "无法读取游戏画面"
-                    : colorUnsupported ? "当前显示色彩无法安全识别" : "未识别到驱动盘仓库",
+                title = ex.Title,
                 message = ex.Message,
-                remedy = captureUnavailable
-                    ? "请保持游戏可见且未最小化，并关闭遮挡窗口后重试。"
-                    : colorUnsupported
-                        ? "请关闭过强的反色、单色或自定义 LUT 后重试；常见 HDR、夜间模式和温和显卡滤镜会自动兼容。"
-                        : "请确认游戏为简体中文、使用 16:9 布局并打开驱动盘仓库后重试。",
-                retryable = true,
+                remedy = ex.Remedy,
+                retryable = ex.Retryable,
                 actions = new[] { new { kind = "retry_scan", label = "重新扫描" } },
+                details = ex.DiagnosticDetails,
+                scanner = AppInfo.DiagnosticPayload()
+            }, CancellationToken.None);
+        }
+        catch (Exception exception) when (exception is IScannerFailureException)
+        {
+            var ex = (IScannerFailureException)exception;
+            await SendAsync(socket, sendGate, "scan_error", new
+            {
+                code = ex.Code,
+                phase = "scan",
+                title = ex.Title,
+                message = exception.Message,
+                remedy = ex.Remedy,
+                retryable = ex.Retryable,
+                actions = new[]
+                {
+                    new { kind = "retry_scan", label = "重新扫描" },
+                    new { kind = "open_logs", label = "打开日志目录" }
+                },
                 details = ex.DiagnosticDetails,
                 scanner = AppInfo.DiagnosticPayload()
             }, CancellationToken.None);
@@ -326,6 +407,11 @@ public sealed class WebSocketHost : IDisposable
                 error = ex.ToString(),
                 scanner = AppInfo.DiagnosticPayload()
             }, CancellationToken.None);
+        }
+        finally
+        {
+            linked.Cancel();
+            try { await heartbeatTask; } catch { }
         }
     }
 
@@ -402,15 +488,7 @@ public sealed class WebSocketHost : IDisposable
         }
 
         options.Rarities.Clear();
-        foreach (var rarity in payload.Rarities.Where(r => !string.IsNullOrWhiteSpace(r)))
-        {
-            options.Rarities.Add(rarity.Trim());
-        }
-
-        if (options.Rarities.Count == 0)
-        {
-            options.Rarities.Add("S");
-        }
+        options.Rarities.Add("S");
 
         return options;
     }
@@ -543,6 +621,33 @@ public sealed class WebSocketHost : IDisposable
         }
     }
 
+    internal static void ForwardProgressSafely(Func<Task> send, CancellationTokenSource linked)
+    {
+        try
+        {
+            send().GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        {
+        }
+        catch (WebSocketException)
+        {
+            linked.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            linked.Cancel();
+        }
+    }
+
+    private sealed class InlineProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value)
+        {
+            handler(value);
+        }
+    }
+
     private static async Task<string?> ReceiveTextAsync(System.Net.WebSockets.WebSocket socket, CancellationToken token)
     {
         var buffer = new byte[64 * 1024];
@@ -588,7 +693,7 @@ public sealed class WebSocketHost : IDisposable
             return;
         }
 
-        var json = JsonSerializer.Serialize(new HelperEnvelope(cmd, data), JsonDefaults.Write);
+        var json = JsonSerializer.Serialize(new HelperEnvelope(cmd, data), JsonDefaults.Wire);
         var bytes = Encoding.UTF8.GetBytes(json);
         await sendGate.WaitAsync(token);
         try
@@ -608,7 +713,7 @@ public sealed class WebSocketHost : IDisposable
     {
         response.StatusCode = statusCode;
         response.ContentType = "application/json; charset=utf-8";
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, JsonDefaults.Write));
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload, JsonDefaults.Wire));
         response.ContentLength64 = bytes.Length;
         await response.OutputStream.WriteAsync(bytes, token);
         response.Close();
@@ -686,7 +791,7 @@ public sealed class WebSocketHost : IDisposable
         public HelperEnvelope(string cmd, object? data)
         {
             Cmd = cmd;
-            Data = data is null ? default : JsonSerializer.SerializeToElement(data, JsonDefaults.Write);
+            Data = data is null ? default : JsonSerializer.SerializeToElement(data, JsonDefaults.Wire);
         }
     }
 
@@ -694,6 +799,7 @@ public sealed class WebSocketHost : IDisposable
     {
         public int MaxItems { get; set; }
         public string[] Rarities { get; set; } = ["S"];
+        public string ResultDelivery { get; set; } = "";
         public bool StopAtNonLevel15 { get; set; } = true;
         public bool OcrShadowDataset { get; set; }
         public bool FastOcrShadow { get; set; }

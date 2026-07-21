@@ -7,8 +7,8 @@ namespace ZZZScannerNext.Scanning;
 public sealed class GameWindow : IDisposable
 {
     private readonly IntPtr _handle;
-    private IWindowCaptureSource _captureSource = new GdiCaptureSource();
-    private Action<string>? _captureLog;
+    private readonly CaptureSourceCoordinator _captureSource = new(new GdiCaptureSource());
+    private Action? _inputGuard;
     private Rectangle _clientScreenRect;
     private float _coordinateScale = 1f;
     private bool _disposed;
@@ -73,7 +73,7 @@ public sealed class GameWindow : IDisposable
 
     public void ConfigureCaptureMode(CaptureMode mode, Action<string>? log = null)
     {
-        _captureLog = log;
+        _captureSource.ConfigureLog(log);
         if (mode == CaptureMode.Gdi)
         {
             SwitchCaptureSource(new GdiCaptureSource());
@@ -95,11 +95,18 @@ public sealed class GameWindow : IDisposable
 
     public void LeftClick(Point point, int durationMs = 0)
     {
+        EnsureInputAllowed();
         NativeMethods.SetCursorPos(point.X, point.Y);
-        LeftClickCurrent(durationMs);
+        SendLeftClick(durationMs);
     }
 
     public void LeftClickCurrent(int durationMs = 0)
+    {
+        EnsureInputAllowed();
+        SendLeftClick(durationMs);
+    }
+
+    private static void SendLeftClick(int durationMs)
     {
         NativeMethods.mouse_event(NativeMethods.MouseEventLeftDown, 0, 0, 0, UIntPtr.Zero);
         if (durationMs > 0)
@@ -112,11 +119,13 @@ public sealed class GameWindow : IDisposable
 
     public void MouseWheel(int delta)
     {
+        EnsureInputAllowed();
         NativeMethods.mouse_event(NativeMethods.MouseEventWheel, 0, 0, delta, UIntPtr.Zero);
     }
 
     public void LeftDrag(Point start, Point end, int durationMs = 120)
     {
+        EnsureInputAllowed();
         NativeMethods.SetCursorPos(start.X, start.Y);
         NativeMethods.mouse_event(NativeMethods.MouseEventLeftDown, 0, 0, 0, UIntPtr.Zero);
         var steps = Math.Max(4, durationMs / 16);
@@ -138,49 +147,37 @@ public sealed class GameWindow : IDisposable
 
     public Bitmap Capture(Rectangle screenRect)
     {
-        try
-        {
-            return _captureSource.Capture(screenRect);
-        }
-        catch (Exception ex) when (_captureSource is not GdiCaptureSource)
-        {
-            _captureLog?.Invoke($"Capture backend fallback during Capture: active={_captureSource.Name}, fallback=gdi, reason={ex.GetType().Name}: {ex.Message}");
-            SwitchCaptureSource(new GdiCaptureSource());
-            return _captureSource.Capture(screenRect);
-        }
+        return _captureSource.Capture(screenRect);
     }
 
     internal CapturedFrame CaptureFrame(Rectangle screenRect)
     {
-        try
-        {
-            return _captureSource.CaptureFrame(screenRect);
-        }
-        catch (Exception ex) when (_captureSource is not GdiCaptureSource)
-        {
-            _captureLog?.Invoke($"Capture backend fallback during CaptureFrame: active={_captureSource.Name}, fallback=gdi, captureFrameBackend=bitmap-fallback, reason={ex.GetType().Name}: {ex.Message}");
-            SwitchCaptureSource(new GdiCaptureSource());
-            return _captureSource.CaptureFrame(screenRect);
-        }
+        return _captureSource.CaptureFrame(screenRect);
+    }
+
+    internal bool TryCapture(Rectangle screenRect, out Bitmap? image)
+    {
+        return _captureSource.TryCapture(screenRect, out image);
     }
 
     public Color GetPixel(Point point)
     {
-        try
-        {
-            return _captureSource.GetPixel(point);
-        }
-        catch (Exception ex) when (_captureSource is not GdiCaptureSource)
-        {
-            _captureLog?.Invoke($"Capture backend fallback during GetPixel: active={_captureSource.Name}, fallback=gdi, reason={ex.GetType().Name}: {ex.Message}");
-            SwitchCaptureSource(new GdiCaptureSource());
-            return _captureSource.GetPixel(point);
-        }
+        return _captureSource.GetPixel(point);
     }
 
     public Point ToScreenPoint(PointF normalized, bool clientToScreen = true)
     {
         return MapToScreenPoint(_clientScreenRect, normalized, Dpi, clientToScreen);
+    }
+
+    internal void ConfigureInputGuard(Action? inputGuard)
+    {
+        _inputGuard = inputGuard;
+    }
+
+    private void EnsureInputAllowed()
+    {
+        _inputGuard?.Invoke();
     }
 
     internal static Point MapToScreenPoint(
@@ -234,9 +231,7 @@ public sealed class GameWindow : IDisposable
 
     private void SwitchCaptureSource(IWindowCaptureSource captureSource)
     {
-        var previous = _captureSource;
-        _captureSource = captureSource;
-        previous.Dispose();
+        _captureSource.Replace(captureSource);
     }
 
     public void Dispose()

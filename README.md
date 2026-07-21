@@ -69,14 +69,15 @@ game client area. Unknown visual profiles fall back to PP-OCR instead of reusing
 a nearby Fast OCR profile. Non-16:9 layouts, custom UI scale, HDR/filter
 changes, and future UI changes are not guaranteed.
 
-Scanner 1.0.40 evaluates the captured pixels instead of reading or guessing
-Windows HDR, Auto HDR, Night light, or GPU settings. Common highlight clipping
-and moderate temperature, saturation, brightness, and contrast changes are
-handled through regional hue, relative luminance, and image-structure probes.
-Non-neutral captures automatically use PP-OCR. Inversion, monochrome output,
-extreme LUTs, strong game filters, and UI mods still fail closed.
-This reduces dependence on fixed RGB values; it does not guarantee every HDR,
-filter, driver-enhancement, or color-management configuration.
+Scanner 1.0.41 evaluates the captured image instead of reading or guessing
+Windows HDR, Auto HDR, Night light, or GPU settings. Warehouse readiness now
+requires the semantic `驱动仓库` title plus grayscale grid or panel structure;
+the cyan dismantle button and S/A/B rarity colors are not readiness evidence.
+The inventory count must agree across two independent frames before any click
+or wheel input, and a normalized edge baseline guards later input if the page is
+closed or covered. Color is used only after confirmation for rarity, capture
+classification, and OCR routing. Extreme LUTs, strong filters, UI mods, and
+unreadable captures still fail closed without being mislabeled as a missing page.
 
 ## Choose an installation method
 
@@ -276,16 +277,17 @@ its output directory.
 | --- | --- | --- |
 | Process name | Windows process to locate | <code>ZenlessZoneZero</code> locally; <code>Zenless Zone Zero Cloud</code> for cloud |
 | Read limit | Maximum captured items; 0 has no explicit limit | Use 30 for a smoke test, 120 for validation, 0 for normal import |
-| S / A | Rarity filters shown by the GUI | Calculator workflows normally use S |
+| Rarity | Official scanning is fixed to S rank | Existing A/B inventory remains compatible in Calculator |
 | Only level-15 | Stops at the first lower-level Drive Disc | Keep enabled for normal calculator import |
 | Bring to foreground | Activates the game before input and capture | Normally keep enabled |
 
 Sort the inventory so desired level-15 items appear before lower-level items.
 Stopping at the first non-15 item is expected behavior.
 
-Disabling **Only level-15** is experimental. Lower-level panels may contain fewer
-substat rows, so full non-15 scanning can fail ROI completeness checks. It is
-not the normal calculator import path.
+Scanner 1.0.42 supports S-rank Drive Discs at every level with zero to four
+contiguous substats. With **Only level-15** disabled, valid lower-level S-rank
+items are recognized and scanning continues; incomplete pairs or gaps still
+wait for stability and then fail conservatively.
 
 ### 4. Advanced settings
 
