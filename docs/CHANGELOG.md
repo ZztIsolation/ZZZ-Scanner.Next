@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2026-07-23 1.0.46 候选
+
+- 列表置顶恢复 1.0.39 的 `scrollBarTop` 单像素 RGB 判定，使用 profile 中的 `scrollBar=#808080` 和各通道容差 26；不再使用会被连续上滚回弹动画干扰的顶部/轨道亮度块作为成功依据。
+- 顶部复位改为有界输入：输入前先取最多 3 个样本并要求连续 2 次匹配；未确认时最多执行 3 批、每批 4 个向上滚轮 tick，每批后完全停止输入 160ms 再采样。12 tick 后只允许点击一次滚动条顶部，并在停稳后强制复检。
+- 顶部点击后仍无法确认时返回现有 `scan_navigation_failed`，并保持 `visited/queued/completed=0`，避免继续上滑或从未确认的位置生成 `scan_item`。新增 `RESET_TOP_COLOR_PROBE`、`RESET_TOP_SETTLE`、`RESET_TOP_CONFIRMED` 和 `RESET_TOP_FAILED` 本地诊断。
+- Scanner 候选版本升至 1.0.46；1.0.45 的首两件事务识别、仓库预检、遍历、协议 v4 和导出结构均保持不变，Helper 继续冻结为 1.3.1。本候选仅通过草稿 PR 和 Actions artifacts 交付，不发布 tag、Release、manifest、CDN 或服务器更新。
+
 ## 2026-07-22 1.0.45
 
 - 首轮前两件驱动盘改为事务式采集：Scanner 先执行 A-B-A 严格面板验证，确认完成前不进入 OCR 队列，也不会发送 `scan_item`。验证成功后按 A、B 顺序一次性提交，常规遍历从第三件继续。

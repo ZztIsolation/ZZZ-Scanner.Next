@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
+using ZZZScannerNext.Core;
 
 namespace ZZZScannerNext.Scanning;
 
@@ -92,6 +93,257 @@ public static class FirstPairBootstrapTiming
 
     public static int ResolveMaximumWaitMilliseconds(int loadTimeoutMilliseconds) =>
         Math.Min(Math.Max(1, loadTimeoutMilliseconds), MaximumWaitMilliseconds);
+}
+
+internal enum ScrollTopResetTraceKind
+{
+    Probe,
+    Wheel,
+    Settle,
+    Click,
+    Confirmed,
+    Failed
+}
+
+internal readonly record struct ScrollTopResetTrace(
+    ScrollTopResetTraceKind Kind,
+    string Phase,
+    int Batch,
+    int Tick,
+    int Sample,
+    int WheelTicks,
+    int TopClicks,
+    int StableMatches,
+    Color ActualColor,
+    Color ExpectedColor,
+    int Tolerance,
+    bool Matched,
+    int DelayMilliseconds,
+    long ElapsedMilliseconds);
+
+internal readonly record struct ScrollTopResetResult(
+    bool Confirmed,
+    string Phase,
+    int WheelTicks,
+    int TopClicks,
+    int ProbeSamples,
+    Color LastActualColor,
+    int StableMatches,
+    long ElapsedMilliseconds);
+
+internal static class ScrollTopResetCoordinator
+{
+    public const int WheelBatchSize = 4;
+    public const int MaximumWheelTicks = 12;
+    public const int ProbeSampleCount = 3;
+    public const int RequiredStableMatches = 2;
+    public const int ProbeSampleDelayMilliseconds = 40;
+    public const int BatchSettleDelayMilliseconds = 160;
+    public const int FallbackSettleDelayMilliseconds = 160;
+
+    public static bool IsTopColor(Color actual, Color expected, int tolerance) =>
+        actual.IsCloseTo(expected, Math.Max(0, tolerance));
+
+    public static async Task<ScrollTopResetResult> RunAsync(
+        int configuredMaximumWheelTicks,
+        int wheelDelayMilliseconds,
+        int clickDelayMilliseconds,
+        Color expectedColor,
+        int tolerance,
+        Func<Color> captureTopPixel,
+        Action wheelUp,
+        Action clickTop,
+        Action<ScrollTopResetTrace>? trace,
+        CancellationToken token,
+        Func<int, CancellationToken, Task>? delayAsync = null)
+    {
+        ArgumentNullException.ThrowIfNull(captureTopPixel);
+        ArgumentNullException.ThrowIfNull(wheelUp);
+        ArgumentNullException.ThrowIfNull(clickTop);
+
+        delayAsync ??= Task.Delay;
+        var maximumWheelTicks = Math.Clamp(configuredMaximumWheelTicks, 0, MaximumWheelTicks);
+        var wheelDelay = Math.Max(0, wheelDelayMilliseconds);
+        var fallbackDelay = Math.Max(FallbackSettleDelayMilliseconds, clickDelayMilliseconds);
+        var stopwatch = Stopwatch.StartNew();
+        var wheelTicks = 0;
+        var topClicks = 0;
+        var probeSamples = 0;
+        var lastActual = Color.Empty;
+        var lastStableMatches = 0;
+
+        async Task<bool> ProbeAsync(string phase, int batch)
+        {
+            var stableMatches = 0;
+            for (var sample = 1; sample <= ProbeSampleCount; sample++)
+            {
+                token.ThrowIfCancellationRequested();
+                lastActual = captureTopPixel();
+                probeSamples++;
+                var matched = IsTopColor(lastActual, expectedColor, tolerance);
+                stableMatches = matched ? stableMatches + 1 : 0;
+                lastStableMatches = stableMatches;
+                trace?.Invoke(new ScrollTopResetTrace(
+                    ScrollTopResetTraceKind.Probe,
+                    phase,
+                    batch,
+                    wheelTicks,
+                    sample,
+                    wheelTicks,
+                    topClicks,
+                    stableMatches,
+                    lastActual,
+                    expectedColor,
+                    tolerance,
+                    matched,
+                    0,
+                    stopwatch.ElapsedMilliseconds));
+                if (stableMatches >= RequiredStableMatches)
+                {
+                    return true;
+                }
+
+                if (sample < ProbeSampleCount)
+                {
+                    await delayAsync(ProbeSampleDelayMilliseconds, token);
+                }
+            }
+
+            return false;
+        }
+
+        ScrollTopResetResult Result(bool confirmed, string phase) => new(
+            confirmed,
+            phase,
+            wheelTicks,
+            topClicks,
+            probeSamples,
+            lastActual,
+            lastStableMatches,
+            stopwatch.ElapsedMilliseconds);
+
+        void TraceOutcome(ScrollTopResetTraceKind kind, string phase, int batch)
+        {
+            trace?.Invoke(new ScrollTopResetTrace(
+                kind,
+                phase,
+                batch,
+                wheelTicks,
+                0,
+                wheelTicks,
+                topClicks,
+                lastStableMatches,
+                lastActual,
+                expectedColor,
+                tolerance,
+                lastStableMatches >= RequiredStableMatches,
+                0,
+                stopwatch.ElapsedMilliseconds));
+        }
+
+        if (await ProbeAsync("initial", 0))
+        {
+            TraceOutcome(ScrollTopResetTraceKind.Confirmed, "initial", 0);
+            return Result(true, "initial");
+        }
+
+        var batch = 0;
+        while (wheelTicks < maximumWheelTicks)
+        {
+            batch++;
+            var ticksInBatch = Math.Min(WheelBatchSize, maximumWheelTicks - wheelTicks);
+            for (var tick = 0; tick < ticksInBatch; tick++)
+            {
+                token.ThrowIfCancellationRequested();
+                wheelUp();
+                wheelTicks++;
+                trace?.Invoke(new ScrollTopResetTrace(
+                    ScrollTopResetTraceKind.Wheel,
+                    "wheel",
+                    batch,
+                    wheelTicks,
+                    0,
+                    wheelTicks,
+                    topClicks,
+                    0,
+                    Color.Empty,
+                    expectedColor,
+                    tolerance,
+                    false,
+                    wheelDelay,
+                    stopwatch.ElapsedMilliseconds));
+                if (wheelDelay > 0)
+                {
+                    await delayAsync(wheelDelay, token);
+                }
+            }
+
+            trace?.Invoke(new ScrollTopResetTrace(
+                ScrollTopResetTraceKind.Settle,
+                "wheel",
+                batch,
+                wheelTicks,
+                0,
+                wheelTicks,
+                topClicks,
+                0,
+                Color.Empty,
+                expectedColor,
+                tolerance,
+                false,
+                BatchSettleDelayMilliseconds,
+                stopwatch.ElapsedMilliseconds));
+            await delayAsync(BatchSettleDelayMilliseconds, token);
+            if (await ProbeAsync("wheel", batch))
+            {
+                TraceOutcome(ScrollTopResetTraceKind.Confirmed, "wheel", batch);
+                return Result(true, "wheel");
+            }
+        }
+
+        token.ThrowIfCancellationRequested();
+        clickTop();
+        topClicks++;
+        trace?.Invoke(new ScrollTopResetTrace(
+            ScrollTopResetTraceKind.Click,
+            "fallback",
+            batch,
+            wheelTicks,
+            0,
+            wheelTicks,
+            topClicks,
+            0,
+            Color.Empty,
+            expectedColor,
+            tolerance,
+            false,
+            fallbackDelay,
+            stopwatch.ElapsedMilliseconds));
+        trace?.Invoke(new ScrollTopResetTrace(
+            ScrollTopResetTraceKind.Settle,
+            "fallback",
+            batch,
+            wheelTicks,
+            0,
+            wheelTicks,
+            topClicks,
+            0,
+            Color.Empty,
+            expectedColor,
+            tolerance,
+            false,
+            fallbackDelay,
+            stopwatch.ElapsedMilliseconds));
+        await delayAsync(fallbackDelay, token);
+        if (await ProbeAsync("fallback", batch))
+        {
+            TraceOutcome(ScrollTopResetTraceKind.Confirmed, "fallback", batch);
+            return Result(true, "fallback");
+        }
+
+        TraceOutcome(ScrollTopResetTraceKind.Failed, "fallback", batch);
+        return Result(false, "fallback");
+    }
 }
 
 public readonly record struct FirstPairWitnessCoordinate(int VisualRow, int Column);

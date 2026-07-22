@@ -43,7 +43,9 @@ internal static class Program
             ("capture source serialization", TestCaptureSourceSerializationAsync),
             ("capture source busy probe and replacement", TestCaptureSourceBusyProbeAndReplacementAsync),
             ("capture source atomic fallback", TestCaptureSourceAtomicFallbackAsync),
-            ("scrollbar top probe", TestScrollbarTopProbeAsync),
+            ("scrollbar top color probe", TestScrollbarTopColorProbeAsync),
+            ("bounded scrollbar top reset", TestBoundedScrollbarTopResetAsync),
+            ("scrollbar top reset cancellation", TestScrollbarTopResetCancellationAsync),
             ("Scanner supervisor lifecycle", TestScannerSupervisorLifecycleAsync),
             ("Helper scanner message limit", TestHelperScannerMessageLimitAsync),
             ("scan activity terminal gate", TestScanActivityTerminalGateAsync),
@@ -664,6 +666,17 @@ internal static class Program
         AssertEqual(ScrollAcceptMode.Safe, ScanModeDefaults.ScrollAccept(false));
         AssertEqual(PanelAcceptMode.Safe, ScanModeDefaults.PanelAccept(false));
         AssertEqual(OverlapConflictMode.Recheck, ScanModeDefaults.OverlapConflict(false));
+
+        var profiles = ScanProfileFile.Load();
+        AssertEqual(2, profiles.Profiles.Count);
+        foreach (var profile in profiles.Profiles)
+        {
+            AssertEqual(ScrollTopResetCoordinator.MaximumWheelTicks, profile.ResetToTopWheelTicks);
+            AssertEqual(50, profile.ResetToTopWheelDelayMs);
+            AssertEqual(26, profile.ColorTolerance);
+            AssertEqual(Color.FromArgb(128, 128, 128), profile.Color("scrollBar"));
+        }
+
         return Task.CompletedTask;
     }
 
@@ -1011,40 +1024,186 @@ internal static class Program
         return Task.CompletedTask;
     }
 
-    private static Task TestScrollbarTopProbeAsync()
+    private static Task TestScrollbarTopColorProbeAsync()
     {
-        var topRect = new Rectangle(0, 0, 9, 18);
-        var trackRect = new Rectangle(0, 38, 9, 18);
-
-        using (var bitmap = new Bitmap(9, 56))
-        {
-            using var graphics = Graphics.FromImage(bitmap);
-            graphics.Clear(Color.Black);
-            graphics.FillRectangle(Brushes.Gray, topRect);
-            using var frame = new BitmapCapturedFrame((Bitmap)bitmap.Clone(), "test");
-            var result = ScanController.EvaluateScrollTopProbe(frame, topRect, trackRect);
-            AssertTrue(result.Detected);
-            AssertTrue(result.TopLuminance - result.TrackLuminance >= 16);
-        }
-
-        using (var bitmap = new Bitmap(9, 56))
-        {
-            using var graphics = Graphics.FromImage(bitmap);
-            graphics.Clear(Color.Gray);
-            using var frame = new BitmapCapturedFrame((Bitmap)bitmap.Clone(), "test");
-            AssertTrue(!ScanController.EvaluateScrollTopProbe(frame, topRect, trackRect).Detected);
-        }
-
-        using (var bitmap = new Bitmap(9, 56))
-        {
-            using var graphics = Graphics.FromImage(bitmap);
-            graphics.Clear(Color.Black);
-            graphics.FillRectangle(Brushes.Gray, trackRect);
-            using var frame = new BitmapCapturedFrame((Bitmap)bitmap.Clone(), "test");
-            AssertTrue(!ScanController.EvaluateScrollTopProbe(frame, topRect, trackRect).Detected);
-        }
+        var expected = Color.FromArgb(128, 128, 128);
+        AssertTrue(ScrollTopResetCoordinator.IsTopColor(expected, expected, 26));
+        AssertTrue(ScrollTopResetCoordinator.IsTopColor(Color.FromArgb(102, 154, 128), expected, 26));
+        AssertTrue(!ScrollTopResetCoordinator.IsTopColor(Color.FromArgb(101, 128, 128), expected, 26));
+        AssertTrue(!ScrollTopResetCoordinator.IsTopColor(Color.FromArgb(128, 155, 128), expected, 26));
+        AssertTrue(!ScrollTopResetCoordinator.IsTopColor(Color.FromArgb(128, 128, 70), expected, 26));
+        AssertTrue(!ScrollTopResetCoordinator.IsTopColor(Color.FromArgb(160, 112, 94), expected, 26));
 
         return Task.CompletedTask;
+    }
+
+    private static async Task TestBoundedScrollbarTopResetAsync()
+    {
+        var expected = Color.FromArgb(128, 128, 128);
+        var miss = Color.FromArgb(40, 40, 40);
+
+        var initial = await RunScrollTopResetScenarioAsync([expected, expected], expected);
+        AssertTrue(initial.Result.Confirmed);
+        AssertEqual("initial", initial.Result.Phase);
+        AssertEqual(0, initial.WheelCount);
+        AssertEqual(0, initial.ClickCount);
+        AssertEqual(2, initial.Result.ProbeSamples);
+
+        var firstBatch = await RunScrollTopResetScenarioAsync(
+            [miss, miss, miss, expected, expected], expected);
+        AssertTrue(firstBatch.Result.Confirmed);
+        AssertEqual("wheel", firstBatch.Result.Phase);
+        AssertEqual(4, firstBatch.WheelCount);
+        AssertEqual(0, firstBatch.ClickCount);
+
+        var secondBatch = await RunScrollTopResetScenarioAsync(
+            [miss, miss, miss, miss, miss, miss, expected, expected], expected);
+        AssertTrue(secondBatch.Result.Confirmed);
+        AssertEqual(8, secondBatch.WheelCount);
+
+        var thirdBatch = await RunScrollTopResetScenarioAsync(
+            [miss, miss, miss, miss, miss, miss, miss, miss, miss, expected, expected], expected);
+        AssertTrue(thirdBatch.Result.Confirmed);
+        AssertEqual(12, thirdBatch.WheelCount);
+
+        var rebound = await RunScrollTopResetScenarioAsync(
+            [miss, miss, miss, expected, miss, expected, expected, expected], expected);
+        AssertTrue(rebound.Result.Confirmed);
+        AssertEqual(8, rebound.WheelCount);
+        AssertEqual(0, rebound.ClickCount);
+
+        var fallback = await RunScrollTopResetScenarioAsync(
+            Enumerable.Repeat(miss, 12).Concat([expected, expected]).ToArray(),
+            expected,
+            configuredMaximumWheelTicks: 180);
+        AssertTrue(fallback.Result.Confirmed);
+        AssertEqual("fallback", fallback.Result.Phase);
+        AssertEqual(ScrollTopResetCoordinator.MaximumWheelTicks, fallback.WheelCount);
+        AssertEqual(1, fallback.ClickCount);
+
+        var failed = await RunScrollTopResetScenarioAsync(
+            Enumerable.Repeat(miss, 20).ToArray(),
+            expected,
+            configuredMaximumWheelTicks: 180);
+        AssertTrue(!failed.Result.Confirmed);
+        AssertEqual(ScrollTopResetCoordinator.MaximumWheelTicks, failed.WheelCount);
+        AssertEqual(1, failed.ClickCount);
+        AssertEqual(1, failed.Traces.Count(trace => trace.Kind == ScrollTopResetTraceKind.Failed));
+        AssertTrue(failed.Traces.All(trace => trace.WheelTicks <= ScrollTopResetCoordinator.MaximumWheelTicks));
+        AssertTrue(failed.Delays.Contains(ScrollTopResetCoordinator.BatchSettleDelayMilliseconds));
+        AssertTrue(failed.Delays.Contains(ScrollTopResetCoordinator.FallbackSettleDelayMilliseconds));
+    }
+
+    private static async Task TestScrollbarTopResetCancellationAsync()
+    {
+        var expected = Color.FromArgb(128, 128, 128);
+        var miss = Color.Black;
+
+        using (var sampleCancellation = new CancellationTokenSource())
+        {
+            await AssertCanceledAsync(RunScrollTopResetScenarioAsync(
+                [miss, miss, miss],
+                expected,
+                token: sampleCancellation.Token,
+                onCapture: count =>
+                {
+                    if (count == 1)
+                    {
+                        sampleCancellation.Cancel();
+                    }
+                }));
+        }
+
+        using (var wheelCancellation = new CancellationTokenSource())
+        {
+            var wheelCount = 0;
+            await AssertCanceledAsync(RunScrollTopResetScenarioAsync(
+                Enumerable.Repeat(miss, 10).ToArray(),
+                expected,
+                token: wheelCancellation.Token,
+                onWheel: () =>
+                {
+                    wheelCount++;
+                    if (wheelCount == 1)
+                    {
+                        wheelCancellation.Cancel();
+                    }
+                }));
+            AssertEqual(1, wheelCount);
+        }
+
+        using (var settleCancellation = new CancellationTokenSource())
+        {
+            await AssertCanceledAsync(RunScrollTopResetScenarioAsync(
+                Enumerable.Repeat(miss, 10).ToArray(),
+                expected,
+                token: settleCancellation.Token,
+                onTrace: trace =>
+                {
+                    if (trace.Kind == ScrollTopResetTraceKind.Settle && trace.Phase == "wheel")
+                    {
+                        settleCancellation.Cancel();
+                    }
+                }));
+        }
+    }
+
+    private static async Task<ScrollTopResetScenario> RunScrollTopResetScenarioAsync(
+        IReadOnlyList<Color> samples,
+        Color expected,
+        int configuredMaximumWheelTicks = ScrollTopResetCoordinator.MaximumWheelTicks,
+        CancellationToken token = default,
+        Action<int>? onCapture = null,
+        Action? onWheel = null,
+        Action<ScrollTopResetTrace>? onTrace = null)
+    {
+        var remaining = new Queue<Color>(samples);
+        var fallbackColor = samples.Count > 0 ? samples[^1] : Color.Black;
+        var wheelCount = 0;
+        var clickCount = 0;
+        var captureCount = 0;
+        var delays = new List<int>();
+        var traces = new List<ScrollTopResetTrace>();
+
+        Color Capture()
+        {
+            captureCount++;
+            onCapture?.Invoke(captureCount);
+            return remaining.Count > 0 ? remaining.Dequeue() : fallbackColor;
+        }
+
+        void Wheel()
+        {
+            wheelCount++;
+            onWheel?.Invoke();
+        }
+
+        void Trace(ScrollTopResetTrace trace)
+        {
+            traces.Add(trace);
+            onTrace?.Invoke(trace);
+        }
+
+        Task Delay(int milliseconds, CancellationToken cancellationToken)
+        {
+            delays.Add(milliseconds);
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
+        var result = await ScrollTopResetCoordinator.RunAsync(
+            configuredMaximumWheelTicks,
+            wheelDelayMilliseconds: 50,
+            clickDelayMilliseconds: 60,
+            expected,
+            tolerance: 26,
+            Capture,
+            Wheel,
+            () => clickCount++,
+            Trace,
+            token,
+            Delay);
+        return new ScrollTopResetScenario(result, wheelCount, clickCount, delays, traces);
     }
 
     private static async Task TestScannerSupervisorLifecycleAsync()
@@ -2387,6 +2546,13 @@ internal static class Program
 
         throw new InvalidOperationException("Expected task cancellation.");
     }
+
+    private sealed record ScrollTopResetScenario(
+        ScrollTopResetResult Result,
+        int WheelCount,
+        int ClickCount,
+        IReadOnlyList<int> Delays,
+        IReadOnlyList<ScrollTopResetTrace> Traces);
 
     private sealed class BlockingCaptureSource : IWindowCaptureSource
     {
