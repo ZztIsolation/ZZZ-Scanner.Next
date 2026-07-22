@@ -7,6 +7,7 @@ param(
     [string]$OcrRuntimeSmokeFixture,
     [int]$OcrRuntimeSmokeTimeoutSeconds = 120,
     [switch]$HelperOnly,
+    [switch]$ScannerOnly,
     [switch]$RequireVCRedistLayout,
     [int]$MaxFddMiB = 25,
     [int]$MaxSelfContainedMiB = 90,
@@ -14,6 +15,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($HelperOnly -and $ScannerOnly) {
+    throw "HelperOnly and ScannerOnly cannot be used together."
+}
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
@@ -71,6 +76,12 @@ if ($LASTEXITCODE -ne 0 -or $scannerSourceRevisionId -notmatch '^[0-9a-f]{40}$')
 }
 $immutableHelperSourceRevisions = @{
     "1.3.1" = "7f88ad9c0e8fbcf4baf0f9f39d51af4fa85b13f1"
+}
+$immutableHelperArtifacts = @{
+    "1.3.1" = [ordered]@{
+        size = 8267264
+        sha256 = "01f1b5abbe30ecae7668d6339f82eebe8d1c6f91a6dbbbaa8bba5582948ddd0d"
+    }
 }
 $helperSourceRevisionId = $immutableHelperSourceRevisions[$helperVersion]
 if ([string]::IsNullOrWhiteSpace($helperSourceRevisionId)) {
@@ -647,16 +658,20 @@ if (-not $HelperOnly) {
     $vcRedist = Find-VCRedistDirectory
 }
 
-$helperPublishArguments = @(
-    "publish", "Launcher\ZZZ-Scanner.Helper.csproj", "-c", "Release", "-r", "win-x64",
-    "--self-contained", "true", "-o", $helperOut
-)
-if (-not [string]::IsNullOrWhiteSpace($helperSourceRevisionId)) {
-    $helperPublishArguments += "-p:SourceRevisionId=$helperSourceRevisionId"
+$helperExe = $null
+$helperDependencyReport = $null
+if (-not $ScannerOnly) {
+    $helperPublishArguments = @(
+        "publish", "Launcher\ZZZ-Scanner.Helper.csproj", "-c", "Release", "-r", "win-x64",
+        "--self-contained", "true", "-o", $helperOut
+    )
+    if (-not [string]::IsNullOrWhiteSpace($helperSourceRevisionId)) {
+        $helperPublishArguments += "-p:SourceRevisionId=$helperSourceRevisionId"
+    }
+    Invoke-DotnetPublish $helperPublishArguments "Helper publish"
+    $helperExe = Join-Path $helperOut "ZZZ-Scanner-Helper.exe"
+    Set-DeterministicPeTimestamps $helperExe
 }
-Invoke-DotnetPublish $helperPublishArguments "Helper publish"
-$helperExe = Join-Path $helperOut "ZZZ-Scanner-Helper.exe"
-Set-DeterministicPeTimestamps $helperExe
 
 if ($HelperOnly) {
     $helperDependencyReport = Assert-PeDependencyClosure $helperOut
@@ -706,7 +721,7 @@ foreach ($directory in @($fddOut, $selfContainedOut)) {
 
 $fddDependencyReport = Assert-PeDependencyClosure $fddOut
 $selfContainedDependencyReport = Assert-PeDependencyClosure $selfContainedOut
-$helperDependencyReport = Assert-PeDependencyClosure $helperOut
+$helperDependencyReport = if ($ScannerOnly) { $null } else { Assert-PeDependencyClosure $helperOut }
 
 $modelRelative = "Resources\models\PP-OCRv5_mobile_rec_infer.onnx"
 $fddModelHash = (Get-FileHash -Algorithm SHA256 (Join-Path $fddOut $modelRelative)).Hash
@@ -722,7 +737,9 @@ New-Zip $fddOut $fddZip
 New-Zip $selfContainedOut $selfContainedZip
 Assert-MaxSize $fddZip $MaxFddMiB "Framework-dependent scanner" $fddOut
 Assert-MaxSize $selfContainedZip $MaxSelfContainedMiB "Self-contained scanner" $selfContainedOut
-Assert-MaxSize (Join-Path $helperOut "ZZZ-Scanner-Helper.exe") $MaxHelperMiB "NativeAOT Helper" $helperOut
+if (-not $ScannerOnly) {
+    Assert-MaxSize (Join-Path $helperOut "ZZZ-Scanner-Helper.exe") $MaxHelperMiB "NativeAOT Helper" $helperOut
+}
 
 function New-PackageManifest([string]$Id, [string]$Mode, [string]$ZipPath, [string]$PublishDirectory, [object]$Framework) {
     $name = Split-Path -Leaf $ZipPath
@@ -773,19 +790,25 @@ $manifest = [ordered]@{
 }
 $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
-$helperExe = Join-Path $helperOut "ZZZ-Scanner-Helper.exe"
-$helperManifest = [ordered]@{
-    schemaVersion = 1
-    version = $helperVersion
-    packageUrls = @(
-        "https://download.zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
-        "https://zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
-        "https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
-    )
-    sha256 = (Get-FileHash -Algorithm SHA256 $helperExe).Hash.ToLowerInvariant()
-    size = (Get-Item $helperExe).Length
+$helperArtifact = if ($ScannerOnly) { $immutableHelperArtifacts[$helperVersion] } else { $null }
+if ($ScannerOnly -and $null -eq $helperArtifact) {
+    throw "Scanner-only release requires frozen Helper artifact metadata for version $helperVersion."
 }
-$helperManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $helperManifestPath -Encoding UTF8
+if (-not $ScannerOnly) {
+    $helperExe = Join-Path $helperOut "ZZZ-Scanner-Helper.exe"
+    $helperManifest = [ordered]@{
+        schemaVersion = 1
+        version = $helperVersion
+        packageUrls = @(
+            "https://download.zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
+            "https://zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
+            "https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
+        )
+        sha256 = (Get-FileHash -Algorithm SHA256 $helperExe).Hash.ToLowerInvariant()
+        size = (Get-Item $helperExe).Length
+    }
+    $helperManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $helperManifestPath -Encoding UTF8
+}
 
 $report = [ordered]@{
     version = $Version
@@ -814,21 +837,31 @@ $report = [ordered]@{
     }
     modelSha256 = $fddModelHash.ToLowerInvariant()
     helper = [ordered]@{
-        path = $helperExe
+        built = -not $ScannerOnly
+        path = if ($ScannerOnly) { $null } else { $helperExe }
         version = $helperVersion
-        size = (Get-Item $helperExe).Length
-        sha256 = $helperManifest.sha256
+        size = if ($ScannerOnly) { $helperArtifact.size } else { (Get-Item $helperExe).Length }
+        sha256 = if ($ScannerOnly) { $helperArtifact.sha256 } else { $helperManifest.sha256 }
     }
     packages = $manifest.packages
 }
 $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $reportPath -Encoding UTF8
 
-Write-Host "helper_exe=$($report.helper.path)"
-Write-Host "helper_size=$($report.helper.size)"
+if ($ScannerOnly) {
+    Write-Host "helper_built=false"
+    Write-Host "frozen_helper_size=$($report.helper.size)"
+    Write-Host "frozen_helper_sha256=$($report.helper.sha256)"
+}
+else {
+    Write-Host "helper_exe=$($report.helper.path)"
+    Write-Host "helper_size=$($report.helper.size)"
+}
 Write-Host "fdd_zip=$fddZip"
 Write-Host "fdd_zip_size=$($manifest.packages[0].size)"
 Write-Host "self_contained_zip=$selfContainedZip"
 Write-Host "self_contained_zip_size=$($manifest.packages[1].size)"
 Write-Host "manifest=$manifestPath"
-Write-Host "helper_manifest=$helperManifestPath"
+if (-not $ScannerOnly) {
+    Write-Host "helper_manifest=$helperManifestPath"
+}
 Write-Host "report=$reportPath"

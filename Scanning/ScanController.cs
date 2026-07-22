@@ -1305,9 +1305,16 @@ public sealed class ScanController
         }
 
         var postScrollFirstCellPending = postScrollFirstCell;
+        var bootstrappedColumns = new HashSet<int>();
         for (var col = startColumn; col <= maxColumns; col++)
         {
             token.ThrowIfCancellationRequested();
+            if (bootstrappedColumns.Remove(col))
+            {
+                scanLog.WriteEvent("FIRST_PAIR_CONSUMED_CELL_SKIPPED", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}");
+                continue;
+            }
+
             if (options.MaxItems > 0 && counters.Queued >= options.MaxItems)
             {
                 scanLog.Write($"End: max items reached. MaxItems={options.MaxItems}, queued={counters.Queued}.");
@@ -1378,6 +1385,95 @@ public sealed class ScanController
             }
 
             var firstQueuedItem = counters.Queued == 0;
+            var secondColumn = col + 1;
+            if (firstQueuedItem && secondColumn <= maxColumns)
+            {
+                var secondClientPoint = new PointF(offset.X + step.X * secondColumn, currentY);
+                var secondClickPoint = window.ToScreenPoint(secondClientPoint);
+                var secondRarityProbe = DetectRarityAround(window, profile, secondClickPoint);
+                if (secondRarityProbe.Rarity is null)
+                {
+                    await Task.Delay(25, token);
+                    secondRarityProbe = DetectRarityAround(window, profile, secondClickPoint);
+                }
+
+                var secondRarity = secondRarityProbe.Rarity;
+                if (secondRarity is not null && options.Rarities.Contains(secondRarity))
+                {
+                    using var bootstrap = await CaptureFirstPairAsync(
+                        window,
+                        profile,
+                        panelRect,
+                        rois,
+                        statOffset,
+                        statRowBackground,
+                        panelChangeProbeRect,
+                        runtimeState,
+                        scanLog,
+                        offset,
+                        step,
+                        pass,
+                        row,
+                        col,
+                        secondColumn,
+                        maxColumns,
+                        logicalRow,
+                        visibleTopText,
+                        viewportStateText,
+                        token);
+
+                    var pair = new[]
+                    {
+                        new FirstPairCommit(col, rarity, bootstrap.First),
+                        new FirstPairCommit(secondColumn, secondRarity, bootstrap.Second)
+                    };
+                    var commitCount = options.MaxItems > 0
+                        ? Math.Min(pair.Length, options.MaxItems - counters.Queued)
+                        : pair.Length;
+                    for (var pairIndex = 0; pairIndex < commitCount; pairIndex++)
+                    {
+                        var commit = pair[pairIndex];
+                        if (pairIndex > 0)
+                        {
+                            Interlocked.Increment(ref counters.Visited);
+                        }
+
+                        ObserveAcceptedPanel(runtimeState, commit.Capture, scanLog, postScrollFirstCell: false);
+                        var pairPanelImage = commit.Capture.TakeImage();
+                        var pairCaptureRois = rois.Take(commit.Capture.VisibleRoiCount).ToArray();
+                        var pairDebugImage = options.ShowDebugImages ? (Bitmap)pairPanelImage.Clone() : null;
+                        var pairItemIndex = Interlocked.Increment(ref counters.Queued);
+                        var pairEnqueued = false;
+                        try
+                        {
+                            queue.Add(new DiscCapture(pairItemIndex, commit.Rarity, pairPanelImage, pairCaptureRois), token);
+                            pairEnqueued = true;
+                        }
+                        finally
+                        {
+                            if (!pairEnqueued)
+                            {
+                                pairPanelImage.Dispose();
+                            }
+                        }
+
+                        Report(progress, counters, options.ShowDebugImages ? $"首对识别入队 #{pairItemIndex}。" : "", debugImage: pairDebugImage);
+                    }
+
+                    previousPanelSignatures = bootstrap.CurrentPanelSignatures;
+                    postScrollFirstCellPending = false;
+                    if (commitCount > 1)
+                    {
+                        bootstrappedColumns.Add(secondColumn);
+                    }
+
+                    scanLog.WriteEvent(
+                        "FIRST_PAIR_COMMIT",
+                        $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, firstCol={col}, secondCol={secondColumn}, committed={commitCount}, queued={counters.Queued}, currentPanel={bootstrap.CurrentPanelLabel}");
+                    continue;
+                }
+            }
+
             if (firstQueuedItem)
             {
                 scanLog.WriteEvent(
@@ -1459,24 +1555,7 @@ public sealed class ScanController
             var captureRois = rois.Take(panelCapture.VisibleRoiCount).ToArray();
             var debugImage = options.ShowDebugImages ? (Bitmap)panelImage.Clone() : null;
             previousPanelSignatures = panelCapture.ProbeSignatures;
-            runtimeState.AdaptiveTiming?.ObservePanel(
-                panelCapture.ChangeMilliseconds,
-                panelCapture.FullRoiMilliseconds,
-                panelCapture.StableMilliseconds,
-                panelCapture.WaitMilliseconds,
-                panelCapture.CaptureMilliseconds,
-                panelCapture.FrameLoopMilliseconds,
-                currentPostScrollFirstCell);
-            runtimeState.ProfileHealth.ObservePanel(panelCapture.WaitMilliseconds, panelCapture.CaptureMilliseconds, scanLog.Write);
-            runtimeState.PanelStability.Observe(
-                panelCapture.StableMilliseconds,
-                panelCapture.PanelTextStableMilliseconds,
-                panelCapture.PanelStableSource,
-                panelCapture.PanelStabilityReason);
-            runtimeState.PanelProbeHealth.Observe(
-                panelCapture.ChangeMilliseconds,
-                panelCapture.PanelAcceptMode,
-                scanLog.Write);
+            ObserveAcceptedPanel(runtimeState, panelCapture, scanLog, currentPostScrollFirstCell);
             var ocrBacklogBeforeEnqueue = CurrentOcrBacklog(counters);
             var itemIndex = Interlocked.Increment(ref counters.Queued);
             var enqueueWait = Stopwatch.StartNew();
@@ -3043,6 +3122,248 @@ public sealed class ScanController
             intersect.Height), imageSize);
     }
 
+    private static void ObserveAcceptedPanel(
+        ScanRuntimeState runtimeState,
+        PanelCapture panelCapture,
+        ScanLog scanLog,
+        bool postScrollFirstCell)
+    {
+        runtimeState.AdaptiveTiming?.ObservePanel(
+            panelCapture.ChangeMilliseconds,
+            panelCapture.FullRoiMilliseconds,
+            panelCapture.StableMilliseconds,
+            panelCapture.WaitMilliseconds,
+            panelCapture.CaptureMilliseconds,
+            panelCapture.FrameLoopMilliseconds,
+            postScrollFirstCell);
+        runtimeState.ProfileHealth.ObservePanel(panelCapture.WaitMilliseconds, panelCapture.CaptureMilliseconds, scanLog.Write);
+        runtimeState.PanelStability.Observe(
+            panelCapture.StableMilliseconds,
+            panelCapture.PanelTextStableMilliseconds,
+            panelCapture.PanelStableSource,
+            panelCapture.PanelStabilityReason);
+        runtimeState.PanelProbeHealth.Observe(
+            panelCapture.ChangeMilliseconds,
+            panelCapture.PanelAcceptMode,
+            scanLog.Write);
+    }
+
+    private static async Task<FirstPairBootstrapResult> CaptureFirstPairAsync(
+        GameWindow window,
+        ScanProfile profile,
+        Rectangle panelRect,
+        IReadOnlyList<CvRect> rois,
+        System.Drawing.Point statOffset,
+        Color statRowBackground,
+        Rectangle panelChangeProbeRect,
+        ScanRuntimeState runtimeState,
+        ScanLog scanLog,
+        PointF offset,
+        PointF step,
+        int pass,
+        int visualRow,
+        int firstColumn,
+        int secondColumn,
+        int maxColumns,
+        int? logicalRow,
+        string visibleTopText,
+        string viewportStateText,
+        CancellationToken token)
+    {
+        var firstPoint = window.ToScreenPoint(new PointF(offset.X + step.X * firstColumn, offset.Y + step.Y * visualRow));
+        var secondPoint = window.ToScreenPoint(new PointF(offset.X + step.X * secondColumn, offset.Y + step.Y * visualRow));
+        var timeoutMs = FirstPairBootstrapTiming.ResolveMaximumWaitMilliseconds(profile.LoadTimeoutMs);
+        scanLog.WriteEvent(
+            "FIRST_PAIR_BOOTSTRAP_START",
+            $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={visualRow}, firstCol={firstColumn}, secondCol={secondColumn}, timeoutMs={timeoutMs}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}");
+
+        window.MoveCursor(firstPoint);
+        window.LeftClickCurrent();
+        await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
+        var provisionalFirstSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
+
+        PanelCapture? directSecond = null;
+        PanelCapture? directFirst = null;
+        try
+        {
+            directSecond = await CaptureFirstPairTargetAsync(
+                "second",
+                secondPoint,
+                provisionalFirstSignatures,
+                window,
+                profile,
+                panelRect,
+                rois,
+                statOffset,
+                statRowBackground,
+                panelChangeProbeRect,
+                runtimeState,
+                scanLog,
+                token,
+                timeoutMs);
+            directFirst = await CaptureFirstPairTargetAsync(
+                "first_return",
+                firstPoint,
+                directSecond.ProbeSignatures,
+                window,
+                profile,
+                panelRect,
+                rois,
+                statOffset,
+                statRowBackground,
+                panelChangeProbeRect,
+                runtimeState,
+                scanLog,
+                token,
+                timeoutMs);
+
+            var result = new FirstPairBootstrapResult(directFirst, directSecond, directFirst.ProbeSignatures, "first");
+            directFirst = null;
+            directSecond = null;
+            return result;
+        }
+        catch (TimeoutException ex)
+        {
+            scanLog.WriteEvent("FIRST_PAIR_RECOVERED", $"phase=direct_pair, reason={SanitizeLogValue(ex.Message)}, action=search_witness");
+        }
+        finally
+        {
+            directFirst?.Dispose();
+            directSecond?.Dispose();
+        }
+
+        var witnessAttempts = 0;
+        foreach (var candidate in BuildFirstPairWitnessCandidates(window, profile, offset, step, visualRow, firstColumn, secondColumn, maxColumns))
+        {
+            token.ThrowIfCancellationRequested();
+            var rarityProbe = DetectRarityAround(window, profile, candidate.Point);
+            if (rarityProbe.Rarity is null)
+            {
+                await Task.Delay(25, token);
+                rarityProbe = DetectRarityAround(window, profile, candidate.Point);
+            }
+
+            if (rarityProbe.Rarity is null)
+            {
+                continue;
+            }
+
+            witnessAttempts++;
+            scanLog.WriteEvent("FIRST_PAIR_WITNESS_ATTEMPT", $"attempt={witnessAttempts}, visualRow={candidate.VisualRow}, col={candidate.Column}, rarity={rarityProbe.Rarity}, point={candidate.Point}");
+            var activeSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
+            PanelCapture? witness = null;
+            PanelCapture? confirmedFirst = null;
+            PanelCapture? witnessReturn = null;
+            PanelCapture? confirmedSecond = null;
+            try
+            {
+                witness = await CaptureFirstPairTargetAsync(
+                    $"witness_{candidate.VisualRow}_{candidate.Column}", candidate.Point, activeSignatures,
+                    window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect,
+                    runtimeState, scanLog, token, timeoutMs);
+                scanLog.WriteEvent("FIRST_PAIR_WITNESS_READY", $"attempt={witnessAttempts}, visualRow={candidate.VisualRow}, col={candidate.Column}, waitMs={witness.WaitMilliseconds:F1}");
+
+                confirmedFirst = await CaptureFirstPairTargetAsync(
+                    "first_from_witness", firstPoint, witness.ProbeSignatures,
+                    window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect,
+                    runtimeState, scanLog, token, timeoutMs);
+                witnessReturn = await CaptureFirstPairTargetAsync(
+                    $"witness_return_{candidate.VisualRow}_{candidate.Column}", candidate.Point, confirmedFirst.ProbeSignatures,
+                    window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect,
+                    runtimeState, scanLog, token, timeoutMs);
+                confirmedSecond = await CaptureFirstPairTargetAsync(
+                    "second_from_witness", secondPoint, witnessReturn.ProbeSignatures,
+                    window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect,
+                    runtimeState, scanLog, token, timeoutMs);
+
+                scanLog.WriteEvent("FIRST_PAIR_RECOVERED", $"phase=witness_round_trip, attempt={witnessAttempts}, witnessRow={candidate.VisualRow}, witnessCol={candidate.Column}");
+                var result = new FirstPairBootstrapResult(confirmedFirst, confirmedSecond, confirmedSecond.ProbeSignatures, "second");
+                confirmedFirst = null;
+                confirmedSecond = null;
+                return result;
+            }
+            catch (TimeoutException ex)
+            {
+                scanLog.WriteEvent("FIRST_PAIR_WITNESS_SKIPPED", $"attempt={witnessAttempts}, visualRow={candidate.VisualRow}, col={candidate.Column}, reason={SanitizeLogValue(ex.Message)}");
+            }
+            finally
+            {
+                witness?.Dispose();
+                confirmedFirst?.Dispose();
+                witnessReturn?.Dispose();
+                confirmedSecond?.Dispose();
+            }
+        }
+
+        scanLog.WriteEvent("FIRST_PAIR_FAILED", $"reason=first_pair_witness_unavailable, attempts={witnessAttempts}, firstCol={firstColumn}, secondCol={secondColumn}");
+        var timeout = new PanelCaptureTimeoutException(
+            0, rois.Count, null, null, "first_pair_witness_unavailable",
+            false, false, 0, 2, 0);
+        throw new PanelCellCaptureException(
+            pass, visualRow, firstColumn, maxColumns, logicalRow, Math.Max(1, witnessAttempts),
+            window, runtimeState.VisualProfileId, timeout);
+    }
+
+    private static async Task<PanelCapture> CaptureFirstPairTargetAsync(
+        string label,
+        System.Drawing.Point clickPoint,
+        ImageSignature[] previousPanelSignatures,
+        GameWindow window,
+        ScanProfile profile,
+        Rectangle panelRect,
+        IReadOnlyList<CvRect> rois,
+        System.Drawing.Point statOffset,
+        Color statRowBackground,
+        Rectangle panelChangeProbeRect,
+        ScanRuntimeState runtimeState,
+        ScanLog scanLog,
+        CancellationToken token,
+        int timeoutMs)
+    {
+        token.ThrowIfCancellationRequested();
+        var selectionProbeRect = SelectionProbeRect(window, clickPoint);
+        var beforeSelectionSignature = CaptureScreenSignature(selectionProbeRect);
+        window.MoveCursor(clickPoint);
+        window.LeftClickCurrent();
+        var capture = await CaptureStablePanelAsync(
+            window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect,
+            previousPanelSignatures, selectionProbeRect, beforeSelectionSignature, runtimeState, scanLog, token,
+            postScrollFirstCell: false,
+            sceneAdaptivePanelFloorEligible: false,
+            allowSelectionOnlyFallback: false,
+            timeoutOverrideMs: timeoutMs);
+        scanLog.WriteEvent(
+            "FIRST_PAIR_CAPTURED",
+            $"target={label}, point={clickPoint}, waitMs={capture.WaitMilliseconds:F1}, visibleRois={capture.VisibleRoiCount}/{rois.Count}, changeMs={FormatOptionalMs(capture.ChangeMilliseconds)}, stableFrames={capture.SelectedStableFrames}/{capture.RequiredStableFrames}, accept={capture.AcceptReason}");
+        return capture;
+    }
+
+    private static IReadOnlyList<FirstPairWitnessCandidate> BuildFirstPairWitnessCandidates(
+        GameWindow window,
+        ScanProfile profile,
+        PointF offset,
+        PointF step,
+        int firstVisualRow,
+        int firstColumn,
+        int secondColumn,
+        int maxColumns)
+    {
+        return FirstPairWitnessPlanner.Build(
+                firstVisualRow,
+                firstColumn,
+                secondColumn,
+                maxColumns,
+                profile.VisibleRows,
+                profile.VisibleColumns)
+            .Select(candidate => new FirstPairWitnessCandidate(
+                candidate.VisualRow,
+                candidate.Column,
+                window.ToScreenPoint(new PointF(
+                    offset.X + step.X * candidate.Column,
+                    offset.Y + step.Y * candidate.VisualRow))))
+            .ToArray();
+    }
+
     private static async Task<PanelCapture> CaptureStablePanelWithRetryAsync(
         GameWindow window,
         ScanProfile profile,
@@ -3261,9 +3582,10 @@ public sealed class ScanController
         CancellationToken token,
         bool postScrollFirstCell,
         bool sceneAdaptivePanelFloorEligible,
-        bool allowSelectionOnlyFallback)
+        bool allowSelectionOnlyFallback,
+        int? timeoutOverrideMs = null)
     {
-        var timeout = TimeSpan.FromMilliseconds(profile.LoadTimeoutMs);
+        var timeout = TimeSpan.FromMilliseconds(Math.Clamp(timeoutOverrideMs ?? profile.LoadTimeoutMs, 1, profile.LoadTimeoutMs));
         var interval = TimeSpan.FromMilliseconds(Math.Max(5, profile.LoadPollMs));
         var panelAcceptMode = runtimeState.PanelProbeHealth.ForceSafe || runtimeState.ProfileHealth.ForceSafePanel
             ? PanelAcceptMode.Safe
@@ -4603,6 +4925,39 @@ public sealed class ScanController
         }
 
         private readonly record struct PanelStabilitySample(double PanelStableMilliseconds, double TextCoreStableMilliseconds);
+    }
+
+    private sealed record FirstPairCommit(int Column, string Rarity, PanelCapture Capture);
+
+    private sealed record FirstPairWitnessCandidate(
+        int VisualRow,
+        int Column,
+        System.Drawing.Point Point);
+
+    private sealed class FirstPairBootstrapResult : IDisposable
+    {
+        public FirstPairBootstrapResult(
+            PanelCapture first,
+            PanelCapture second,
+            ImageSignature[] currentPanelSignatures,
+            string currentPanelLabel)
+        {
+            First = first;
+            Second = second;
+            CurrentPanelSignatures = currentPanelSignatures;
+            CurrentPanelLabel = currentPanelLabel;
+        }
+
+        public PanelCapture First { get; }
+        public PanelCapture Second { get; }
+        public ImageSignature[] CurrentPanelSignatures { get; }
+        public string CurrentPanelLabel { get; }
+
+        public void Dispose()
+        {
+            First.Dispose();
+            Second.Dispose();
+        }
     }
 
     private sealed class PanelCapture : IDisposable

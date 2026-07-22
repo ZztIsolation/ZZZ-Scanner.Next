@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 2026-07-22 1.0.45
+
+- 首轮前两件驱动盘改为事务式采集：Scanner 先执行 A-B-A 严格面板验证，确认完成前不进入 OCR 队列，也不会发送 `scan_item`。验证成功后按 A、B 顺序一次性提交，常规遍历从第三件继续。
+- 当前两件详情过于相似时，不再固定依赖第二件证明第一件。Scanner 会在当前视口寻找更远见证盘，并分别通过 `C -> A` 与 `A -> C -> B` 证明前两件；所有候选均不可用时继续使用 `panel_capture_timeout`，以 `first_pair_witness_unavailable` 记录最终门禁原因。
+- 新增 `FIRST_PAIR_BOOTSTRAP_START`、`FIRST_PAIR_CAPTURED`、`FIRST_PAIR_WITNESS_ATTEMPT`、`FIRST_PAIR_WITNESS_READY`、`FIRST_PAIR_RECOVERED`、`FIRST_PAIR_COMMIT` 和 `FIRST_PAIR_FAILED` 本地诊断。首对等待独立封顶 1200ms，普通面板重试仍维持 600ms。
+- Scanner 版本升至 1.0.45；`scan_item`、`scan_complete`、导出 JSON、Helper 协议 v4 和 Helper 1.3.1 均保持不变。
+- Windows Scanner 发布增加 `-ScannerOnly` 模式：发布流水线先校验冻结 Helper 1.3.1 Release 资产的既有大小和 SHA-256，只构建并上传 Scanner 双包、Scanner manifest 与报告，避免 SDK 漂移产生同版本不同字节的 Helper。
+
 ## 2026-07-22 1.0.44
 
 - Scanner 的 5 号位主属性候选新增“风属性伤害加成”，补齐 S/A/B 品质的元素伤害数值范围，并支持在名称未识别出盘位时依据该词条推断为 5 号位；4、6 号位仍会触发槽位安全拒绝。
