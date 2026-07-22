@@ -544,7 +544,7 @@ dotnet restore
 dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
 dotnet build Launcher\ZZZ-Scanner.Helper.csproj -c Release -p:NuGetAudit=false
 dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
-.\scripts\publish-slim.ps1 -Version 1.0.39
+.\scripts\publish-slim.ps1
 ~~~
 
 Outputs:
@@ -564,13 +564,19 @@ complete PE dependencies; and deterministic ZIP paths/timestamps.
 Official CI uses <code>-RequireVCRedistLayout</code>. Local builds may record a
 System32 fallback, but those are not official release artifacts.
 
+This repository owns Scanner and Helper source, version tags, Windows builds,
+and release assets. The calculator repository owns browser integration and
+consumes the published manifests. Existing calculator-hosted release mirrors
+remain available for compatibility, but future GitHub fallbacks are published
+from this repository.
+
 ## Security and privacy
 
 - OCR and screenshots are processed locally.
 - Normal scans do not upload screenshots to this repository.
 - Web integration uses loopback HTTP/WebSocket, an origin allowlist, and a
   one-time token.
-- Scanner 1.0.39 passes ROI completeness, the final acceptance gate, stable
+- Scanner 1.0.43 passes ROI completeness, the final acceptance gate, stable
   frames, retry count, window dimensions, DPI, capture backend, and visual
   profile to the local web page as structured diagnostics. The calculator may
   upload this privacy-limited summary under its separate privacy notice, but it

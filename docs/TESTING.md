@@ -1,5 +1,23 @@
 # Testing
 
+## 2026-07-22 1.0.43 / Helper 1.3.1 正式发布归档
+
+已执行：
+
+```powershell
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
+dotnet build Launcher\ZZZ-Scanner.Helper.csproj -c Release -p:NuGetAudit=false
+```
+
+结果：
+
+- 原生回归 49 项全部通过；Scanner 与 Helper Release 构建均为 0 warning / 0 error。
+- Scanner 正式源码提交为 `38f38a228f03d060644ea7ba4287e71c7857705f`；Helper 1.3.1 冻结源码提交为 `7f88ad9c0e8fbcf4baf0f9f39d51af4fa85b13f1`。最终 Windows 发布流水线 `29861463758` 和 `29861470116` 均在 Scanner 正式提交上成功完成。
+- FDD ZIP 为 `21804074` 字节、SHA-256 `a8ad3c7f914e843b2763de92c40ba981e6e29431ca6c483ad7177ab9d93b5633`；自包含 ZIP 为 `84822882` 字节、SHA-256 `03270b1e14c55980a37ee9ad2aad0f4b84a65f0ec5c59e22706c8be3ae18c531`；Helper 为 `8267264` 字节、SHA-256 `01f1b5abbe30ecae7668d6339f82eebe8d1c6f91a6dbbbaa8bba5582948ddd0d`。
+- 扫描器仓库的 `scanner-1.0.43` 和 `helper-1.3.1` Release 使用既有正式资产逐字节镜像，没有重新构建或替换二进制。Calculator 中原有兼容 Release 继续保留。
+- 整理前只读检查确认线上 Scanner/Helper manifest 均返回 HTTP 200，版本分别为 1.0.43 和 1.3.1；本机健康接口报告 Helper 1.3.1、协议 v4、Scanner 1.0.43。未执行服务器部署或本机运行时更新。
+
 ## 2026-07-21 1.0.42 可变副词条、流式恢复与 Helper 1.3.1
 
 已执行：

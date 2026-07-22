@@ -18,17 +18,24 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
+[xml]$scannerProject = Get-Content (Join-Path $repoRoot "ZZZ-Scanner.Next.csproj")
+$scannerProjectVersion = $scannerProject.Project.PropertyGroup |
+    ForEach-Object { [string]$_.Version } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Select-Object -First 1
+if ([string]::IsNullOrWhiteSpace($scannerProjectVersion)) {
+    throw "Scanner project Version is missing."
+}
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    [xml]$project = Get-Content (Join-Path $repoRoot "ZZZ-Scanner.Next.csproj")
-    $Version = $project.Project.PropertyGroup |
-        ForEach-Object { [string]$_.Version } |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        Select-Object -First 1
+    $Version = $scannerProjectVersion
 }
 
 $parsedVersion = $null
 if (-not [System.Version]::TryParse($Version, [ref]$parsedVersion) -or $Version.Split('.').Count -ne 3) {
     throw "Version must use major.minor.patch format, for example 1.0.37. Got: $Version"
+}
+if ($Version -ne $scannerProjectVersion) {
+    throw "Release version must match ZZZ-Scanner.Next.csproj. Project: $scannerProjectVersion; requested: $Version."
 }
 
 $assemblyVersion = "$($parsedVersion.Major).$($parsedVersion.Minor).$($parsedVersion.Build).0"
@@ -48,15 +55,50 @@ $parsedHelperVersion = $null
 if (-not [System.Version]::TryParse($helperVersion, [ref]$parsedHelperVersion)) {
     throw "Helper project Version is invalid: $helperVersion"
 }
+$helperProgram = Get-Content (Join-Path $repoRoot "Launcher\Program.cs") -Raw
+$helperVersionMatch = [regex]::Match($helperProgram, 'internal\s+const\s+string\s+HelperVersion\s*=\s*"([^"]+)"')
+if (-not $helperVersionMatch.Success) {
+    throw "Launcher Program.HelperVersion constant was not found."
+}
+$helperProgramVersion = $helperVersionMatch.Groups[1].Value
+if ($helperVersion -ne $helperProgramVersion) {
+    throw "Helper version mismatch. Project: $helperVersion; Program.HelperVersion: $helperProgramVersion."
+}
+
+$scannerSourceRevisionId = (& git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $scannerSourceRevisionId -notmatch '^[0-9a-f]{40}$') {
+    throw "Unable to resolve the Scanner source revision."
+}
 $immutableHelperSourceRevisions = @{
     "1.3.1" = "7f88ad9c0e8fbcf4baf0f9f39d51af4fa85b13f1"
 }
 $helperSourceRevisionId = $immutableHelperSourceRevisions[$helperVersion]
+if ([string]::IsNullOrWhiteSpace($helperSourceRevisionId)) {
+    $helperSourceRevisionId = $scannerSourceRevisionId
+}
+
+function Get-TaggedCommit([string]$Tag) {
+    $revision = (& git rev-parse --verify "refs/tags/$Tag`^{commit}" 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+    return $revision.Trim()
+}
+
+$scannerReleaseTag = "scanner-$Version"
+$taggedScannerRevision = Get-TaggedCommit $scannerReleaseTag
+if (-not [string]::IsNullOrWhiteSpace($taggedScannerRevision) -and $taggedScannerRevision -ne $scannerSourceRevisionId) {
+    throw "Immutable tag $scannerReleaseTag points to $taggedScannerRevision, not current source $scannerSourceRevisionId. Bump the Scanner version before publishing."
+}
 if ([string]::IsNullOrWhiteSpace($HelperReleaseTag)) {
     $HelperReleaseTag = "helper-$helperVersion"
 }
 if ($HelperReleaseTag -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
     throw "Helper release tag contains unsupported characters: $HelperReleaseTag"
+}
+$taggedHelperRevision = Get-TaggedCommit $HelperReleaseTag
+if (-not [string]::IsNullOrWhiteSpace($taggedHelperRevision) -and $taggedHelperRevision -ne $helperSourceRevisionId) {
+    throw "Immutable tag $HelperReleaseTag points to $taggedHelperRevision, not Helper source $helperSourceRevisionId. Bump the Helper version before publishing."
 }
 $distRoot = if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     Join-Path $repoRoot "dist"
@@ -626,7 +668,7 @@ if ($HelperOnly) {
         packageUrls = @(
             "https://download.zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
             "https://zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
-            "https://github.com/ZztIsolation/zzz_calculator/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
+            "https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
         )
         sha256 = (Get-FileHash -Algorithm SHA256 $helperExe).Hash.ToLowerInvariant()
         size = (Get-Item $helperExe).Length
@@ -691,7 +733,7 @@ function New-PackageManifest([string]$Id, [string]$Mode, [string]$ZipPath, [stri
             "https://download.zzzcaculator.top/downloads/zzz-scanner/$Version/$name",
             "https://zzzcaculator.top/downloads/zzz-scanner/$Version/$name",
             "./$Version/$name",
-            "https://github.com/ZztIsolation/zzz_calculator/releases/download/scanner-$Version/$name"
+            "https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases/download/scanner-$Version/$name"
         )
         sha256 = (Get-FileHash -Algorithm SHA256 $ZipPath).Hash.ToLowerInvariant()
         size = (Get-Item $ZipPath).Length
@@ -738,7 +780,7 @@ $helperManifest = [ordered]@{
     packageUrls = @(
         "https://download.zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
         "https://zzzcaculator.top/downloads/zzz-scanner/helper/$helperVersion/ZZZ-Scanner-Helper.exe",
-        "https://github.com/ZztIsolation/zzz_calculator/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
+        "https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases/download/$HelperReleaseTag/ZZZ-Scanner-Helper.exe"
     )
     sha256 = (Get-FileHash -Algorithm SHA256 $helperExe).Hash.ToLowerInvariant()
     size = (Get-Item $helperExe).Length
@@ -747,6 +789,7 @@ $helperManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $helperMani
 
 $report = [ordered]@{
     version = $Version
+    scannerSourceRevisionId = $scannerSourceRevisionId
     helperReleaseTag = $HelperReleaseTag
     helperSourceRevisionId = $helperSourceRevisionId
     createdAt = [DateTimeOffset]::Now.ToString("O")
