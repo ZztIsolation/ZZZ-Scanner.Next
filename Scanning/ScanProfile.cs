@@ -67,6 +67,7 @@ public sealed class ScanProfile
     public int ResetToTopWheelTicks { get; set; } = 45;
     public int ResetToTopWheelDelayMs { get; set; } = 6;
     public int ColorTolerance { get; set; } = 26;
+    public VisualProbeOptions VisualProbes { get; set; } = new();
     public Dictionary<string, int[]> Points { get; set; } = new();
     public Dictionary<string, int[]> Colors { get; set; } = new();
     public Dictionary<string, int[]> Rectangles { get; set; } = new();
@@ -135,4 +136,59 @@ public sealed class ScanProfile
             "subStatValue4"
         ];
     }
+}
+
+public sealed class VisualProbeOptions
+{
+    // Kept for backward-compatible profile deserialization. Warehouse readiness no longer uses a signal vote.
+    public int RequiredSignals { get; set; } = 2;
+    public int RequiredStableFrames { get; set; } = 2;
+    public int PollMilliseconds { get; set; } = 250;
+    public ChromaticProbePolicy BackpackReady { get; set; } = new();
+    public WarehousePreflightPolicy WarehousePreflight { get; set; } = new();
+    public RarityProbePolicy Rarity { get; set; } = new();
+    public RowPresenceProbePolicy RowPresence { get; set; } = new();
+}
+
+public sealed class WarehousePreflightPolicy
+{
+    public int RequiredStableFrames { get; set; } = 2;
+    public int PollMilliseconds { get; set; } = 250;
+    public double ExactTitleMinimumConfidence { get; set; } = 0.55;
+    public double FuzzyTitleMinimumConfidence { get; set; } = 0.75;
+    public int MaximumTitleEditDistance { get; set; } = 1;
+    public int GridMinimumScore { get; set; } = 70;
+    public int LayoutMinimumScore { get; set; } = 70;
+    public int CountConsensusFrames { get; set; } = 2;
+    public int CountMaximumAttempts { get; set; } = 3;
+    public int MinimumInventoryCapacity { get; set; } = 100;
+    public int MaximumInventoryCapacity { get; set; } = 9999;
+    public int MonitorPollMilliseconds { get; set; } = 150;
+    public int MonitorFailureFrames { get; set; } = 2;
+    public int MonitorMaximumAgeMilliseconds { get; set; } = 300;
+    public int MonitorMinimumScore { get; set; } = 70;
+}
+
+public sealed class ChromaticProbePolicy
+{
+    public int Radius { get; set; } = 24;
+    public int HueToleranceDegrees { get; set; } = 35;
+    public double MinimumSaturation { get; set; } = 0.45;
+    public double MinimumValue { get; set; } = 0.30;
+    public double MinimumCoverage { get; set; } = 0.12;
+}
+
+public sealed class RarityProbePolicy
+{
+    public int MaximumScore { get; set; } = 42;
+    public int MinimumCandidateMargin { get; set; } = 8;
+}
+
+public sealed class RowPresenceProbePolicy
+{
+    public int PatchRadius { get; set; } = 3;
+    public int MinimumLuminanceTolerance { get; set; } = 18;
+    public double RelativeLuminanceTolerance { get; set; } = 0.35;
+    public int EdgeThreshold { get; set; } = 18;
+    public double MinimumEdgeDensity { get; set; } = 0.003;
 }

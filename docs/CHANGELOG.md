@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Scanner 1.0.43 修复整轮首件可能把旧详情面板当成目标盘的问题。首件现在固定执行“目标格、邻格稳定、返回目标格”的验证回环，验收帧自身必须持续与邻格基线强不同；瞬时点击动画不再被锁存为有效切换。新增 `FIRST_CELL_BASELINE_CAPTURED`、`FIRST_CELL_REFRESH_REQUIRED` 和 `FIRST_CELL_REFRESH_READY` 诊断，协议 v4 和流式字段保持不变。
+- 每轮导出后统一记录 `SCAN_TERMINAL` 最终计数、partial、终止码和导出文件。Benchmark 优先使用该终态，兼容 CLI sidecar 和旧进度日志，并可读取 `export.partial.json`；`non_level_15_stop` 在保留 partial 事实的同时按有效全量正常结束统计。
+- 发布脚本对已经冻结的 Helper 1.3.1 固定其原始 `SourceRevisionId`，避免后续仅修改 Scanner 提交时 .NET 自动写入新的仓库 SHA 并改变 Helper NativeAOT 字节；候选 Helper 继续要求与既有 1.3.1 大小和 SHA-256 完全一致。
+- Scanner 1.0.43 修复 1.0.42 预发布包混入旧版 app-local VC runtime 后在 PP-OCRv5 初始化阶段触发 `0xC0000005` 的发布问题。发布脚本现在只接受同一受控 layout 中不低于 14.44.35211 的运行库，Release 禁止 System32 fallback，并在 FDD 与自包含最终目录内各执行一次真实 OCR runtime smoke 后才允许打包。
+- Scanner 1.0.42 将详情面板拆为 4 个必需核心 ROI 和 0-4 组连续副词条 ROI；普通四词条盘继续使用单帧快速路径，较短的合法尾部需稳定确认，半对缺失和中间断层会被拒绝。低等级 S 盘不再因固定 12/12 ROI 门槛失败。
+- 官方网页与 WinForms 扫描入口固定为 S 级。保留“遇到非 15 级停止”：触发盘在加入结果前停止，已经完成的盘写入 `export.partial.json`；异常和主动取消也使用不可取消的收尾写入部分文件。
+- Scanner WebSocket 新增 `stream-items-v1`：逐件 `scan_item` 保持不变，终态只发送摘要和 `itemCount`，旧客户端仍可获得完整数组；线上的 WebSocket 消息改为紧凑 JSON，本地导出继续格式化。
+- Helper 1.3.1 将旧式 Scanner 单消息兼容上限提高到 8 MiB，区分 `scanner_message_too_large` 与 `scanner_transport_failed`，消息泵、进程和停止路径共享唯一终态门禁，避免后续重复追加进程退出或停止超时。
+- Scanner 1.0.41 为所有 DXGI/GDI 截图增加统一协调器，串行保护帧获取、捕获源切换和释放；主扫描与输入守卫使用阻塞高优先级入口，DXGI 到 GDI 的降级也在同一临界区内原子完成。
+- 列表置顶不再用会受动画干扰的整页图像签名判断。Scanner 直接探测滚动条顶部滑块，初始已在顶部时不滚动；否则每 4 个滚轮刻度复检一次，只有达到最大刻度仍无法确认时才使用显式顶部点击，避免在第一页重复执行 180 次向上滚动。
+- Helper 1.3.0 同时监督 Scanner WebSocket 与进程 PID，进程退出会先返回唯一的 `scanner_process_exited` 终态再清理消息泵；扫描活动状态在启动准备前原子置位，Scanner 已不存在时的停止请求也不再静默丢弃。NativeAOT 错误回执改用已注册的 `HelperErrorMessage`，修复“日志已记录退出但网页收不到终态”的序列化失败。
+- Scanner WebSocket 进度改为同步转发，取消后不再残留 `Progress<T>` 线程池回调导致未处理的 `TaskCanceledException`。Helper 下载流在移动 `.download` 文件前显式释放，避免更新包已下载完成却因文件锁安装失败。
+- Scanner 1.0.41 将仓库预检改为“`驱动仓库` 标题语义 + 灰度网格/详情布局”双重门禁，彻底移除青色拆解按钮和首行 S/A/B 品质颜色对页面身份的影响；标题与结构需连续稳定两帧，仓库数量还需在最多三个独立画面中取得两次一致结果，全部完成前不会点击或滚动。
+- 删除扫描期间持续截图的后台仓库监控。点击、滚轮和拖拽前的输入守卫先比较静态标题/计数区域；快速签名不匹配时才执行“标题 OCR + 网格/详情结构”强确认，连续强确认失败后返回 `warehouse_context_lost`。详情面板、选中和滚动动画不再参与退出判断，错误标题也改为“无法确认驱动盘仓库界面”。
+- 新增脱敏 `warehouseHeaderDetected/headerScore/gridStructureScore/layoutScore/countConsensusFrames` 诊断；旧版 `anchorScore/gridScore/color_profile_unsupported` 仍由网页和服务端接受，Helper 协议不因本改动升级。
+- 新增 `neutral/highlight_clipped/warm_shifted/saturation_shifted/contrast_shifted/unknown` 捕获空间分类。常见 HDR 高光裁切、夜间模式和温和显卡色彩调整自动兼容；黑帧、反色、极端滤镜或无法确认的布局继续保守停止。
+- 非中性色彩环境自动关闭 Fast OCR assist，以 PP-OCR 为权威识别；仅在原始识别为空或低置信度且清洗失败时执行一次 P2-P98 亮度归一化重试，重试结果仍经过完整字段和槽位校验。
+- 滚动端点改用列表图像签名的连续无位移判断，副属性行改用相对背景亮度与文字边缘判断；`scan_complete` 和所有扫描失败会返回预检状态、色彩分类、脱敏分数、窗口尺寸、DPI、捕获后端和视觉配置。
+- 本地日志保留完整 HSV 与判定过程；Web 遥测不包含截图、OCR 文本、仓库数量、原始 RGB、本机路径或异常堆栈。原生回归新增常见色彩变换、HDR 裁切、品质歧义、预检状态机、相对行检测和亮度归一化覆盖。
+- 详情面板重试不再在固定 80ms 后立即从邻项点回目标项，而是等待邻项相对目标发生强变化并连续稳定两帧，最多等待 600ms；超时时沿用目标快照作为保守基线并记录 `PANEL_SELECTION_REFRESH_TIMEOUT`。
+- 面板最终超时新增首个缺失 ROI、参考/候选亮度差、允许亮度差和文字边缘密度等整数诊断；字段复用同一次行检测采样，只在终态写入，不采集原始颜色、截图或 OCR 文本。
+
 - Scanner 1.0.39 为详情面板超时增加结构化诊断：最后一次 `visibleRois/totalRois`、接受门槛、面板/选择变化状态、稳定帧、三次重试、捕获帧数、窗口客户区、DPI、实际捕获后端和视觉配置 ID 会同时写入 `PANEL_CAPTURE_TIMEOUT` 本地日志并通过现有 `scan_error.details` 发送给本机网页。
 - `scan_complete` 新增聚合 `queued`、`completed` 和安全的会话诊断；现有字段保持兼容。网页可以只上传这些脱敏字段，不需要也不会从 Scanner 读取驱动盘数组、截图、OCR 文本、本机目录、完整日志或异常堆栈。
 - 回归项目新增结构化面板超时诊断契约，当前 17 项 Helper/Scanner 回归测试全部通过。正式 Windows CI 使用 `-RequireVCRedistLayout` 构建并通过双包体积门禁：FDD `21756850` 字节、SHA-256 `6488a032b22c9cf907ea3637927b3c8df3b9bd7a04162818c3244cec80d57ea0`；自包含包 `84775658` 字节、SHA-256 `cc1552a38536b764373c24821af003b7e85adb097f3611653a86783c2a06b037`。构建报告确认 `vcRuntimeSource=vc-redist-layout`；System32 fallback 产物不得作为正式发布资产。Helper 继续沿用已经发布的 1.2.1，不用本次流水线中同版本的重复构建覆盖。

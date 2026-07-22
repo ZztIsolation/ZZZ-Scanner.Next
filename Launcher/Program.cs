@@ -18,14 +18,14 @@ namespace ZZZScannerHelper;
 internal static partial class Program
 {
     private const string ServiceName = "zzz-scanner-helper";
-    internal const string HelperVersion = "1.2.1";
-    private const int ProtocolVersion = 3;
+    internal const string HelperVersion = "1.3.1";
+    internal const int ProtocolVersion = 4;
     private const int HelperPort = 22355;
     private const string ProtocolName = "zzz-scanner";
     private const string ManifestPath = "/downloads/zzz-scanner/manifest.json";
     private const int PackageDownloadMaxAttempts = 5;
     private const int DownloadProgressIntervalMs = 300;
-    private const int MaxWebSocketMessageBytes = 256 * 1024;
+    internal const int MaxWebSocketMessageBytes = 8 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true,
@@ -226,6 +226,11 @@ internal static partial class Program
 
                 if (context.Request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) && path == "/")
                 {
+                    if (!string.IsNullOrWhiteSpace(origin) && !IsAllowedOrigin(origin))
+                    {
+                        await SendTextAsync(context.Response, 403, "Bad Origin", token);
+                        return;
+                    }
                     await SendJsonAsync(context.Response, 200, HelperInfo(), token);
                     return;
                 }
@@ -306,7 +311,8 @@ internal static partial class Program
                 Service = ServiceName,
                 Version = HelperVersion,
                 ProtocolVersion = ProtocolVersion,
-                Scanner = CurrentScannerState()
+                Scanner = CurrentScannerState(),
+                HelperUpdate = HelperInstallationManager.CurrentPendingUpdate(),
             };
         }
 
@@ -690,37 +696,39 @@ internal static partial class Program
                     var totalBytes = expectedSize > 0 ? expectedSize : existingBytes + responseLength;
                     await report(DownloadProgress(version, package, url, existingBytes, totalBytes, stopwatch, attempt, "正在下载 OCR 扫描器..."), token);
 
-                    await using var input = await response.Content.ReadAsStreamAsync(token);
-                    await using var output = new FileStream(
+                    var downloaded = existingBytes;
+                    await using (var input = await response.Content.ReadAsStreamAsync(token))
+                    await using (var output = new FileStream(
                         temp,
                         existingBytes > 0 ? FileMode.Append : FileMode.Create,
                         FileAccess.Write,
                         FileShare.None,
                         bufferSize: 128 * 1024,
-                        useAsync: true);
-
-                    var buffer = new byte[128 * 1024];
-                    var downloaded = existingBytes;
-                    var lastReport = Stopwatch.StartNew();
-                    while (true)
+                        useAsync: true))
                     {
-                        var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), token);
-                        if (read <= 0)
+                        var buffer = new byte[128 * 1024];
+                        var lastReport = Stopwatch.StartNew();
+                        while (true)
                         {
-                            break;
+                            var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), token);
+                            if (read <= 0)
+                            {
+                                break;
+                            }
+
+                            await output.WriteAsync(buffer.AsMemory(0, read), token);
+                            downloaded += read;
+                            if (lastReport.ElapsedMilliseconds >= DownloadProgressIntervalMs
+                                || (totalBytes > 0 && downloaded >= totalBytes))
+                            {
+                                await report(DownloadProgress(version, package, url, downloaded, totalBytes, stopwatch, attempt, "正在下载 OCR 扫描器..."), token);
+                                lastReport.Restart();
+                            }
                         }
 
-                        await output.WriteAsync(buffer.AsMemory(0, read), token);
-                        downloaded += read;
-                        if (lastReport.ElapsedMilliseconds >= DownloadProgressIntervalMs
-                            || (totalBytes > 0 && downloaded >= totalBytes))
-                        {
-                            await report(DownloadProgress(version, package, url, downloaded, totalBytes, stopwatch, attempt, "正在下载 OCR 扫描器..."), token);
-                            lastReport.Restart();
-                        }
+                        await output.FlushAsync(token);
                     }
 
-                    await output.FlushAsync(token);
                     await report(DownloadProgress(version, package, url, downloaded, totalBytes, stopwatch, attempt, "OCR 扫描器下载完成。"), token);
                     MoveCompletedPackage(temp, destination);
                     return;
@@ -961,6 +969,7 @@ internal static partial class Program
         private readonly System.Net.WebSockets.WebSocket _browser;
         private readonly SemaphoreSlim _browserSendGate = new(1, 1);
         private ManagedScannerProcess? _scanner;
+        private readonly ScanActivityGate _scanActivity = new();
 
         public BrowserSession(HelperServer server, System.Net.WebSockets.WebSocket browser)
         {
@@ -975,7 +984,8 @@ internal static partial class Program
                 Service = ServiceName,
                 Version = HelperVersion,
                 ProtocolVersion = ProtocolVersion,
-                Scanner = _server.CurrentScannerState()
+                Scanner = _server.CurrentScannerState(),
+                HelperUpdate = HelperInstallationManager.CurrentPendingUpdate(),
             }, token);
 
             while (_browser.State == WebSocketState.Open && !token.IsCancellationRequested)
@@ -1007,6 +1017,7 @@ internal static partial class Program
                 }
                 catch (Exception ex)
                 {
+                    _scanActivity.Finish();
                     await SendAsync("scan_error", HelperErrors.FromException(ex, "prepare"), CancellationToken.None);
                 }
             }
@@ -1067,11 +1078,40 @@ internal static partial class Program
                 case "get_diagnostics":
                     await SendAsync("helper_diagnostics", new HelperDiagnosticsResponse
                     {
+                        RequestId = RequestId(envelope.Data),
                         HelperVersion = HelperVersion,
                         ProtocolVersion = ProtocolVersion,
                         LogDirectory = HelperLog.DirectoryPath,
-                        Scanner = _server.CurrentScannerState()
+                        Scanner = _server.CurrentScannerState(),
+                        HelperUpdate = HelperInstallationManager.CurrentPendingUpdate(),
                     }, token);
+                    break;
+
+                case "confirm_helper_update":
+                    var confirmRequestId = RequestId(envelope.Data);
+                    try
+                    {
+                        var transactionId = StringProperty(envelope.Data, "transactionId");
+                        var commit = HelperInstallationManager.ConfirmPendingUpdate(transactionId);
+                        await SendAsync("helper_update_commit_result", new HelperUpdateCommitResponse
+                        {
+                            RequestId = confirmRequestId,
+                            TransactionId = commit.TransactionId,
+                            Committed = commit.Committed,
+                            PreviousVersion = commit.PreviousVersion,
+                        }, token);
+                    }
+                    catch (Exception ex)
+                    {
+                        var error = HelperErrors.FromException(ex, "helper_update");
+                        error.Code = "helper_update_confirmation_failed";
+                        error.Phase = "helper";
+                        error.Title = "扫描助手更新确认失败";
+                        error.Remedy = "旧版 Helper 会自动恢复；请等待网页重新连接后重试。";
+                        error.Retryable = true;
+                        error.Details["requestId"] = confirmRequestId;
+                        await SendAsync("helper_update_error", error, CancellationToken.None);
+                    }
                     break;
 
                 case "get_storage_info":
@@ -1093,43 +1133,82 @@ internal static partial class Program
 
                 case "update_helper":
                     var updateRequestId = RequestId(envelope.Data);
-                    var preparation = await HelperUpdateManager.PrepareAsync(
-                        _server.ResolveHelperManifestUrl(),
-                        HelperVersion,
-                        async (progress, ct) =>
+                    try
+                    {
+                        var preparation = await HelperUpdateManager.PrepareAsync(
+                            _server.ResolveHelperManifestUrl(),
+                            HelperVersion,
+                            async (progress, ct) =>
+                            {
+                                progress.RequestId = updateRequestId;
+                                await SendAsync("helper_update_progress", progress, ct);
+                            },
+                            token);
+                        await SendAsync("helper_update_result", new HelperUpdateResponse
                         {
-                            progress.RequestId = updateRequestId;
-                            await SendAsync("helper_update_progress", progress, ct);
-                        },
-                        token);
-                    await SendAsync("helper_update_result", new HelperUpdateResponse
+                            RequestId = updateRequestId,
+                            UpdateAvailable = preparation.UpdateAvailable,
+                            CurrentVersion = preparation.CurrentVersion,
+                            AvailableVersion = preparation.AvailableVersion,
+                            Restarting = preparation.UpdateAvailable
+                        }, token);
+                        if (preparation.UpdateAvailable)
+                        {
+                            HelperInstallationManager.LaunchPreparedUpdate(preparation.ExecutablePath);
+                            await Task.Delay(250, CancellationToken.None);
+                            Environment.Exit(0);
+                        }
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        RequestId = updateRequestId,
-                        UpdateAvailable = preparation.UpdateAvailable,
-                        CurrentVersion = preparation.CurrentVersion,
-                        AvailableVersion = preparation.AvailableVersion,
-                        Restarting = preparation.UpdateAvailable
-                    }, token);
-                    if (preparation.UpdateAvailable)
-                    {
-                        HelperInstallationManager.LaunchPreparedUpdate(preparation.ExecutablePath);
-                        await Task.Delay(250, CancellationToken.None);
-                        Environment.Exit(0);
+                        var source = HelperErrors.FromException(ex, "helper_update");
+                        var sourceCode = source.Code;
+                        source.Code = "helper_update_failed";
+                        source.Phase = "helper";
+                        source.Title = "扫描助手更新失败";
+                        source.Remedy = "请检查网络后重试；仍然失败时请手动下载最新版 Helper。";
+                        source.Retryable = true;
+                        source.Actions =
+                        [
+                            new HelperErrorAction { Kind = "update_helper", Label = "重试自动更新" },
+                            new HelperErrorAction { Kind = "download_helper", Label = "手动下载" },
+                            new HelperErrorAction { Kind = "open_logs", Label = "打开日志目录" }
+                        ];
+                        source.Details["requestId"] = updateRequestId;
+                        source.Details["sourceCode"] = sourceCode;
+                        await SendAsync("helper_update_error", source, CancellationToken.None);
                     }
                     break;
 
                 case "scan_req":
+                    _scanActivity.Start();
                     await EnsureScannerProcessAsync(token);
                     if (_scanner is not null)
                     {
-                        await _scanner.SendRawAsync(JsonSerializer.Serialize(envelope, HelperJsonContext.Default.HelperEnvelope), token);
+                        var delivered = await _scanner.TrySendRawAsync(
+                            JsonSerializer.Serialize(envelope, HelperJsonContext.Default.HelperEnvelope),
+                            token);
+                        if (!delivered)
+                        {
+                            await ScannerExitedAsync(_scanner.ExitCodeOrUnknown, CancellationToken.None);
+                        }
                     }
                     break;
 
                 case "scan_stop":
                     if (_scanner is not null)
                     {
-                        await _scanner.SendRawAsync(JsonSerializer.Serialize(envelope, HelperJsonContext.Default.HelperEnvelope), token);
+                        var delivered = await _scanner.TrySendRawAsync(
+                            JsonSerializer.Serialize(envelope, HelperJsonContext.Default.HelperEnvelope),
+                            token);
+                        if (!delivered)
+                        {
+                            await ScannerExitedAsync(_scanner.ExitCodeOrUnknown, CancellationToken.None);
+                        }
+                    }
+                    else
+                    {
+                        await ScannerExitedAsync(-1, CancellationToken.None);
                     }
                     break;
             }
@@ -1167,6 +1246,8 @@ internal static partial class Program
                     childToken,
                     elevated,
                     ForwardScannerMessageAsync,
+                    ScannerExitedAsync,
+                    ScannerTransportFailedAsync,
                     token);
             }
             catch (HelperFailureException) when (_server.ShouldFallbackToSelfContained())
@@ -1188,17 +1269,26 @@ internal static partial class Program
                     childToken,
                     elevated,
                     ForwardScannerMessageAsync,
+                    ScannerExitedAsync,
+                    ScannerTransportFailedAsync,
                     token);
             }
             _server.MarkScannerActive();
             await SendAsync("scanner_ready", _server.CurrentScannerState(), token);
-            try
+            if (HelperInstallationManager.ConsumePostUpdateStoragePreservation())
             {
-                _server.CleanupStorage();
+                HelperLog.Write("AUTOMATIC_CLEANUP_SKIPPED reason=helper-update-preservation");
             }
-            catch (Exception ex)
+            else
             {
-                HelperLog.Write($"AUTOMATIC_CLEANUP_FAILED error={ex.Message}");
+                try
+                {
+                    _server.CleanupStorage();
+                }
+                catch (Exception ex)
+                {
+                    HelperLog.Write($"AUTOMATIC_CLEANUP_FAILED error={ex.Message}");
+                }
             }
         }
 
@@ -1207,6 +1297,14 @@ internal static partial class Program
             return data.ValueKind == JsonValueKind.Object
                 && data.TryGetProperty("requestId", out var requestId)
                 ? requestId.GetString() ?? ""
+                : "";
+        }
+
+        private static string StringProperty(JsonElement data, string name)
+        {
+            return data.ValueKind == JsonValueKind.Object
+                && data.TryGetProperty(name, out var value)
+                ? value.GetString() ?? ""
                 : "";
         }
 
@@ -1228,8 +1326,81 @@ internal static partial class Program
                 return;
             }
 
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                var root = document.RootElement;
+                var cmd = root.TryGetProperty("cmd", out var lowerCmd)
+                    ? lowerCmd.GetString()
+                    : root.TryGetProperty("Cmd", out var upperCmd) ? upperCmd.GetString() : null;
+                if (cmd is "scan_complete" or "scan_error")
+                {
+                    _scanActivity.Finish();
+                }
+            }
+            catch
+            {
+            }
+
             var bytes = Encoding.UTF8.GetBytes(json);
             await SendBrowserBytesAsync(bytes, token);
+        }
+
+        private async Task ScannerExitedAsync(int exitCode, CancellationToken token)
+        {
+            if (!_scanActivity.Finish() || _browser.State != WebSocketState.Open)
+            {
+                return;
+            }
+
+            var unsignedCode = unchecked((uint)exitCode);
+            var exception = new InvalidOperationException($"Scanner exited during an active scan with code 0x{unsignedCode:X8}.");
+            var diagnosticId = HelperLog.RecordException("scanner_process_exited", "scan", exception);
+            await SendAsync("scan_error", new HelperErrorMessage
+            {
+                Code = "scanner_process_exited",
+                Phase = "scan",
+                Title = "Scanner 进程意外退出",
+                Message = $"扫描过程中 Scanner 子进程已退出（退出码 0x{unsignedCode:X8}）。",
+                Remedy = "请重新连接并扫描；持续发生时请打开日志并提供退出码。",
+                Retryable = true,
+                Actions =
+                {
+                    new HelperErrorAction { Kind = "retry_connect", Label = "重新连接" },
+                    new HelperErrorAction { Kind = "open_logs", Label = "打开日志目录" }
+                },
+                DiagnosticId = diagnosticId,
+                Details = new Dictionary<string, string> { ["exitCode"] = $"0x{unsignedCode:X8}" }
+            }, token);
+        }
+
+        private async Task ScannerTransportFailedAsync(Exception exception, CancellationToken token)
+        {
+            if (!_scanActivity.Finish() || _browser.State != WebSocketState.Open)
+            {
+                return;
+            }
+
+            var messageTooLarge = exception is ScannerMessageTooLargeException;
+            var code = messageTooLarge ? "scanner_message_too_large" : "scanner_transport_failed";
+            var diagnosticId = HelperLog.RecordException(code, "scan", exception);
+            await SendAsync("scan_error", new HelperErrorMessage
+            {
+                Code = code,
+                Phase = "scan",
+                Title = messageTooLarge ? "扫描结果消息过大" : "Scanner 结果传输失败",
+                Message = messageTooLarge
+                    ? $"Scanner 返回的单条消息超过 {MaxWebSocketMessageBytes / 1024 / 1024} MiB 安全上限。"
+                    : "Helper 读取或转发 Scanner 结果时发生异常。",
+                Remedy = "已识别结果会由网页安全保留；请更新 Scanner 后重试，持续发生时请打开日志。",
+                Retryable = true,
+                Actions =
+                {
+                    new HelperErrorAction { Kind = "retry_scan", Label = "重新扫描" },
+                    new HelperErrorAction { Kind = "open_logs", Label = "打开日志目录" }
+                },
+                DiagnosticId = diagnosticId
+            }, token);
         }
 
         private async Task SendAsync(string cmd, object? data, CancellationToken token)
@@ -1261,26 +1432,186 @@ internal static partial class Program
         }
     }
 
+    internal sealed class ScanActivityGate
+    {
+        private int _active;
+
+        public bool IsActive => Volatile.Read(ref _active) != 0;
+
+        public void Start()
+        {
+            Volatile.Write(ref _active, 1);
+        }
+
+        public bool Finish()
+        {
+            return Interlocked.Exchange(ref _active, 0) != 0;
+        }
+    }
+
+    internal static async Task RunScannerSupervisorAsync(
+        Func<CancellationToken, Task> pumpMessages,
+        Func<CancellationToken, Task<int>> waitForExit,
+        Func<CancellationToken, Task<int>> terminateAndWait,
+        Func<bool> expectedShutdown,
+        Action stopMessagePump,
+        Func<int, CancellationToken, Task> onExited,
+        Func<Exception, CancellationToken, Task> onPumpFailed,
+        Action<Exception> onPumpFault,
+        CancellationToken token)
+    {
+        using var supervisorCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var pumpTask = pumpMessages(supervisorCts.Token);
+        var exitTask = waitForExit(supervisorCts.Token);
+        var completed = await Task.WhenAny(pumpTask, exitTask);
+
+        if (token.IsCancellationRequested || expectedShutdown())
+        {
+            supervisorCts.Cancel();
+            stopMessagePump();
+            await ObserveAsync(pumpTask, null);
+            await ObserveAsync(exitTask, null);
+            return;
+        }
+
+        int exitCode;
+        Exception? pumpException = null;
+        if (completed == exitTask)
+        {
+            try
+            {
+                exitCode = await exitTask;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested || expectedShutdown())
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                onPumpFault(ex);
+                exitCode = await TerminateSafelyAsync(terminateAndWait, onPumpFault);
+            }
+
+            supervisorCts.Cancel();
+            stopMessagePump();
+            if (!token.IsCancellationRequested && !expectedShutdown())
+            {
+                await onExited(exitCode, CancellationToken.None);
+            }
+
+            await ObserveAsync(pumpTask, onPumpFault);
+            return;
+        }
+        else
+        {
+            try
+            {
+                await pumpTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                pumpException = ex;
+                onPumpFault(ex);
+            }
+            if (token.IsCancellationRequested || expectedShutdown())
+            {
+                supervisorCts.Cancel();
+                await ObserveAsync(exitTask, null);
+                return;
+            }
+
+            supervisorCts.Cancel();
+            stopMessagePump();
+            await ObserveAsync(exitTask, null);
+            exitCode = await TerminateSafelyAsync(terminateAndWait, onPumpFault);
+        }
+
+        if (!token.IsCancellationRequested && !expectedShutdown())
+        {
+            if (pumpException is not null)
+            {
+                await onPumpFailed(pumpException, CancellationToken.None);
+            }
+            else
+            {
+                await onExited(exitCode, CancellationToken.None);
+            }
+        }
+
+        static async Task<int> TerminateSafelyAsync(
+            Func<CancellationToken, Task<int>> terminate,
+            Action<Exception> report)
+        {
+            try
+            {
+                return await terminate(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                report(ex);
+                return -1;
+            }
+        }
+
+        static async Task ObserveAsync(Task task, Action<Exception>? report)
+        {
+            try
+            {
+                await task;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                report?.Invoke(ex);
+            }
+        }
+    }
+
     private sealed class ManagedScannerProcess : IAsyncDisposable
     {
         private readonly ClientWebSocket _scannerWs;
         private readonly Process _process;
-        private readonly Task _pumpTask;
+        private readonly CancellationTokenSource _lifetimeCts;
+        private Task _supervisorTask = Task.CompletedTask;
+        private int _expectedShutdown;
+        private int _disposed;
 
-        private ManagedScannerProcess(ClientWebSocket scannerWs, Process process, Task pumpTask)
+        private ManagedScannerProcess(ClientWebSocket scannerWs, Process process, CancellationToken token)
         {
             _scannerWs = scannerWs;
             _process = process;
-            _pumpTask = pumpTask;
+            _lifetimeCts = CancellationTokenSource.CreateLinkedTokenSource(token);
         }
 
         public bool IsConnected => _scannerWs.State == WebSocketState.Open && !_process.HasExited;
+
+        public int ExitCodeOrUnknown
+        {
+            get
+            {
+                try
+                {
+                    return _process.HasExited ? _process.ExitCode : -1;
+                }
+                catch
+                {
+                    return -1;
+                }
+            }
+        }
 
         public static async Task<ManagedScannerProcess> StartAsync(
             string entryPath,
             string childToken,
             bool elevated,
             Func<string, CancellationToken, Task> forward,
+            Func<int, CancellationToken, Task> onExited,
+            Func<Exception, CancellationToken, Task> onPumpFailed,
             CancellationToken token)
         {
             var port = ReserveTcpPort();
@@ -1302,6 +1633,7 @@ internal static partial class Program
 
                 process = Process.Start(startInfo)
                     ?? throw new InvalidOperationException("Cannot start scanner process.");
+                HelperLog.Write($"SCANNER_PROCESS_STARTED pid={process.Id} entry={entryPath} shell={startInfo.UseShellExecute} elevated={elevated}");
             }
             catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
             {
@@ -1362,21 +1694,9 @@ internal static partial class Program
                         retryable: true);
                 }
 
-                var pump = Task.Run(async () =>
-                {
-                    while (ws.State == WebSocketState.Open && !token.IsCancellationRequested)
-                    {
-                        var msg = await ReceiveTextAsync(ws, token);
-                        if (msg is null)
-                        {
-                            break;
-                        }
-
-                        await forward(msg, token);
-                    }
-                }, token);
-
-                return new ManagedScannerProcess(ws, process, pump);
+                var managed = new ManagedScannerProcess(ws, process, token);
+                managed.StartSupervisor(forward, onExited, onPumpFailed);
+                return managed;
             }
             catch
             {
@@ -1397,31 +1717,38 @@ internal static partial class Program
             }
         }
 
-        public async Task SendRawAsync(string json, CancellationToken token)
+        public async Task<bool> TrySendRawAsync(string json, CancellationToken token)
         {
-            if (_scannerWs.State != WebSocketState.Open)
+            if (!IsConnected)
             {
-                return;
+                return false;
             }
 
-            var bytes = Encoding.UTF8.GetBytes(json);
-            await _scannerWs.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+            try
+            {
+                var bytes = Encoding.UTF8.GetBytes(json);
+                await _scannerWs.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+                return true;
+            }
+            catch (Exception ex) when (
+                ex is WebSocketException or InvalidOperationException or ObjectDisposedException
+                || ex is OperationCanceledException && !token.IsCancellationRequested)
+            {
+                try { _scannerWs.Abort(); } catch { }
+                return false;
+            }
         }
 
         public async ValueTask DisposeAsync()
         {
-            try
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
             {
-                if (_scannerWs.State == WebSocketState.Open)
-                {
-                    await _scannerWs.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
-                }
-            }
-            catch
-            {
+                return;
             }
 
-            _scannerWs.Dispose();
+            Volatile.Write(ref _expectedShutdown, 1);
+            _lifetimeCts.Cancel();
+            try { _scannerWs.Abort(); } catch { }
             try
             {
                 if (!_process.HasExited)
@@ -1433,8 +1760,100 @@ internal static partial class Program
             {
             }
 
-            try { await _pumpTask; } catch { }
+            try { await _supervisorTask; } catch { }
+            _scannerWs.Dispose();
             _process.Dispose();
+            _lifetimeCts.Dispose();
+        }
+
+        private void StartSupervisor(
+            Func<string, CancellationToken, Task> forward,
+            Func<int, CancellationToken, Task> onExited,
+            Func<Exception, CancellationToken, Task> onPumpFailed)
+        {
+            _supervisorTask = RunScannerSupervisorAsync(
+                PumpMessagesAsync,
+                cancellation => WaitForExitCodeAsync(_process, cancellation),
+                cancellation => TerminateAndWaitAsync(_process, cancellation),
+                () => Volatile.Read(ref _expectedShutdown) != 0,
+                () =>
+                {
+                    try { _scannerWs.Abort(); } catch { }
+                },
+                onExited,
+                onPumpFailed,
+                ex => HelperLog.RecordException("scanner_process_pump", "scan", ex),
+                _lifetimeCts.Token);
+
+            async Task PumpMessagesAsync(CancellationToken cancellation)
+            {
+                while (_scannerWs.State == WebSocketState.Open && !cancellation.IsCancellationRequested)
+                {
+                    var message = await ReceiveTextAsync(_scannerWs, cancellation);
+                    if (message is null)
+                    {
+                        break;
+                    }
+
+                    await forward(message, cancellation);
+                }
+            }
+        }
+
+        private static async Task<int> WaitForExitCodeAsync(Process process, CancellationToken token)
+        {
+            var processId = process.Id;
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                if (!IsProcessAlive(processId))
+                {
+                    return -1;
+                }
+
+                await Task.Delay(100, token);
+            }
+        }
+
+        private static bool IsProcessAlive(int processId)
+        {
+            try
+            {
+                using var probe = Process.GetProcessById(processId);
+                return true;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private static async Task<int> TerminateAndWaitAsync(Process process, CancellationToken token)
+        {
+            if (!process.HasExited)
+            {
+                try
+                {
+                    using var graceCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    graceCts.CancelAfter(TimeSpan.FromSeconds(2));
+                    await process.WaitForExitAsync(graceCts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync(CancellationToken.None);
+            }
+
+            return process.ExitCode;
         }
 
         private static HelperFailureException ChildExited(int exitCode)
@@ -1472,7 +1891,7 @@ internal static partial class Program
         }
     }
 
-    private static bool IsAllowedOrigin(string? origin)
+    internal static bool IsAllowedOrigin(string? origin)
     {
         if (string.IsNullOrWhiteSpace(origin))
         {
@@ -1491,7 +1910,7 @@ internal static partial class Program
 
     private static void AddCorsHeaders(HttpListenerResponse response, string? origin)
     {
-        if (IsAllowedOrigin(origin))
+        if (IsCorsReadableOrigin(origin))
         {
             response.Headers["Access-Control-Allow-Origin"] = origin;
         }
@@ -1499,6 +1918,12 @@ internal static partial class Program
         response.Headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS";
         response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
         response.Headers["Access-Control-Allow-Private-Network"] = "true";
+    }
+
+    internal static bool IsCorsReadableOrigin(string? origin)
+    {
+        return Uri.TryCreate(origin, UriKind.Absolute, out var parsed)
+            && parsed.Scheme is "http" or "https";
     }
 
     private static async Task SendJsonAsync(HttpListenerResponse response, int statusCode, object payload, CancellationToken token)
@@ -1546,10 +1971,7 @@ internal static partial class Program
                 throw new InvalidDataException("Helper WebSocket accepts text messages only.");
             }
 
-            if (stream.Length + result.Count > MaxWebSocketMessageBytes)
-            {
-                throw new InvalidDataException($"Helper WebSocket message exceeds {MaxWebSocketMessageBytes} bytes.");
-            }
+            EnsureScannerMessageSize(stream.Length, result.Count);
 
             stream.Write(buffer, 0, result.Count);
             if (result.EndOfMessage)
@@ -1558,6 +1980,17 @@ internal static partial class Program
             }
         }
     }
+
+    internal static void EnsureScannerMessageSize(long currentLength, int incomingLength)
+    {
+        if (currentLength < 0 || incomingLength < 0 || currentLength + incomingLength > MaxWebSocketMessageBytes)
+        {
+            throw new ScannerMessageTooLargeException(MaxWebSocketMessageBytes);
+        }
+    }
+
+    internal sealed class ScannerMessageTooLargeException(int maximumBytes)
+        : IOException($"Helper WebSocket message exceeds {maximumBytes} bytes.");
 
     private sealed class HelperEnvelope
     {
@@ -1592,6 +2025,7 @@ internal static partial class Program
         public string Version { get; set; } = "";
         public int ProtocolVersion { get; set; }
         public ScannerState Scanner { get; set; } = new();
+        public HelperUpdateTransactionInfo? HelperUpdate { get; set; }
     }
 
     private sealed class HelperHello
@@ -1600,6 +2034,7 @@ internal static partial class Program
         public string Version { get; set; } = "";
         public int ProtocolVersion { get; set; }
         public ScannerState Scanner { get; set; } = new();
+        public HelperUpdateTransactionInfo? HelperUpdate { get; set; }
     }
 
     private sealed class ScannerState
@@ -1632,10 +2067,20 @@ internal static partial class Program
 
     private sealed class HelperDiagnosticsResponse
     {
+        public string RequestId { get; set; } = "";
         public string HelperVersion { get; set; } = "";
         public int ProtocolVersion { get; set; }
         public string LogDirectory { get; set; } = "";
         public ScannerState Scanner { get; set; } = new();
+        public HelperUpdateTransactionInfo? HelperUpdate { get; set; }
+    }
+
+    private sealed class HelperUpdateCommitResponse
+    {
+        public string RequestId { get; set; } = "";
+        public string TransactionId { get; set; } = "";
+        public bool Committed { get; set; }
+        public string PreviousVersion { get; set; } = "";
     }
 
     private sealed class StorageInfoResponse
@@ -1678,6 +2123,8 @@ internal static partial class Program
     [JsonSerializable(typeof(StorageCleanupResponse))]
     [JsonSerializable(typeof(HelperUpdateProgress))]
     [JsonSerializable(typeof(HelperUpdateResponse))]
+    [JsonSerializable(typeof(HelperUpdateTransactionInfo))]
+    [JsonSerializable(typeof(HelperUpdateCommitResponse))]
     [JsonSerializable(typeof(PongMessage))]
     [JsonSourceGenerationOptions(
         PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
