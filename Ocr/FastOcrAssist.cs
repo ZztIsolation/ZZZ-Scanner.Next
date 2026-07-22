@@ -14,12 +14,20 @@ public sealed class FastOcrAssistEngine
     private readonly FastOcrTemplateIndex _index;
     private readonly Action<string> _log;
     private readonly ProfileRoutingMode _profileRoutingMode;
+    private readonly IReadOnlyDictionary<string, FastOcrTemplateCoverage> _labelCoverageByField;
     private readonly object _healthSync = new();
     private int _healthItems;
     private int _healthAccepted;
     private bool _disabledByHealth;
 
-    private FastOcrAssistEngine(string indexFile, IReadOnlyList<string> fieldKeys, FastOcrTemplateIndex index, string visualProfileId, ProfileRoutingMode profileRoutingMode, Action<string> log)
+    private FastOcrAssistEngine(
+        string indexFile,
+        IReadOnlyList<string> fieldKeys,
+        FastOcrTemplateIndex index,
+        string visualProfileId,
+        ProfileRoutingMode profileRoutingMode,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> requiredLabelsByField,
+        Action<string> log)
     {
         IndexFile = Path.GetFullPath(indexFile);
         _fieldKeys = fieldKeys.ToArray();
@@ -27,6 +35,12 @@ public sealed class FastOcrAssistEngine
         VisualProfileId = FastOcrTemplateIndex.NormalizeProfileId(visualProfileId);
         _profileRoutingMode = profileRoutingMode;
         _log = log;
+        _labelCoverageByField = requiredLabelsByField
+            .Where(pair => FastOcrTemplateIndex.IsSupportedField(pair.Key) && pair.Value.Count > 0)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => _index.DescribeLabelCoverage(pair.Key, VisualProfileId, _profileRoutingMode, pair.Value),
+                StringComparer.OrdinalIgnoreCase);
     }
 
     public string IndexFile { get; }
@@ -46,6 +60,7 @@ public sealed class FastOcrAssistEngine
         IReadOnlyList<string> fieldKeys,
         string visualProfileId,
         ProfileRoutingMode profileRoutingMode,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> requiredLabelsByField,
         Action<string> log)
     {
         indexFile = string.IsNullOrWhiteSpace(indexFile)
@@ -67,7 +82,7 @@ public sealed class FastOcrAssistEngine
                 return null;
             }
 
-            var engine = new FastOcrAssistEngine(indexFile, fieldKeys, index, visualProfileId, profileRoutingMode, log);
+            var engine = new FastOcrAssistEngine(indexFile, fieldKeys, index, visualProfileId, profileRoutingMode, requiredLabelsByField, log);
             engine.LogProfileRoutes();
             return engine;
         }
@@ -115,6 +130,13 @@ public sealed class FastOcrAssistEngine
             }
 
             var route = _index.DescribeRoute(fieldKey, VisualProfileId, _profileRoutingMode);
+            if (_labelCoverageByField.TryGetValue(fieldKey, out var coverage) && !coverage.IsComplete)
+            {
+                AddPpOcr();
+                decisions.Add(FastOcrAssistDecision.PpOcr(itemIndex, roiIndex, fieldKey, rarity, "template_label_coverage_incomplete", source: "fallback"));
+                continue;
+            }
+
             var policy = _index.PolicyForField(fieldKey, route.PolicyProfileId);
             if (!policy.AssistEnabled)
             {
@@ -174,7 +196,19 @@ public sealed class FastOcrAssistEngine
             var route = _index.DescribeRoute(fieldKey, VisualProfileId, _profileRoutingMode);
             _log($"FAST_OCR_PROFILE_ROUTE field={fieldKey}, requestedProfile={route.RequestedProfileId}, policyProfile={route.PolicyProfileId}, profileFamily={route.ProfileFamilyId}, route={route.RouteName}, templates={route.TemplateCount}, mode={_profileRoutingMode}, reason={route.Reason}");
             _log($"FAST_OCR_PROFILE_FAMILY_ROUTE field={fieldKey}, requestedProfile={route.RequestedProfileId}, profileFamily={route.ProfileFamilyId}, route={route.RouteName}, templates={route.TemplateCount}, mode={_profileRoutingMode}");
+            if (_labelCoverageByField.TryGetValue(fieldKey, out var coverage))
+            {
+                var missingLabels = string.Join("|", coverage.MissingLabels.Select(SanitizeLogLabel));
+                _log($"FAST_OCR_TEMPLATE_COVERAGE field={fieldKey}, requestedProfile={coverage.RequestedProfileId}, policyProfile={coverage.PolicyProfileId}, profileFamily={coverage.ProfileFamilyId}, route={coverage.RouteName}, templates={coverage.TemplateCount}, labels={coverage.LabelCount}, missingCount={coverage.MissingLabels.Count}, complete={coverage.IsComplete.ToString(CultureInfo.InvariantCulture).ToLowerInvariant()}, missingLabels={missingLabels}");
+            }
         }
+    }
+
+    private static string SanitizeLogLabel(string label)
+    {
+        return string.Concat(label
+            .Where(character => !char.IsControl(character) && character != ',' && character != '|' && character != '=')
+            .Take(64));
     }
 
     private bool IsDisabledByHealth()

@@ -1,15 +1,15 @@
 {
-  "version": "2026-05-19",
+  "version": "2026-07-22",
   "source": {
     "page": "https://wiki.biligame.com/zzz/%E9%A9%B1%E5%8A%A8%E7%9B%98",
-    "notes": "Main/sub stat candidates and value ranges are organized from the BiliGame drive disc page. A few B-rarity blank values are retained as estimated candidates so the scanner can still correct OCR when a B disc is present."
+    "notes": "Main/sub stat candidates and value ranges are organized from the BiliGame drive disc page. Wind damage bonus is treated as another slot-V elemental damage candidate and uses the same progression as the existing elemental damage bonuses. A few B-rarity blank values are retained as estimated candidates so the scanner can still correct OCR when a B disc is present."
   },
   "slotMainStats": {
     "1": ["生命值"],
     "2": ["攻击力"],
     "3": ["防御力"],
     "4": ["生命值", "攻击力", "防御力", "异常精通", "暴击率", "暴击伤害"],
-    "5": ["生命值", "攻击力", "防御力", "穿透率", "物理伤害加成", "火属性伤害加成", "冰属性伤害加成", "电属性伤害加成", "以太伤害加成"],
+    "5": ["生命值", "攻击力", "防御力", "穿透率", "物理伤害加成", "火属性伤害加成", "冰属性伤害加成", "电属性伤害加成", "以太伤害加成", "风属性伤害加成"],
     "6": ["生命值", "攻击力", "防御力", "能量自动回复", "异常掌控", "冲击力"]
   },
   "mainStatAliases": {
@@ -43,6 +43,7 @@
       "冰属性伤害加成%": ["7.50%", "1.50%", "30%"],
       "电属性伤害加成%": ["7.50%", "1.50%", "30%"],
       "以太伤害加成%": ["7.50%", "1.50%", "30%"],
+      "风属性伤害加成%": ["7.50%", "1.50%", "30%"],
       "穿透率%": ["6%", "1.20%", "24%"],
       "冲击力%": ["4.50%", "0.90%", "18%"],
       "异常掌控%": ["7.50%", "1.50%", "30%"],
@@ -63,6 +64,7 @@
       "冰属性伤害加成%": ["5.00%", "1.25%", "20.00%"],
       "电属性伤害加成%": ["5.00%", "1.25%", "20.00%"],
       "以太伤害加成%": ["5.00%", "1.25%", "20.00%"],
+      "风属性伤害加成%": ["5.00%", "1.25%", "20.00%"],
       "穿透率%": ["4.00%", "1.00%", "16.00%"],
       "冲击力%": ["3.00%", "0.75%", "12.00%"],
       "异常掌控%": ["5.00%", "1.25%", "20.00%"],
@@ -83,6 +85,7 @@
       "冰属性伤害加成%": ["2.50%", "0.8333%", "10.00%"],
       "电属性伤害加成%": ["2.50%", "0.8333%", "10.00%"],
       "以太伤害加成%": ["2.50%", "0.8333%", "10.00%"],
+      "风属性伤害加成%": ["2.50%", "0.8333%", "10.00%"],
       "穿透率%": ["2.00%", "0.67%", "8.00%"],
       "冲击力%": ["1.50%", "0.50%", "6.00%"],
       "异常掌控%": ["2.50%", "0.83%", "10.00%"],
