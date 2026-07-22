@@ -363,6 +363,37 @@ public sealed class FastOcrTemplateIndex
             route.Reason);
     }
 
+    public FastOcrTemplateCoverage DescribeLabelCoverage(
+        string fieldKey,
+        string visualProfileId,
+        ProfileRoutingMode routingMode,
+        IReadOnlyCollection<string> requiredLabels)
+    {
+        var normalizedProfileId = NormalizeProfileId(visualProfileId);
+        var route = ResolveTemplateRoute(fieldKey, normalizedProfileId, routingMode);
+        var availableLabels = route.Templates
+            .Select(template => template.Label)
+            .Where(label => !string.IsNullOrWhiteSpace(label))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missingLabels = requiredLabels
+            .Where(label => !string.IsNullOrWhiteSpace(label))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(label => !availableLabels.Contains(label))
+            .OrderBy(label => label, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return new FastOcrTemplateCoverage(
+            fieldKey,
+            normalizedProfileId,
+            route.PolicyProfileId,
+            route.RouteName,
+            route.ProfileFamilyId,
+            route.Templates.Count,
+            availableLabels.Count,
+            missingLabels,
+            route.Reason);
+    }
+
     private TemplateRoute ResolveTemplateRoute(string fieldKey, string visualProfileId, ProfileRoutingMode routingMode)
     {
         var normalizedProfileId = NormalizeProfileId(visualProfileId);
@@ -752,6 +783,20 @@ public sealed record FastOcrMatch(
 {
     public static FastOcrMatch Empty(string fieldKey, string reason) =>
         new(fieldKey, "", 0, FastOcrImageFeature.CurrentBitCount, 0, "", "", "", "", 0, 0, false, FastOcrTemplateIndex.DefaultMinScore, FastOcrTemplateIndex.DefaultMinMargin, false, false, 0, reason);
+}
+
+public sealed record FastOcrTemplateCoverage(
+    string FieldKey,
+    string RequestedProfileId,
+    string PolicyProfileId,
+    string RouteName,
+    string ProfileFamilyId,
+    int TemplateCount,
+    int LabelCount,
+    IReadOnlyList<string> MissingLabels,
+    string Reason)
+{
+    public bool IsComplete => MissingLabels.Count == 0;
 }
 
 public sealed class FastOcrImageFeature

@@ -35,6 +35,9 @@ internal static class Program
             ("managed OCR preprocessing", TestManagedOcrPreprocessingAsync),
             ("OCR output equivalence", TestOcrOutputEquivalenceAsync),
             ("variable substat cleaning", TestVariableSubstatCleaningAsync),
+            ("wind main-stat cleaning", TestWindMainStatCleaningAsync),
+            ("main-stat value rule coverage", TestMainStatValueRuleCoverageAsync),
+            ("fast OCR required label coverage", TestFastOcrRequiredLabelCoverageAsync),
             ("legacy wire capacity", TestLegacyWireCapacityAsync),
             ("browser origin allowlist", TestBrowserOriginAllowlistAsync),
             ("capture source serialization", TestCaptureSourceSerializationAsync),
@@ -719,6 +722,185 @@ internal static class Program
             AssertEqual(12, export.Level);
             AssertEqual(15, export.MaxLevel);
             AssertEqual(count, export.SubStats.Count);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestWindMainStatCleaningAsync()
+    {
+        var wikiData = WikiData.Load();
+        var cleaner = new DriveDiscCleaner(wikiData);
+        var cases = new[]
+        {
+            (Rarity: "S", MaxLevel: 15, Value: "30%"),
+            (Rarity: "A", MaxLevel: 12, Value: "20%"),
+            (Rarity: "B", MaxLevel: 9, Value: "10%")
+        };
+
+        foreach (var testCase in cases)
+        {
+            var export = cleaner.Clean(1, testCase.Rarity,
+            [
+                new OcrResult(1, "呼啸沙龙[5]"),
+                new OcrResult(1, $"等级{testCase.MaxLevel:D2}/{testCase.MaxLevel:D2}"),
+                new OcrResult(1, "风属性伤害加成"),
+                new OcrResult(1, testCase.Value)
+            ]);
+
+            AssertEqual(5, export.Slot);
+            AssertEqual("风属性伤害加成", export.MainStat.Single().Key);
+            AssertEqual(testCase.Value, (string)export.MainStat.Single().Value);
+        }
+
+        var inferred = cleaner.Clean(2, "S",
+        [
+            new OcrResult(1, "呼啸沙龙"),
+            new OcrResult(1, "等级15/15"),
+            new OcrResult(1, "风属性伤害加成"),
+            new OcrResult(1, "30%")
+        ]);
+        AssertEqual(5, inferred.Slot);
+
+        foreach (var invalidSlot in new[] { 4, 6 })
+        {
+            var invalid = new DriveDiscExport
+            {
+                Slot = invalidSlot,
+                Rarity = "S",
+                Level = 15,
+                MaxLevel = 15,
+                MainStat = new Dictionary<string, object> { ["风属性伤害加成"] = "30%" }
+            };
+            var issues = DriveDiscSlotSafety.Validate(invalid, wikiData.StatRules);
+            AssertTrue(issues.Any(issue => issue.Code == DriveDiscSlotSafety.SlotMainStatViolation),
+                $"Expected slot_mainstat_violation for wind damage in slot {invalidSlot}.");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestMainStatValueRuleCoverageAsync()
+    {
+        var rules = WikiData.Load().StatRules;
+        foreach (var (slotText, candidates) in rules.SlotMainStats)
+        {
+            var slot = int.Parse(slotText, CultureInfo.InvariantCulture);
+            foreach (var (rarity, values) in rules.MainStatValues)
+            {
+                foreach (var candidate in candidates)
+                {
+                    var requiresPercent = slot >= 4 && candidate is "生命值" or "攻击力" or "防御力";
+                    var hasRule = requiresPercent
+                        ? values.ContainsKey($"{candidate}%")
+                        : values.ContainsKey(candidate) || values.ContainsKey($"{candidate}%");
+                    AssertTrue(hasRule, $"Missing {rarity} main-stat value rule for slot {slot} candidate {candidate}.");
+                }
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestFastOcrRequiredLabelCoverageAsync()
+    {
+        const string requestedProfile = "local-1920x1080-current";
+        const string otherProfile = "cloud-1920x1080-current";
+        var root = Path.Combine(Path.GetTempPath(), "zzz-fast-ocr-coverage-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var indexFile = Path.Combine(root, "index.json");
+
+        try
+        {
+            using var image = new Bitmap(32, 16);
+            for (var y = 0; y < image.Height; y++)
+            {
+                for (var x = 0; x < image.Width; x++)
+                {
+                    var light = x < 16 ? (x + y) % 4 == 0 : (x * 3 + y) % 5 <= 1;
+                    image.SetPixel(x, y, light ? Color.White : Color.Black);
+                }
+            }
+
+            var mainStatRoi = new Rectangle(0, 0, 16, 16);
+            var levelRoi = new Rectangle(16, 0, 16, 16);
+            var mainStatBits = FastOcrImageFeature.FromBitmap(image, mainStatRoi).ToHexWords();
+            var levelBits = FastOcrImageFeature.FromBitmap(image, levelRoi).ToHexWords();
+            var alternateBits = mainStatBits
+                .Select(word => (~ulong.Parse(word, NumberStyles.HexNumber, CultureInfo.InvariantCulture)).ToString("X16", CultureInfo.InvariantCulture))
+                .ToArray();
+            var requiredLabels = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["mainStat"] = ["攻击力", "风属性伤害加成"]
+            };
+
+            SaveIndex(includeWindInRequestedProfile: false);
+            var logs = new List<string>();
+            var guarded = FastOcrAssistEngine.TryCreate(
+                indexFile,
+                ["mainStat", "level"],
+                requestedProfile,
+                ProfileRoutingMode.Strict,
+                requiredLabels,
+                logs.Add) ?? throw new InvalidOperationException("Expected Fast OCR assist engine.");
+            var guardedPlan = guarded.Plan(1, "S", image, [mainStatRoi, levelRoi]);
+            AssertEqual(1, guardedPlan.PpOcrIndices.Length);
+            AssertEqual(0, guardedPlan.PpOcrIndices[0]);
+            AssertEqual("template_label_coverage_incomplete", guardedPlan.Decisions.Single(decision => decision.FieldKey == "mainStat").Reason);
+            AssertEqual("fast", guardedPlan.Decisions.Single(decision => decision.FieldKey == "level").Source);
+            AssertTrue(logs.Any(line => line.Contains("FAST_OCR_TEMPLATE_COVERAGE", StringComparison.Ordinal)
+                && line.Contains("missingLabels=风属性伤害加成", StringComparison.Ordinal)),
+                "Expected startup coverage diagnostics to name the missing wind label.");
+
+            SaveIndex(includeWindInRequestedProfile: true);
+            var complete = FastOcrAssistEngine.TryCreate(
+                indexFile,
+                ["mainStat", "level"],
+                requestedProfile,
+                ProfileRoutingMode.Strict,
+                requiredLabels,
+                _ => { }) ?? throw new InvalidOperationException("Expected Fast OCR assist engine.");
+            var completePlan = complete.Plan(2, "S", image, [mainStatRoi, levelRoi]);
+            AssertEqual(0, completePlan.PpOcrIndices.Length);
+            var mainStatDecision = completePlan.Decisions.Single(decision => decision.FieldKey == "mainStat");
+            AssertEqual("fast", mainStatDecision.Source);
+            AssertEqual("攻击力", mainStatDecision.FastLabel);
+
+            void SaveIndex(bool includeWindInRequestedProfile)
+            {
+                var templates = new List<FastOcrTemplate>
+                {
+                    Template("mainStat", "攻击力", requestedProfile, mainStatBits),
+                    Template("mainStat", "风属性伤害加成", otherProfile, alternateBits),
+                    Template("level", "15/15", requestedProfile, levelBits)
+                };
+                if (includeWindInRequestedProfile)
+                {
+                    templates.Add(Template("mainStat", "风属性伤害加成", requestedProfile, alternateBits));
+                }
+
+                new FastOcrTemplateIndex
+                {
+                    Feature = FastOcrTemplateIndex.CurrentFeature,
+                    Templates = templates
+                }.Save(indexFile);
+            }
+
+            static FastOcrTemplate Template(string fieldKey, string label, string profile, string[] bits)
+            {
+                return new FastOcrTemplate
+                {
+                    FieldKey = fieldKey,
+                    Label = label,
+                    VisualProfileId = profile,
+                    ProfileFamilyId = FastOcrTemplateIndex.ProfileFamilyId(profile),
+                    Bits = bits
+                };
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
         }
 
         return Task.CompletedTask;

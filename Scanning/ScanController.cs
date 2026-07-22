@@ -255,7 +255,22 @@ public sealed class ScanController
 
                 if (options.FastOcrAssist)
                 {
-                    fastOcrAssist = FastOcrAssistEngine.TryCreate(options.FastOcrTemplateIndexFile, profile.OrderedRoiKeys(), visualProfile.ProfileId, options.ProfileRouting, scanLog.Write);
+                    var requiredFastOcrLabels = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["mainStat"] = _wikiData.StatRules.SlotMainStats.Values
+                            .SelectMany(stats => stats)
+                            .Where(stat => !string.IsNullOrWhiteSpace(stat))
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .OrderBy(stat => stat, StringComparer.OrdinalIgnoreCase)
+                            .ToArray()
+                    };
+                    fastOcrAssist = FastOcrAssistEngine.TryCreate(
+                        options.FastOcrTemplateIndexFile,
+                        profile.OrderedRoiKeys(),
+                        visualProfile.ProfileId,
+                        options.ProfileRouting,
+                        requiredFastOcrLabels,
+                        scanLog.Write);
                     fastOcrAssistRecorder = fastOcrAssist?.CreateRecorder(outputDir);
                     if (fastOcrAssist is not null)
                     {

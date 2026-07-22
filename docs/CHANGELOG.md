@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 2026-07-22 1.0.44
+
+- Scanner 的 5 号位主属性候选新增“风属性伤害加成”，补齐 S/A/B 品质的元素伤害数值范围，并支持在名称未识别出盘位时依据该词条推断为 5 号位；4、6 号位仍会触发槽位安全拒绝。
+- Fast OCR assist 现在按实际视觉配置路由检查主属性模板标签覆盖率。当前正式模板不包含真实风属性样本，因此仅 `mainStat` 回退 PP-OCR，其他字段继续使用快速识别；后续补齐该路由的真实模板后会自动恢复。
+- Scanner 版本升至 1.0.44；WebSocket、导出 JSON 和 Helper 协议保持不变，Helper 继续使用 1.3.1。
 - 仓库维护现在会在 pull request 与 `main` push 时自动执行原生回归和两个 Release 构建。未来 manifest 使用本仓库 Release 作为 GitHub fallback；已经发布的 1.0.43/1.3.1 manifest 与二进制保持不变。
 
 ## 2026-07-22 1.0.43 / Helper 1.3.1

@@ -108,7 +108,7 @@ public static class DriveDiscSlotSafety
             "攻击力" when !percent => 2,
             "防御力" when !percent => 3,
             "暴击率" or "暴击伤害" or "异常精通" => 4,
-            "穿透率" or "物理伤害加成" or "火属性伤害加成" or "冰属性伤害加成" or "电属性伤害加成" or "以太伤害加成" => 5,
+            "穿透率" or "物理伤害加成" or "火属性伤害加成" or "冰属性伤害加成" or "电属性伤害加成" or "以太伤害加成" or "风属性伤害加成" => 5,
             "能量自动回复" or "异常掌控" or "冲击力" => 6,
             _ => 0
         };

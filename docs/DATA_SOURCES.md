@@ -16,6 +16,7 @@
   - `subStats`：副词条候选。
   - `mainStatValues` / `subStatValues`：S/A/B 品质的合法数值范围。
   - `mainStatAliases` / `subStatAliases`：wiki 文案和游戏内文案之间的别名映射。
+  - V 号位的各元素伤害加成使用同档数值成长；新增元素时必须同时补齐候选和 S/A/B 三档数值规则。
 
 - `Data/scan_profiles.json`
   - 背包 UI 点位、颜色、详情区 OCR 裁剪矩形。
