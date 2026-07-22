@@ -20,8 +20,6 @@ public sealed class ScanController
     private const double MinReliablePanelChangeMs = 25.0;
     private const int ListMovementTolerance = 6;
     private const int ListStableTolerance = 4;
-    private const int ScrollTopThumbMinimumLuminance = 24;
-    private const int ScrollTopThumbMinimumContrast = 16;
     private const int RowShiftMatchTolerance = 36;
     private const int RowShiftClearMargin = 8;
     private const int RowShiftLooseMargin = 12;
@@ -581,104 +579,85 @@ public sealed class ScanController
     {
         Report(progress, counters, "正在将驱动盘列表拉到最上方。");
         var scrollTop = window.ToScreenPoint(profile.Point("scrollBarTop"));
-        window.MoveCursor(window.ToScreenPoint(profile.Point("listWheelArea")));
+        var wheelPoint = window.ToScreenPoint(profile.Point("listWheelArea"));
+        var expectedColor = profile.Color("scrollBar");
+        var maximumWheelTicks = Math.Min(
+            Math.Max(0, profile.ResetToTopWheelTicks),
+            ScrollTopResetCoordinator.MaximumWheelTicks);
+        window.MoveCursor(wheelPoint);
         var resetDelay = Math.Clamp(profile.ResetToTopWheelDelayMs, 20, 80);
-        var initialProbe = CaptureScrollTopProbe(window, profile);
-        scanLog.WriteEvent(
-            "RESET_TOP_PROBE",
-            $"phase=initial, detected={initialProbe.Detected}, topLuma={initialProbe.TopLuminance}, trackLuma={initialProbe.TrackLuminance}");
-        var reachedTop = initialProbe.Detected;
-        for (var i = 0; !reachedTop && i < profile.ResetToTopWheelTicks; i++)
+
+        void Trace(ScrollTopResetTrace trace)
         {
-            token.ThrowIfCancellationRequested();
-            scanLog.WriteEvent("RESET_WHEEL", $"tick={i + 1}/{profile.ResetToTopWheelTicks}, delta=120, cursor={window.ToScreenPoint(profile.Point("listWheelArea"))}");
-            window.MouseWheel(120);
-            if (resetDelay > 0)
+            switch (trace.Kind)
             {
-                await Task.Delay(resetDelay, token);
-            }
-
-            if ((i + 1) % 4 != 0 && i + 1 < profile.ResetToTopWheelTicks)
-            {
-                continue;
-            }
-
-            var probe = CaptureScrollTopProbe(window, profile);
-            scanLog.WriteEvent(
-                "RESET_TOP_PROBE",
-                $"phase=wheel, tick={i + 1}, detected={probe.Detected}, topLuma={probe.TopLuminance}, trackLuma={probe.TrackLuminance}");
-            reachedTop = probe.Detected;
-        }
-
-        if (reachedTop)
-        {
-            scanLog.Write("Reset confirmed the scrollbar thumb at the top.");
-        }
-        else
-        {
-            scanLog.Write($"Reset top probe did not confirm after {profile.ResetToTopWheelTicks} ticks; using explicit top click fallback.");
-            scanLog.WriteEvent("RESET_TOP_CLICK", $"point={scrollTop}");
-            window.LeftClick(scrollTop, durationMs: 30);
-            await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
-            var fallbackProbe = CaptureScrollTopProbe(window, profile);
-            scanLog.WriteEvent(
-                "RESET_TOP_PROBE",
-                $"phase=fallback, detected={fallbackProbe.Detected}, topLuma={fallbackProbe.TopLuminance}, trackLuma={fallbackProbe.TrackLuminance}");
-        }
-    }
-
-    private static ScrollTopProbeResult CaptureScrollTopProbe(GameWindow window, ScanProfile profile)
-    {
-        var point = window.ToScreenPoint(profile.Point("scrollBarTop"));
-        var scaleX = window.ClientScreenRect.Width / (double)profile.StandardScreen[0];
-        var scaleY = window.ClientScreenRect.Height / (double)profile.StandardScreen[1];
-        var width = Math.Max(5, (int)Math.Round(9 * scaleX));
-        var topHeight = Math.Max(10, (int)Math.Round(18 * scaleY));
-        var trackOffset = Math.Max(topHeight + 8, (int)Math.Round(38 * scaleY));
-        var trackHeight = topHeight;
-        var requested = new Rectangle(
-            point.X - width / 2,
-            point.Y,
-            width,
-            trackOffset + trackHeight);
-        var captureRect = Rectangle.Intersect(window.ClientScreenRect, requested);
-        using var frame = window.CaptureFrame(captureRect);
-        var topRect = new Rectangle(0, 0, frame.Width, Math.Min(topHeight, frame.Height));
-        var trackTop = Math.Min(trackOffset, Math.Max(0, frame.Height - 1));
-        var trackRect = new Rectangle(0, trackTop, frame.Width, Math.Min(trackHeight, frame.Height - trackTop));
-        return EvaluateScrollTopProbe(frame, topRect, trackRect);
-    }
-
-    internal static ScrollTopProbeResult EvaluateScrollTopProbe(
-        CapturedFrame image,
-        Rectangle topRect,
-        Rectangle trackRect)
-    {
-        var topLuminance = MeanLuminance(image, topRect);
-        var trackLuminance = MeanLuminance(image, trackRect);
-        return new ScrollTopProbeResult(
-            topLuminance >= ScrollTopThumbMinimumLuminance
-                && topLuminance - trackLuminance >= ScrollTopThumbMinimumContrast,
-            topLuminance,
-            trackLuminance);
-    }
-
-    private static int MeanLuminance(CapturedFrame image, Rectangle rect)
-    {
-        rect = ClampRectangle(rect, image.Size);
-        var sum = 0L;
-        var count = 0;
-        for (var y = rect.Top; y < rect.Bottom; y++)
-        {
-            for (var x = rect.Left; x < rect.Right; x++)
-            {
-                var color = image.GetPixel(x, y);
-                sum += (color.R * 299 + color.G * 587 + color.B * 114) / 1000;
-                count++;
+                case ScrollTopResetTraceKind.Probe:
+                    scanLog.WriteEvent(
+                        "RESET_TOP_COLOR_PROBE",
+                        $"phase={trace.Phase}, batch={trace.Batch}, sample={trace.Sample}/{ScrollTopResetCoordinator.ProbeSampleCount}, tick={trace.WheelTicks}/{maximumWheelTicks}, actual={ColorText(trace.ActualColor)}, expected={ColorText(trace.ExpectedColor)}, delta=({Math.Abs(trace.ActualColor.R - trace.ExpectedColor.R)},{Math.Abs(trace.ActualColor.G - trace.ExpectedColor.G)},{Math.Abs(trace.ActualColor.B - trace.ExpectedColor.B)}), tolerance={trace.Tolerance}, matched={trace.Matched}, stableMatches={trace.StableMatches}/{ScrollTopResetCoordinator.RequiredStableMatches}, elapsedMs={trace.ElapsedMilliseconds}");
+                    break;
+                case ScrollTopResetTraceKind.Wheel:
+                    scanLog.WriteEvent(
+                        "RESET_WHEEL",
+                        $"batch={trace.Batch}, tick={trace.WheelTicks}/{maximumWheelTicks}, delta=120, cursor={wheelPoint}, elapsedMs={trace.ElapsedMilliseconds}");
+                    break;
+                case ScrollTopResetTraceKind.Settle:
+                    scanLog.WriteEvent(
+                        "RESET_TOP_SETTLE",
+                        $"phase={trace.Phase}, batch={trace.Batch}, tick={trace.WheelTicks}/{maximumWheelTicks}, delayMs={trace.DelayMilliseconds}, elapsedMs={trace.ElapsedMilliseconds}");
+                    break;
+                case ScrollTopResetTraceKind.Click:
+                    scanLog.WriteEvent(
+                        "RESET_TOP_CLICK",
+                        $"point={scrollTop}, click={trace.TopClicks}, tick={trace.WheelTicks}/{maximumWheelTicks}, elapsedMs={trace.ElapsedMilliseconds}");
+                    break;
+                case ScrollTopResetTraceKind.Confirmed:
+                    scanLog.WriteEvent(
+                        "RESET_TOP_CONFIRMED",
+                        $"phase={trace.Phase}, batch={trace.Batch}, tick={trace.WheelTicks}/{maximumWheelTicks}, clicks={trace.TopClicks}, actual={ColorText(trace.ActualColor)}, expected={ColorText(trace.ExpectedColor)}, stableMatches={trace.StableMatches}/{ScrollTopResetCoordinator.RequiredStableMatches}, elapsedMs={trace.ElapsedMilliseconds}");
+                    break;
+                case ScrollTopResetTraceKind.Failed:
+                    scanLog.WriteEvent(
+                        "RESET_TOP_FAILED",
+                        $"reason=scroll_top_color_unconfirmed, phase={trace.Phase}, batch={trace.Batch}, tick={trace.WheelTicks}/{maximumWheelTicks}, clicks={trace.TopClicks}, actual={ColorText(trace.ActualColor)}, expected={ColorText(trace.ExpectedColor)}, tolerance={trace.Tolerance}, elapsedMs={trace.ElapsedMilliseconds}");
+                    break;
             }
         }
 
-        return count == 0 ? 0 : (int)(sum / count);
+        var result = await ScrollTopResetCoordinator.RunAsync(
+            maximumWheelTicks,
+            resetDelay,
+            profile.ClickDelayMs,
+            expectedColor,
+            profile.ColorTolerance,
+            () => window.GetPixel(scrollTop),
+            () => window.MouseWheel(120),
+            () =>
+            {
+                window.LeftClick(scrollTop, durationMs: 30);
+                window.MoveCursor(wheelPoint);
+            },
+            Trace,
+            token);
+        if (!result.Confirmed)
+        {
+            throw NavigationFailure(
+                "驱动盘列表顶部颜色探针在有界滚轮和顶部点击后仍未确认。为避免继续上滑或从错误位置扫描，本次已停止。",
+                new Dictionary<string, object?>
+                {
+                    ["phase"] = "reset_to_top",
+                    ["acceptGateReason"] = "scroll_top_color_unconfirmed",
+                    ["wheelTicks"] = result.WheelTicks,
+                    ["topClicks"] = result.TopClicks,
+                    ["probeSamples"] = result.ProbeSamples,
+                    ["actualColor"] = ColorText(result.LastActualColor),
+                    ["expectedColor"] = ColorText(expectedColor),
+                    ["colorTolerance"] = profile.ColorTolerance,
+                    ["elapsedMs"] = result.ElapsedMilliseconds
+                });
+        }
+
+        scanLog.Write($"Reset confirmed the scrollbar thumb at the top via {result.Phase}; wheelTicks={result.WheelTicks}, clicks={result.TopClicks}, elapsedMs={result.ElapsedMilliseconds}.");
     }
 
     private static async Task ProduceCapturesAsync(
@@ -4614,11 +4593,14 @@ public sealed class ScanController
         "请确认仓库数量区域完整可见，并关闭遮挡或缩放后重试。",
         details);
 
-    private static ScannerFailureException NavigationFailure(string message) => new(
+    private static ScannerFailureException NavigationFailure(
+        string message,
+        IReadOnlyDictionary<string, object?>? details = null) => new(
         "scan_navigation_failed",
         "驱动盘列表滚动失败",
         message,
-        "请保持游戏前台且不要操作鼠标滚轮，然后重新扫描。");
+        "请保持游戏前台且不要操作鼠标滚轮，然后重新扫描。",
+        details);
 
     private static void Report(IProgress<ScanProgress> progress, Counters counters, string message, DriveDiscExport? item = null, Bitmap? debugImage = null)
     {
@@ -5650,10 +5632,5 @@ public sealed class ScanController
         public static ScrollRowsResult Ok(string message, int rowsAdvanced = 0, ImageSignature[]? afterRows = null) => new(true, message, rowsAdvanced, AfterRows: afterRows);
         public static ScrollRowsResult Fail(string message, bool retryable = true) => new(false, message, Retryable: retryable);
     }
-
-    internal readonly record struct ScrollTopProbeResult(
-        bool Detected,
-        int TopLuminance,
-        int TrackLuminance);
 
 }

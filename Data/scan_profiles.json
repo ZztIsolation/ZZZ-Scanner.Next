@@ -28,7 +28,7 @@
       "scrollMaxTicksPerRow": 25,
       "calibrationRows": 5,
       "duplicateRowThreshold": 9,
-      "resetToTopWheelTicks": 180,
+      "resetToTopWheelTicks": 12,
       "resetToTopWheelDelayMs": 50,
       "colorTolerance": 26,
       "visualProbes": {
@@ -137,7 +137,7 @@
       "scrollMaxTicksPerRow": 25,
       "calibrationRows": 5,
       "duplicateRowThreshold": 9,
-      "resetToTopWheelTicks": 180,
+      "resetToTopWheelTicks": 12,
       "resetToTopWheelDelayMs": 50,
       "colorTolerance": 26,
       "visualProbes": {
