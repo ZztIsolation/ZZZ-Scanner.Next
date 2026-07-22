@@ -68,6 +68,7 @@ internal static class Program
             ("relative row probe overhead", TestRelativeRowProbeOverheadAsync),
             ("DPI-independent client coordinates", TestDpiIndependentClientCoordinatesAsync),
             ("first-cell panel change gate", TestFirstCellPanelChangeGateAsync),
+            ("first-pair witness planning", TestFirstPairWitnessPlanningAsync),
             ("selection refresh wait", TestSelectionRefreshWaitAsync),
             ("partial full-scan benchmark terminal", TestPartialFullScanBenchmarkTerminalAsync),
             ("luminance normalization", TestLuminanceNormalizationAsync),
@@ -1741,6 +1742,48 @@ internal static class Program
         AssertTrue(PanelCaptureGate.IsStrongChangeCurrentFrame(21, 30, 20, 25));
         AssertTrue(!PanelCaptureGate.IsStrongChangeCurrentFrame(0, 200, 20, 25), "A transient strong frame must not keep the final frame changed.");
         AssertTrue(!PanelCaptureGate.IsStrongChangeCurrentFrame(21, 20, 20, 25), "An early click animation must not prove a panel change.");
+        return Task.CompletedTask;
+    }
+
+    private static Task TestFirstPairWitnessPlanningAsync()
+    {
+        AssertEqual(1200, FirstPairBootstrapTiming.ResolveMaximumWaitMilliseconds(1800));
+        AssertEqual(450, FirstPairBootstrapTiming.ResolveMaximumWaitMilliseconds(450));
+
+        var topViewport = FirstPairWitnessPlanner.Build(
+            firstVisualRow: 1,
+            firstColumn: 1,
+            secondColumn: 2,
+            maxColumns: 4,
+            visibleRows: 3,
+            visibleColumns: 4);
+        AssertEqual(10, topViewport.Count);
+        AssertEqual(new FirstPairWitnessCoordinate(1, 3), topViewport[0]);
+        AssertEqual(new FirstPairWitnessCoordinate(1, 4), topViewport[1]);
+        AssertEqual(new FirstPairWitnessCoordinate(2, 1), topViewport[2]);
+        AssertEqual(new FirstPairWitnessCoordinate(3, 4), topViewport[^1]);
+        AssertTrue(!topViewport.Contains(new FirstPairWitnessCoordinate(1, 1)));
+        AssertTrue(!topViewport.Contains(new FirstPairWitnessCoordinate(1, 2)));
+
+        var nonTopViewport = FirstPairWitnessPlanner.Build(
+            firstVisualRow: 3,
+            firstColumn: 1,
+            secondColumn: 2,
+            maxColumns: 4,
+            visibleRows: 4,
+            visibleColumns: 9);
+        AssertEqual(2, nonTopViewport.Count);
+        AssertEqual(new FirstPairWitnessCoordinate(3, 3), nonTopViewport[0]);
+        AssertEqual(new FirstPairWitnessCoordinate(3, 4), nonTopViewport[1]);
+
+        var exhausted = FirstPairWitnessPlanner.Build(
+            firstVisualRow: 2,
+            firstColumn: 1,
+            secondColumn: 2,
+            maxColumns: 2,
+            visibleRows: 4,
+            visibleColumns: 9);
+        AssertEqual(0, exhausted.Count);
         return Task.CompletedTask;
     }
 

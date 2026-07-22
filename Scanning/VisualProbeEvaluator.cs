@@ -86,6 +86,55 @@ public static class SelectionRefreshTiming
         Math.Min(Math.Max(1, loadTimeoutMilliseconds), MaximumWaitMilliseconds);
 }
 
+public static class FirstPairBootstrapTiming
+{
+    public const int MaximumWaitMilliseconds = 1200;
+
+    public static int ResolveMaximumWaitMilliseconds(int loadTimeoutMilliseconds) =>
+        Math.Min(Math.Max(1, loadTimeoutMilliseconds), MaximumWaitMilliseconds);
+}
+
+public readonly record struct FirstPairWitnessCoordinate(int VisualRow, int Column);
+
+public static class FirstPairWitnessPlanner
+{
+    public static IReadOnlyList<FirstPairWitnessCoordinate> Build(
+        int firstVisualRow,
+        int firstColumn,
+        int secondColumn,
+        int maxColumns,
+        int visibleRows,
+        int visibleColumns)
+    {
+        maxColumns = Math.Max(1, maxColumns);
+        visibleRows = Math.Max(1, visibleRows);
+        visibleColumns = Math.Max(1, visibleColumns);
+        var candidates = new List<FirstPairWitnessCoordinate>();
+
+        for (var column = secondColumn + 1; column <= maxColumns; column++)
+        {
+            candidates.Add(new FirstPairWitnessCoordinate(firstVisualRow, column));
+        }
+
+        if (firstVisualRow == 1)
+        {
+            for (var visualRow = 2; visualRow <= visibleRows; visualRow++)
+            {
+                for (var column = 1; column <= visibleColumns; column++)
+                {
+                    candidates.Add(new FirstPairWitnessCoordinate(visualRow, column));
+                }
+            }
+        }
+
+        return candidates
+            .Where(candidate => candidate.VisualRow != firstVisualRow
+                || (candidate.Column != firstColumn && candidate.Column != secondColumn))
+            .Distinct()
+            .ToArray();
+    }
+}
+
 public readonly record struct SelectionRefreshObservation(
     bool ChangedFromTarget,
     bool StableWithPreviousFrame);
