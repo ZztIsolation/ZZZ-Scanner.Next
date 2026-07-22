@@ -1,0 +1,54 @@
+name: Scanner CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scanner-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OCR_MODEL_URL: https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases/download/ocr-model-ppocrv5/PP-OCRv5_mobile_rec_infer.onnx
+  OCR_MODEL_SHA256: 70ca955eba4729651da42e7cbcc69aaf41a601939ee5ffaa7a90efdfcd13db6d
+
+jobs:
+  verify:
+    name: Verify Windows source
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Download and verify OCR model
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force Resources/models | Out-Null
+          Invoke-WebRequest -Uri $env:OCR_MODEL_URL -OutFile Resources/models/PP-OCRv5_mobile_rec_infer.onnx
+          $actual = (Get-FileHash -Algorithm SHA256 Resources/models/PP-OCRv5_mobile_rec_infer.onnx).Hash.ToLowerInvariant()
+          if ($actual -ne $env:OCR_MODEL_SHA256) {
+            throw "OCR model SHA-256 mismatch. Expected $env:OCR_MODEL_SHA256, got $actual."
+          }
+
+      - name: Run scanner and Helper regression tests
+        shell: pwsh
+        run: dotnet run --project Tests/ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+
+      - name: Build Scanner
+        shell: pwsh
+        run: dotnet build ZZZ-Scanner.Next.csproj -c Release --no-restore -p:NuGetAudit=false
+
+      - name: Build Helper
+        shell: pwsh
+        run: dotnet build Launcher/ZZZ-Scanner.Helper.csproj -c Release --no-restore -p:NuGetAudit=false
+
+      - name: Check patch whitespace
+        shell: pwsh
+        run: git diff --check HEAD^

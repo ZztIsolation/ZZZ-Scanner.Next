@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 仓库维护现在会在 pull request 与 `main` push 时自动执行原生回归和两个 Release 构建。未来 manifest 使用本仓库 Release 作为 GitHub fallback；已经发布的 1.0.43/1.3.1 manifest 与二进制保持不变。
+
+## 2026-07-22 1.0.43 / Helper 1.3.1
+
 - Scanner 1.0.43 修复整轮首件可能把旧详情面板当成目标盘的问题。首件现在固定执行“目标格、邻格稳定、返回目标格”的验证回环，验收帧自身必须持续与邻格基线强不同；瞬时点击动画不再被锁存为有效切换。新增 `FIRST_CELL_BASELINE_CAPTURED`、`FIRST_CELL_REFRESH_REQUIRED` 和 `FIRST_CELL_REFRESH_READY` 诊断，协议 v4 和流式字段保持不变。
 - 每轮导出后统一记录 `SCAN_TERMINAL` 最终计数、partial、终止码和导出文件。Benchmark 优先使用该终态，兼容 CLI sidecar 和旧进度日志，并可读取 `export.partial.json`；`non_level_15_stop` 在保留 partial 事实的同时按有效全量正常结束统计。
 - 发布脚本对已经冻结的 Helper 1.3.1 固定其原始 `SourceRevisionId`，避免后续仅修改 Scanner 提交时 .NET 自动写入新的仓库 SHA 并改变 Helper NativeAOT 字节；候选 Helper 继续要求与既有 1.3.1 大小和 SHA-256 完全一致。
