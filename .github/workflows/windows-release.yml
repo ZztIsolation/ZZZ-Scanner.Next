@@ -47,11 +47,25 @@ jobs:
         shell: pwsh
         run: dotnet run --project Tests/ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
 
+      - name: Verify frozen Helper 1.3.1 release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh release view helper-1.3.1 --json assets | ConvertFrom-Json
+          $asset = $release.assets | Where-Object name -eq "ZZZ-Scanner-Helper.exe" | Select-Object -First 1
+          if ($null -eq $asset) {
+            throw "Frozen Helper 1.3.1 asset is missing."
+          }
+          if ($asset.size -ne 8267264 -or $asset.digest -ne "sha256:01f1b5abbe30ecae7668d6339f82eebe8d1c6f91a6dbbbaa8bba5582948ddd0d") {
+            throw "Frozen Helper 1.3.1 asset does not match the published size/SHA-256."
+          }
+
       - name: Publish dual Windows packages
         shell: pwsh
         env:
           SCANNER_VERSION: ${{ inputs.version }}
-        run: ./scripts/publish-slim.ps1 -Version $env:SCANNER_VERSION -RequireVCRedistLayout
+        run: ./scripts/publish-slim.ps1 -Version $env:SCANNER_VERSION -RequireVCRedistLayout -ScannerOnly
 
       - name: Upload release payload
         uses: actions/upload-artifact@v4
@@ -61,7 +75,5 @@ jobs:
           path: |
             dist/ZZZ-Scanner.Next-win-x64-fdd.zip
             dist/ZZZ-Scanner.Next-win-x64-self-contained.zip
-            dist/publish-helper/ZZZ-Scanner-Helper.exe
             dist/scanner-manifest-${{ inputs.version }}.json
-            dist/helper-manifest.json
             dist/publish-report-${{ inputs.version }}.json
