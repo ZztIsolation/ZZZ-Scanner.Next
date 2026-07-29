@@ -122,7 +122,8 @@ internal sealed class ScanSessionDiagnosticException : InvalidOperationException
 {
     public ScanSessionDiagnosticException(
         Exception innerException,
-        ScanSessionDiagnostics diagnostics)
+        ScanSessionDiagnostics? diagnostics,
+        ScanTerminalSnapshot terminalSnapshot)
         : base(innerException.Message, innerException)
     {
         var scannerFailure = innerException as IScannerFailureException;
@@ -132,9 +133,16 @@ internal sealed class ScanSessionDiagnosticException : InvalidOperationException
         Retryable = scannerFailure?.Retryable ?? true;
         var original = ScanDiagnosticDetails.FromException(innerException)
             ?? new Dictionary<string, object?>();
-        DiagnosticDetails = ScanDiagnosticDetails.Merge(original, ScanDiagnosticDetails.Session(diagnostics));
+        var session = diagnostics is null
+            ? new Dictionary<string, object?>()
+            : ScanDiagnosticDetails.Session(diagnostics);
+        DiagnosticDetails = ScanDiagnosticDetails.Merge(
+            ScanDiagnosticDetails.Merge(original, session),
+            ScanDiagnosticDetails.Terminal(terminalSnapshot));
+        TerminalSnapshot = terminalSnapshot;
     }
 
+    public ScanTerminalSnapshot TerminalSnapshot { get; }
     public IReadOnlyDictionary<string, object?> DiagnosticDetails { get; }
     public string Code { get; }
     public string Title { get; }

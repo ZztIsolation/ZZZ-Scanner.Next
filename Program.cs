@@ -486,13 +486,7 @@ static class Program
         }
         catch (Exception ex)
         {
-            var resultFile = WriteScanRunResult(new ScanRunResult
-            {
-                Success = false,
-                Status = "failed",
-                OutputDirectory = FindLatestScanDirectory(),
-                Error = ex.ToString()
-            });
+            var resultFile = WriteScanRunResult(ScanRunResultFactory.FromFailure(ex, FindLatestScanDirectory()));
             Console.Error.WriteLine(ex);
             Console.Error.WriteLine($"result_file={resultFile}");
             return 1;
@@ -728,7 +722,7 @@ static class Program
             command.FastOcrAssist = true;
             if (string.IsNullOrWhiteSpace(panelStabilityMode))
             {
-                command.PanelStabilityMode = PanelStabilityMode.Panel;
+                command.PanelStabilityMode = PanelStabilityMode.TextCore;
             }
 
             if (string.IsNullOrWhiteSpace(profileName))

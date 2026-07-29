@@ -171,6 +171,20 @@ internal static class ScanDiagnosticDetails
         };
     }
 
+    public static IReadOnlyDictionary<string, object?> Terminal(ScanTerminalSnapshot snapshot)
+    {
+        return new Dictionary<string, object?>
+        {
+            ["partial"] = snapshot.Partial,
+            ["items"] = snapshot.Items,
+            ["visited"] = snapshot.Visited,
+            ["queued"] = snapshot.Queued,
+            ["completed"] = snapshot.Completed,
+            ["failed"] = snapshot.Failed,
+            ["terminationCode"] = snapshot.TerminationCode
+        };
+    }
+
     public static IReadOnlyDictionary<string, object?> RowScroll(
         string direction,
         int tick,
@@ -184,6 +198,10 @@ internal static class ScanDiagnosticDetails
         int secondScore,
         int margin,
         int movedDistance,
+        int frameDistance,
+        string observationPhase,
+        int settleSamples,
+        double settleElapsedMilliseconds,
         string reason)
     {
         return new Dictionary<string, object?>
@@ -201,6 +219,10 @@ internal static class ScanDiagnosticDetails
             ["secondScore"] = secondScore,
             ["margin"] = margin,
             ["movedDistance"] = movedDistance,
+            ["frameDistance"] = frameDistance,
+            ["observationPhase"] = observationPhase,
+            ["settleSamples"] = settleSamples,
+            ["settleElapsedMs"] = Math.Round(settleElapsedMilliseconds, 1),
             ["reason"] = reason
         };
     }

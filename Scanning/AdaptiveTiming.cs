@@ -41,10 +41,16 @@ internal sealed class AdaptiveTimingState
         int postScrollPanelMinAcceptFloorMs)
     {
         var isDxgi = string.Equals(captureMode, "dxgi", StringComparison.OrdinalIgnoreCase);
-        var warmupMinimum = isDxgi ? 120 : 60;
-        var staticMinimumFloor = isDxgi ? Math.Clamp(panelMinAcceptFloorMs, 90, 120) : 60;
-        var sameRowMinimumFloor = isDxgi ? Math.Clamp(sameRowPanelMinAcceptFloorMs, 100, 120) : 60;
-        var postScrollMinimumFloor = isDxgi ? Math.Clamp(postScrollPanelMinAcceptFloorMs, 100, 120) : 60;
+        var warmupMinimum = isDxgi ? 120 : PanelCaptureTimingPolicy.GdiSafeMinimumAcceptMilliseconds;
+        var staticMinimumFloor = isDxgi
+            ? Math.Clamp(panelMinAcceptFloorMs, 120, 120)
+            : PanelCaptureTimingPolicy.GdiSafeMinimumAcceptMilliseconds;
+        var sameRowMinimumFloor = isDxgi
+            ? Math.Clamp(sameRowPanelMinAcceptFloorMs, 120, 120)
+            : PanelCaptureTimingPolicy.GdiSafeMinimumAcceptMilliseconds;
+        var postScrollMinimumFloor = isDxgi
+            ? Math.Clamp(postScrollPanelMinAcceptFloorMs, 120, 120)
+            : PanelCaptureTimingPolicy.GdiSafeMinimumAcceptMilliseconds;
         var configuredMinimum = Math.Clamp(
             Math.Max(profile.PanelChangedMinimumAcceptMs, warmupMinimum),
             60,
@@ -58,7 +64,7 @@ internal sealed class AdaptiveTimingState
                 : configuredMinimum;
             return new AdaptivePanelTimingDecision(
                 warmupMinimumAccept,
-                isDxgi ? 2 : 1,
+                PanelCaptureTimingPolicy.SafeRequiredStableFrames,
                 _panelSamples.Count,
                 WarmupComplete: false,
                 AppliedAdaptiveMinimum: false,
@@ -81,7 +87,7 @@ internal sealed class AdaptiveTimingState
                 : configuredMinimum;
             return new AdaptivePanelTimingDecision(
                 postScrollWarmupMinimum,
-                isDxgi ? 2 : 1,
+                PanelCaptureTimingPolicy.SafeRequiredStableFrames,
                 _panelSamples.Count,
                 WarmupComplete: true,
                 AppliedAdaptiveMinimum: false,
@@ -118,7 +124,7 @@ internal sealed class AdaptiveTimingState
         {
             return new AdaptivePanelTimingDecision(
                 selectedConfiguredMinimum,
-                isDxgi ? 2 : 1,
+                PanelCaptureTimingPolicy.SafeRequiredStableFrames,
                 _panelSamples.Count,
                 WarmupComplete: true,
                 AppliedAdaptiveMinimum: false,
@@ -141,7 +147,7 @@ internal sealed class AdaptiveTimingState
             Math.Max(adaptiveMinimumFloor, adaptiveMinimum),
             adaptiveMinimumFloor,
             configuredMinimum);
-        var requiredStableFrames = 1;
+        var requiredStableFrames = PanelCaptureTimingPolicy.SafeRequiredStableFrames;
 
         return new AdaptivePanelTimingDecision(
             selectedMinimum,

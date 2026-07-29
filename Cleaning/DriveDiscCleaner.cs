@@ -226,6 +226,11 @@ public sealed class DriveDiscCleaner
         bool mainStat,
         int slot)
     {
+        if (mainStat && slot is >= 1 and <= 3)
+        {
+            return [stat];
+        }
+
         var keys = new List<string>();
         var percentKey = $"{stat}%";
         var forceMainPercent = mainStat && slot >= 4 && stat is "生命值" or "攻击力" or "防御力";

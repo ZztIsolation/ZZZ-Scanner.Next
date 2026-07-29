@@ -83,13 +83,15 @@ public sealed class GameWindow : IDisposable
 
         try
         {
+            var framePolicy = DxgiFrameBackendPolicy.Current;
             SwitchCaptureSource(DxgiDesktopCaptureSource.Create(_clientScreenRect));
-            log?.Invoke($"Capture backend active: dxgi. client={_clientScreenRect}, captureFrameBackend={_captureSource.FrameBackendName}");
+            log?.Invoke($"Capture backend active: dxgi. client={_clientScreenRect}, dxgiFramePolicy={framePolicy.Name}, captureFrameBackend={_captureSource.FrameBackendName}");
         }
         catch (Exception ex)
         {
+            var framePolicy = DxgiFrameBackendPolicy.Current;
             SwitchCaptureSource(new GdiCaptureSource());
-            log?.Invoke($"Capture backend fallback: requested=dxgi, active=gdi, captureFrameBackend={_captureSource.FrameBackendName}, reason={ex.GetType().Name}: {ex.Message}");
+            log?.Invoke($"Capture backend fallback: requested=dxgi, active=gdi, dxgiFramePolicy={framePolicy.Name}, captureFrameBackend={_captureSource.FrameBackendName}, reason={ex.GetType().Name}: {ex.Message}");
         }
     }
 

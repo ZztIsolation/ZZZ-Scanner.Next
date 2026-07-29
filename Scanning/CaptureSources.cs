@@ -19,6 +19,27 @@ internal interface IWindowCaptureSource : IDisposable
     Color GetPixel(Point point);
 }
 
+internal readonly record struct DxgiFrameBackendPolicy(bool UseRawFrames, string Name)
+{
+    public static DxgiFrameBackendPolicy Resolve(string? configuredValue)
+    {
+        if (string.Equals(configuredValue, "0", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DxgiFrameBackendPolicy(false, "forced-bitmap");
+        }
+
+        if (string.Equals(configuredValue, "1", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DxgiFrameBackendPolicy(true, "forced-raw");
+        }
+
+        return new DxgiFrameBackendPolicy(true, "default-raw");
+    }
+
+    public static DxgiFrameBackendPolicy Current =>
+        Resolve(Environment.GetEnvironmentVariable("ZZZ_SCANNER_DXGI_RAW"));
+}
+
 internal sealed class CaptureSourceCoordinator : IDisposable
 {
     private readonly object _sync = new();
@@ -253,10 +274,9 @@ internal sealed class DxgiDesktopCaptureSource : IWindowCaptureSource
     }
 
     public string Name => "dxgi";
-    public string FrameBackendName => RawFramesEnabled ? "dxgi-raw" : "bitmap-fallback";
+    public string FrameBackendName => FramePolicy.UseRawFrames ? "dxgi-raw" : "bitmap-fallback";
 
-    private static bool RawFramesEnabled =>
-        string.Equals(Environment.GetEnvironmentVariable("ZZZ_SCANNER_DXGI_RAW"), "1", StringComparison.OrdinalIgnoreCase);
+    private static DxgiFrameBackendPolicy FramePolicy => DxgiFrameBackendPolicy.Current;
 
     public static DxgiDesktopCaptureSource Create(Rectangle clientScreenRect)
     {
@@ -353,7 +373,7 @@ internal sealed class DxgiDesktopCaptureSource : IWindowCaptureSource
 
     public CapturedFrame CaptureFrame(Rectangle screenRect)
     {
-        return RawFramesEnabled
+        return FramePolicy.UseRawFrames
             ? CaptureRawFrame(screenRect)
             : new BitmapCapturedFrame(CaptureBitmap(screenRect), FrameBackendName);
     }

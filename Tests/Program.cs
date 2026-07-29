@@ -37,6 +37,7 @@ internal static class Program
             ("variable substat cleaning", TestVariableSubstatCleaningAsync),
             ("drive disc name catalog", TestDriveDiscNameCatalogAsync),
             ("wind main-stat cleaning", TestWindMainStatCleaningAsync),
+            ("fixed-slot main-stat cleaning", TestFixedSlotMainStatCleaningAsync),
             ("main-stat value rule coverage", TestMainStatValueRuleCoverageAsync),
             ("fast OCR required label coverage", TestFastOcrRequiredLabelCoverageAsync),
             ("legacy wire capacity", TestLegacyWireCapacityAsync),
@@ -75,6 +76,8 @@ internal static class Program
             ("relative row probe overhead", TestRelativeRowProbeOverheadAsync),
             ("DPI-independent client coordinates", TestDpiIndependentClientCoordinatesAsync),
             ("first-cell panel change gate", TestFirstCellPanelChangeGateAsync),
+            ("panel target evidence gate", TestPanelTargetEvidenceGateAsync),
+            ("target verification policy", TestTargetVerificationPolicyAsync),
             ("first-pair witness planning", TestFirstPairWitnessPlanningAsync),
             ("selection refresh wait", TestSelectionRefreshWaitAsync),
             ("partial full-scan benchmark terminal", TestPartialFullScanBenchmarkTerminalAsync),
@@ -666,11 +669,29 @@ internal static class Program
     private static Task TestFastModeDefaultsAsync()
     {
         AssertEqual(ScrollAcceptMode.EarlyOneRow, ScanModeDefaults.ScrollAccept(true));
-        AssertEqual(PanelAcceptMode.AdaptiveEarlyFullRoi, ScanModeDefaults.PanelAccept(true));
+        AssertEqual(PanelAcceptMode.Safe, ScanModeDefaults.PanelAccept(true));
         AssertEqual(OverlapConflictMode.Recover, ScanModeDefaults.OverlapConflict(true));
         AssertEqual(ScrollAcceptMode.Safe, ScanModeDefaults.ScrollAccept(false));
         AssertEqual(PanelAcceptMode.Safe, ScanModeDefaults.PanelAccept(false));
         AssertEqual(OverlapConflictMode.Recheck, ScanModeDefaults.OverlapConflict(false));
+
+        var legacyBrowserOptions = new ScanOptions
+        {
+            FastMode = true,
+            PanelStabilityMode = PanelStabilityMode.Panel,
+            PanelAcceptMode = PanelAcceptMode.AdaptiveEarlyFullRoi,
+            PostScrollPanelAcceptMode = PostScrollPanelAcceptMode.AdaptiveAfterScroll,
+            PanelMinAcceptFloorMs = 60,
+            SameRowPanelMinAcceptFloorMs = 90,
+            PostScrollPanelMinAcceptFloorMs = 100
+        };
+        ScanModeDefaults.ApplyFastSafety(legacyBrowserOptions);
+        AssertEqual(PanelStabilityMode.TextCore, legacyBrowserOptions.PanelStabilityMode);
+        AssertEqual(PanelAcceptMode.Safe, legacyBrowserOptions.PanelAcceptMode);
+        AssertEqual(PostScrollPanelAcceptMode.Safe, legacyBrowserOptions.PostScrollPanelAcceptMode);
+        AssertEqual(120, legacyBrowserOptions.PanelMinAcceptFloorMs);
+        AssertEqual(120, legacyBrowserOptions.SameRowPanelMinAcceptFloorMs);
+        AssertEqual(120, legacyBrowserOptions.PostScrollPanelMinAcceptFloorMs);
 
         var profiles = ScanProfileFile.Load();
         AssertEqual(2, profiles.Profiles.Count);
@@ -987,6 +1008,11 @@ internal static class Program
 
     private static async Task TestCaptureSourceSerializationAsync()
     {
+        AssertEqual(new DxgiFrameBackendPolicy(true, "default-raw"), DxgiFrameBackendPolicy.Resolve(null));
+        AssertEqual(new DxgiFrameBackendPolicy(true, "default-raw"), DxgiFrameBackendPolicy.Resolve(""));
+        AssertEqual(new DxgiFrameBackendPolicy(true, "forced-raw"), DxgiFrameBackendPolicy.Resolve("1"));
+        AssertEqual(new DxgiFrameBackendPolicy(false, "forced-bitmap"), DxgiFrameBackendPolicy.Resolve("0"));
+
         var source = new BlockingCaptureSource();
         using var coordinator = new CaptureSourceCoordinator(source);
         var bounds = new Rectangle(0, 0, 2, 2);
@@ -1064,6 +1090,37 @@ internal static class Program
         AssertTrue(!ScrollTopResetCoordinator.IsTopColor(Color.FromArgb(128, 128, 70), expected, 26));
         AssertTrue(!ScrollTopResetCoordinator.IsTopColor(Color.FromArgb(160, 112, 94), expected, 26));
 
+        AssertEqual(249, ScrollbarTopResetPlanner.GetTopCenterY(200, 800, 400, 499));
+        AssertEqual(249, ScrollbarTopResetPlanner.GetTopCenterY(800, 200, 499, 400));
+        AssertEqual(500, ScrollbarTopResetPlanner.GetTopCenterY(500, 500, 400, 900));
+        AssertTrue(ScrollbarTopResetPlanner.IsAtTop(200, 800, 202, 300));
+        AssertTrue(!ScrollbarTopResetPlanner.IsAtTop(200, 800, 203, 301));
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestFixedSlotMainStatCleaningAsync()
+    {
+        var cleaner = new DriveDiscCleaner(WikiData.Load());
+        var export = cleaner.Clean(512, "S",
+        [
+            new OcrResult(1, "自由蓝调[3]"),
+            new OcrResult(1, "等级04/15"),
+            new OcrResult(1, "防御力"),
+            new OcrResult(1, "82"),
+            new OcrResult(1, "防御力"),
+            new OcrResult(1, "4.8%"),
+            new OcrResult(1, "异常精通"),
+            new OcrResult(1, "9"),
+            new OcrResult(1, "生命值"),
+            new OcrResult(1, "112"),
+            new OcrResult(1, "生命值"),
+            new OcrResult(1, "3%")
+        ]);
+
+        AssertEqual(3, export.Slot);
+        AssertEqual("防御力", export.MainStat.Single().Key);
+        AssertEqual(83f, (float)export.MainStat.Single().Value);
         return Task.CompletedTask;
     }
 
@@ -1103,7 +1160,7 @@ internal static class Program
         AssertEqual(0, rebound.ClickCount);
 
         var fallback = await RunScrollTopResetScenarioAsync(
-            Enumerable.Repeat(miss, 12).Concat([expected, expected]).ToArray(),
+            Enumerable.Repeat(miss, 93).Concat([expected, expected]).ToArray(),
             expected,
             configuredMaximumWheelTicks: 180);
         AssertTrue(fallback.Result.Confirmed);
@@ -1112,7 +1169,7 @@ internal static class Program
         AssertEqual(1, fallback.ClickCount);
 
         var failed = await RunScrollTopResetScenarioAsync(
-            Enumerable.Repeat(miss, 20).ToArray(),
+            Enumerable.Repeat(miss, 100).ToArray(),
             expected,
             configuredMaximumWheelTicks: 180);
         AssertTrue(!failed.Result.Confirmed);
@@ -1122,6 +1179,23 @@ internal static class Program
         AssertTrue(failed.Traces.All(trace => trace.WheelTicks <= ScrollTopResetCoordinator.MaximumWheelTicks));
         AssertTrue(failed.Delays.Contains(ScrollTopResetCoordinator.BatchSettleDelayMilliseconds));
         AssertTrue(failed.Delays.Contains(ScrollTopResetCoordinator.FallbackSettleDelayMilliseconds));
+
+        var positionOnlyTraces = new List<ScrollTopResetTrace>();
+        var positionOnly = await ScrollTopResetCoordinator.RunAsync(
+            configuredMaximumWheelTicks: ScrollTopResetCoordinator.MaximumWheelTicks,
+            wheelDelayMilliseconds: 50,
+            clickDelayMilliseconds: 60,
+            expectedColor: expected,
+            tolerance: 26,
+            captureTopPixel: () => miss,
+            wheelUp: () => throw new InvalidOperationException("Geometry-confirmed top must not scroll."),
+            clickTop: () => throw new InvalidOperationException("Geometry-confirmed top must not click."),
+            trace: positionOnlyTraces.Add,
+            token: CancellationToken.None,
+            captureTopPosition: () => true);
+        AssertTrue(positionOnly.Confirmed);
+        AssertEqual("initial", positionOnly.Phase);
+        AssertTrue(positionOnlyTraces.Any(trace => trace.MatchReason == "thumb_geometry"));
     }
 
     private static async Task TestScrollbarTopResetCancellationAsync()
@@ -1270,6 +1344,46 @@ internal static class Program
         AssertEqual(
             RowAdvanceDecision.Ambiguous,
             RowAdvanceEvaluator.Evaluate(10, 15, 80, 40).Decision);
+
+        var similarRows = RowAdvanceEvaluator.Evaluate(13, 25, 45, 27);
+        AssertEqual(
+            RowAdvanceDecision.OneRow,
+            RowAdvanceEvaluator.ReconcileScrollbarPosition(similarRows, 7, 7.4).Decision);
+        AssertEqual(
+            RowAdvanceDecision.TwoRows,
+            RowAdvanceEvaluator.ReconcileScrollbarPosition(similarRows, 13, 7.4).Decision);
+        AssertEqual(
+            RowAdvanceDecision.Ambiguous,
+            RowAdvanceEvaluator.ReconcileScrollbarPosition(
+                RowAdvanceEvaluator.Evaluate(70, 3, 80, 40),
+                0,
+                7.4).Decision);
+        AssertEqual(
+            RowAdvanceDecision.Ambiguous,
+            RowAdvanceEvaluator.ReconcileScrollbarPosition(
+                RowAdvanceEvaluator.Evaluate(70, 3, 80, 40),
+                14,
+                7.4).Decision);
+        AssertEqual(
+            RowAdvanceDecision.Ambiguous,
+            RowAdvanceEvaluator.ReconcileScrollbarPosition(similarRows, 43, 7.4).Decision);
+
+        var weakTwoRowConflict = RowAdvanceEvaluator.Evaluate(47, 40, 27, 44);
+        AssertEqual(RowAdvanceDecision.TwoRows, weakTwoRowConflict.Decision);
+        AssertTrue(!weakTwoRowConflict.Strong);
+        var weakConflictOverride = RowAdvanceEvaluator.ReconcileScrollbarPosition(
+            weakTwoRowConflict,
+            7,
+            7.207);
+        AssertEqual(RowAdvanceDecision.OneRow, weakConflictOverride.Decision);
+        AssertEqual("scrollbar_1_row_position_confirmed_weak_structure_override", weakConflictOverride.Reason);
+
+        var strongTwoRowConflict = RowAdvanceEvaluator.Evaluate(70, 50, 10, 44);
+        AssertEqual(RowAdvanceDecision.TwoRows, strongTwoRowConflict.Decision);
+        AssertTrue(strongTwoRowConflict.Strong);
+        AssertEqual(
+            RowAdvanceDecision.TwoRows,
+            RowAdvanceEvaluator.ReconcileScrollbarPosition(strongTwoRowConflict, 7, 7.207).Decision);
         return Task.CompletedTask;
     }
 
@@ -1291,64 +1405,245 @@ internal static class Program
 
     private static async Task TestRowScrollCoordinationAsync()
     {
-        var noMove = RowAdvanceEvaluator.Evaluate(3, 60, 80, 20);
+        var noMove = RowAdvanceEvaluator.Evaluate(3, 60, 80, 3);
         var oneRow = RowAdvanceEvaluator.Evaluate(70, 3, 80, 40);
         var ambiguous = RowAdvanceEvaluator.Evaluate(20, 24, 80, 40);
+        var stablePartialMove = RowAdvanceEvaluator.Evaluate(12, 22, 47, 22);
+        var twoRows = RowAdvanceEvaluator.Evaluate(70, 65, 3, 60);
+        static RowScrollObservation Observe(
+            RowAdvanceEvidence evidence,
+            int frameDistance = 0,
+            int? scrollbarPixelDelta = 0) =>
+            new(evidence, frameDistance, scrollbarPixelDelta);
 
         var wheelCount = 0;
         var traces = new List<RowScrollCoordinatorTrace>();
         var recovered = await RowScrollCoordinator.RunAsync(
             maximumTicks: 6,
             ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
             (tick, _) =>
             {
                 wheelCount++;
                 return Task.CompletedTask;
             },
-            (tick, _, _) => Task.FromResult(tick == 1 ? noMove : oneRow),
+            (tick, _, _, _) => Task.FromResult(Observe(tick == 1 ? noMove : oneRow)),
             traces.Add,
             CancellationToken.None);
         AssertEqual(RowScrollCoordinatorOutcome.Accepted, recovered.Outcome);
         AssertEqual(2, recovered.Tick);
         AssertEqual(1, recovered.Sample);
         AssertEqual(2, wheelCount);
-        AssertTrue(traces.Any(trace => trace.Action == "next_tick"));
+        AssertEqual(5, recovered.SettleSamples);
+        AssertTrue(traces.Any(trace => trace.Action == "retry_after_full_no_move_window"));
+
+        var scrollbarOneRow = RowAdvanceEvaluator.ReconcileScrollbarPosition(oneRow, 7, 7.4);
+        var scrollbarSamples = 0;
+        var confirmedScrollbarOneRow = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
+            (_, _) => Task.CompletedTask,
+            (_, _, _, _) =>
+            {
+                scrollbarSamples++;
+                return Task.FromResult(Observe(scrollbarOneRow));
+            },
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.Accepted, confirmedScrollbarOneRow.Outcome);
+        AssertEqual(2, scrollbarSamples);
 
         var safeSamples = 0;
         var safe = await RowScrollCoordinator.RunAsync(
             maximumTicks: 6,
             ScrollAcceptMode.Safe,
+            settlePollMilliseconds: 100,
             (_, _) => Task.CompletedTask,
-            (_, _, _) =>
+            (_, _, _, _) =>
             {
                 safeSamples++;
-                return Task.FromResult(oneRow);
+                return Task.FromResult(Observe(oneRow));
             },
             trace: null,
             CancellationToken.None);
         AssertEqual(RowScrollCoordinatorOutcome.Accepted, safe.Outcome);
         AssertEqual(2, safeSamples);
 
+        var motionWheelCount = 0;
+        var settleSamples = new Queue<RowScrollObservation>(new[]
+        {
+            Observe(ambiguous, 50),
+            Observe(oneRow, 20),
+            Observe(oneRow, 0)
+        });
+        var settledMotion = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
+            (_, _) =>
+            {
+                motionWheelCount++;
+                return Task.CompletedTask;
+            },
+            (tick, _, phase, _) => Task.FromResult(
+                tick == 1
+                    ? Observe(noMove)
+                    : phase == RowScrollPhase.FastProbe
+                        ? Observe(ambiguous, 60)
+                        : settleSamples.Dequeue()),
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.Accepted, settledMotion.Outcome);
+        AssertEqual(RowScrollPhase.Settle, settledMotion.Phase);
+        AssertEqual(2, motionWheelCount);
+        AssertEqual(8, settledMotion.SettleSamples);
+
+        var partialWheelCount = 0;
+        var partialTraces = new List<RowScrollCoordinatorTrace>();
+        var partialMoveRecovered = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
+            (_, _) =>
+            {
+                partialWheelCount++;
+                return Task.CompletedTask;
+            },
+            (tick, _, phase, _) => Task.FromResult(
+                tick == 1
+                    ? phase == RowScrollPhase.FastProbe
+                        ? Observe(stablePartialMove, 18)
+                        : Observe(stablePartialMove)
+                    : Observe(oneRow)),
+            partialTraces.Add,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.AmbiguousStop, partialMoveRecovered.Outcome);
+        AssertEqual(1, partialMoveRecovered.Tick);
+        AssertEqual(1, partialWheelCount);
+        AssertTrue(partialTraces.All(trace => trace.Action != "retry_after_full_no_move_window"));
+
+        var unstableNoMoveWheelCount = 0;
+        var unstableNoMoveSettleSamples = 0;
+        var unstableNoMoveRecovered = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
+            (_, _) =>
+            {
+                unstableNoMoveWheelCount++;
+                return Task.CompletedTask;
+            },
+            (tick, _, phase, _) =>
+            {
+                if (tick > 1)
+                {
+                    return Task.FromResult(Observe(oneRow));
+                }
+
+                if (phase == RowScrollPhase.FastProbe)
+                {
+                    return Task.FromResult(Observe(noMove, 18));
+                }
+
+                unstableNoMoveSettleSamples++;
+                return Task.FromResult(Observe(noMove));
+            },
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.Accepted, unstableNoMoveRecovered.Outcome);
+        AssertEqual(2, unstableNoMoveRecovered.Tick);
+        AssertEqual(2, unstableNoMoveWheelCount);
+        AssertEqual(5, unstableNoMoveSettleSamples);
+
+        var missingScrollbarWheelCount = 0;
+        var missingScrollbar = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
+            (_, _) =>
+            {
+                missingScrollbarWheelCount++;
+                return Task.CompletedTask;
+            },
+            (_, _, _, _) => Task.FromResult(Observe(noMove, scrollbarPixelDelta: null)),
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.AmbiguousStop, missingScrollbar.Outcome);
+        AssertEqual(1, missingScrollbar.Tick);
+        AssertEqual(1, missingScrollbarWheelCount);
+
+        var twoRowSamples = 0;
+        var confirmedTwoRows = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
+            (_, _) => Task.CompletedTask,
+            (_, _, _, _) =>
+            {
+                twoRowSamples++;
+                return Task.FromResult(Observe(twoRows));
+            },
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.Accepted, confirmedTwoRows.Outcome);
+        AssertEqual(1, twoRowSamples);
+
+        var transientTwoRowsSamples = 0;
+        var transientTwoRows = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 2,
+            ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
+            (_, _) => Task.CompletedTask,
+            (_, _, _, _) =>
+            {
+                transientTwoRowsSamples++;
+                return Task.FromResult(transientTwoRowsSamples == 1
+                    ? Observe(twoRows, frameDistance: 30)
+                    : Observe(oneRow));
+            },
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.Accepted, transientTwoRows.Outcome);
+        AssertEqual(RowAdvanceDecision.OneRow, transientTwoRows.Evidence.Decision);
+
+        var unstableStrongPositive = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
+            (_, _) => Task.CompletedTask,
+            (_, _, _, _) => Task.FromResult(Observe(oneRow, 20)),
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.AmbiguousStop, unstableStrongPositive.Outcome);
+        AssertTrue(RowScrollReleasePolicy.TryCreateSettleTimeoutProvisional(
+            unstableStrongPositive,
+            out var unstableProvisional));
+        AssertEqual(RowAdvanceDecision.OneRow, unstableProvisional.Decision);
+
         var ambiguousStop = await RowScrollCoordinator.RunAsync(
             maximumTicks: 6,
             ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
             (_, _) => Task.CompletedTask,
-            (_, _, _) => Task.FromResult(ambiguous),
+            (_, _, _, _) => Task.FromResult(Observe(ambiguous)),
             trace: null,
             CancellationToken.None);
         AssertEqual(RowScrollCoordinatorOutcome.AmbiguousStop, ambiguousStop.Outcome);
-        AssertEqual(RowScrollCoordinator.MaximumSamplesPerTick, ambiguousStop.Sample);
+        AssertEqual(RowScrollPhase.Settle, ambiguousStop.Phase);
+        AssertEqual(5, ambiguousStop.Sample);
         AssertEqual(1, ambiguousStop.Tick);
 
         var noMovement = await RowScrollCoordinator.RunAsync(
             maximumTicks: 3,
             ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
             (_, _) => Task.CompletedTask,
-            (_, _, _) => Task.FromResult(noMove),
+            (_, _, _, _) => Task.FromResult(Observe(noMove)),
             trace: null,
             CancellationToken.None);
         AssertEqual(RowScrollCoordinatorOutcome.NoMovementStop, noMovement.Outcome);
-        AssertEqual(3, noMovement.Tick);
+        AssertEqual(2, noMovement.Tick);
     }
 
     private static async Task TestRowScrollCoordinationCancellationAsync()
@@ -1357,12 +1652,15 @@ internal static class Program
         await AssertCanceledAsync(RowScrollCoordinator.RunAsync(
             maximumTicks: 6,
             ScrollAcceptMode.EarlyOneRow,
+            settlePollMilliseconds: 100,
             (_, _) =>
             {
                 cancellation.Cancel();
                 return Task.CompletedTask;
             },
-            (_, _, _) => Task.FromResult(RowAdvanceEvaluator.Evaluate(70, 3, 80, 40)),
+            (_, _, _, _) => Task.FromResult(new RowScrollObservation(
+                RowAdvanceEvaluator.Evaluate(70, 3, 80, 40),
+                FrameDistance: 0)),
             trace: null,
             cancellation.Token));
     }
@@ -1546,6 +1844,13 @@ internal static class Program
 
     private static Task TestVariablePanelRoiLayoutAsync()
     {
+        AssertTrue(ScanBenchmark.IsCompleteVariableRoiLayout(8, 12));
+        AssertTrue(ScanBenchmark.IsCompleteVariableRoiLayout(10, 12));
+        AssertTrue(ScanBenchmark.IsCompleteVariableRoiLayout(12, 12));
+        AssertTrue(!ScanBenchmark.IsCompleteVariableRoiLayout(3, 12));
+        AssertTrue(!ScanBenchmark.IsCompleteVariableRoiLayout(9, 12));
+        AssertTrue(!ScanBenchmark.IsCompleteVariableRoiLayout(14, 12));
+
         var keys = new[]
         {
             "name", "level", "mainStat", "mainStatValue",
@@ -1651,6 +1956,46 @@ internal static class Program
         AssertTrue(failure.Remedy.Contains("请", StringComparison.Ordinal));
         AssertEqual(3, Convert.ToInt32(failure.DiagnosticDetails["attempts"]));
         AssertTrue(failure.Retryable);
+
+        AssertEqual(
+            ScanEarlyStopDisposition.DrainQueuedOcr,
+            ScanEarlyStopPolicy.Resolve(
+                captureCompleted: false,
+                hasFailure: true,
+                cancellationRequested: false,
+                hasStopReason: false));
+        AssertEqual(
+            ScanEarlyStopDisposition.DiscardQueuedOcr,
+            ScanEarlyStopPolicy.Resolve(false, true, cancellationRequested: true, hasStopReason: false));
+        AssertEqual(
+            ScanEarlyStopDisposition.DiscardQueuedOcr,
+            ScanEarlyStopPolicy.Resolve(false, hasFailure: false, cancellationRequested: false, hasStopReason: true));
+        AssertEqual(
+            ScanEarlyStopDisposition.None,
+            ScanEarlyStopPolicy.Resolve(true, hasFailure: true, cancellationRequested: false, hasStopReason: false));
+
+        var terminal = new ScanTerminalSnapshot(
+            "scan-dir",
+            "export.partial.json",
+            Items: 24,
+            Visited: 27,
+            Queued: 27,
+            Completed: 24,
+            Failed: 0,
+            Partial: true,
+            TerminationCode: "scan_navigation_failed");
+        var wrapped = new ScanSessionDiagnosticException(failure, diagnostics: null, terminal);
+        AssertEqual(terminal, wrapped.TerminalSnapshot);
+        AssertEqual(24, Convert.ToInt32(wrapped.DiagnosticDetails["items"]));
+        AssertEqual(27, Convert.ToInt32(wrapped.DiagnosticDetails["queued"]));
+        AssertEqual("scan_navigation_failed", Convert.ToString(wrapped.DiagnosticDetails["terminationCode"])!);
+        var runResult = ScanRunResultFactory.FromFailure(wrapped, "fallback");
+        AssertTrue(!runResult.Success);
+        AssertEqual("scan-dir", runResult.OutputDirectory);
+        AssertEqual("export.partial.json", runResult.ExportFile);
+        AssertEqual(24, runResult.Items);
+        AssertEqual(27, runResult.Queued);
+        AssertEqual(24, runResult.Completed);
         return Task.CompletedTask;
     }
 
@@ -2076,10 +2421,91 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestPanelTargetEvidenceGateAsync()
+    {
+        var ordinary = new PanelTargetEvidenceGate();
+        AssertTrue(!ordinary.Observe(changedFromBaseline: true, stableWithPreviousFrame: false, elapsedMilliseconds: 20));
+        AssertTrue(!ordinary.Changed, "An early highlight transition must not become target evidence.");
+        AssertTrue(!ordinary.Observe(changedFromBaseline: true, stableWithPreviousFrame: false, elapsedMilliseconds: 30));
+        AssertTrue(ordinary.Observe(changedFromBaseline: true, stableWithPreviousFrame: true, elapsedMilliseconds: 45));
+        AssertTrue(!ordinary.CanPromote(
+            allowSelectionEvidence: true,
+            postScrollFirstCell: false,
+            selectionRoundTripReady: false,
+            out var ordinaryBlocked));
+        AssertEqual("identical_neighbor_roundtrip_required", ordinaryBlocked);
+
+        AssertTrue(!ordinary.CanPromote(
+            allowSelectionEvidence: true,
+            postScrollFirstCell: true,
+            selectionRoundTripReady: false,
+            out var postScrollBlocked));
+        AssertEqual("post_scroll_first_cell", postScrollBlocked);
+        AssertTrue(ordinary.CanPromote(
+            allowSelectionEvidence: true,
+            postScrollFirstCell: true,
+            selectionRoundTripReady: true,
+            out _));
+
+        var hoverOnly = new PanelTargetEvidenceGate();
+        AssertTrue(!hoverOnly.Observe(changedFromBaseline: false, stableWithPreviousFrame: true, elapsedMilliseconds: 100));
+        AssertTrue(!hoverOnly.CanPromote(true, false, false, out var hoverBlocked));
+        AssertEqual("no_selection_change", hoverBlocked);
+
+        var unstable = new PanelTargetEvidenceGate();
+        AssertTrue(!unstable.Observe(true, false, 30));
+        AssertTrue(!unstable.Observe(true, false, 45));
+        AssertTrue(!unstable.CanPromote(true, false, false, out var unstableBlocked));
+        AssertEqual("selection_change_not_stable", unstableBlocked);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestTargetVerificationPolicyAsync()
+    {
+        AssertTrue(!TargetVerificationPolicy.AllowsAdjacentIdentical(TargetVerificationKind.ChangedText));
+        AssertTrue(TargetVerificationPolicy.AllowsAdjacentIdentical(TargetVerificationKind.IdenticalNeighborRoundTrip));
+        return Task.CompletedTask;
+    }
+
     private static async Task TestSelectionRefreshWaitAsync()
     {
         AssertEqual(600, SelectionRefreshTiming.ResolveMaximumWaitMilliseconds(1200));
         AssertEqual(450, SelectionRefreshTiming.ResolveMaximumWaitMilliseconds(450));
+        AssertEqual(
+            120,
+            PanelCaptureTimingPolicy.ResolveSafeMinimumAcceptMilliseconds(120, 120, 1200, "dxgi"));
+        AssertEqual(
+            180,
+            PanelCaptureTimingPolicy.ResolveSafeMinimumAcceptMilliseconds(120, 120, 1200, "gdi"));
+        AssertEqual(2, PanelCaptureTimingPolicy.SafeRequiredStableFrames);
+        AssertEqual(0, PanelCaptureTimingPolicy.ResolvePollDelayMilliseconds(15, "dxgi-raw"));
+        AssertEqual(15, PanelCaptureTimingPolicy.ResolvePollDelayMilliseconds(15, "bitmap-fallback"));
+        var timingProfile = ScanProfileFile.Load().ResolveRequired(ScanOptions.FastProfileName);
+        var dxgiTiming = new AdaptiveTimingState().ResolvePanelTiming(timingProfile, "dxgi");
+        AssertTrue(dxgiTiming.MinimumAcceptMilliseconds >= 120);
+        AssertEqual(2, dxgiTiming.RequiredStableFrames);
+        var gdiTiming = new AdaptiveTimingState().ResolvePanelTiming(timingProfile, "gdi");
+        AssertTrue(gdiTiming.MinimumAcceptMilliseconds >= 180);
+        AssertEqual(2, gdiTiming.RequiredStableFrames);
+
+        using (var unselected = new Bitmap(144, 168))
+        using (var selected = new Bitmap(144, 168))
+        using (var unselectedGraphics = Graphics.FromImage(unselected))
+        using (var selectedGraphics = Graphics.FromImage(selected))
+        using (var selectedPen = new Pen(Color.FromArgb(245, 220, 0), 4))
+        {
+            unselectedGraphics.Clear(Color.FromArgb(22, 22, 22));
+            selectedGraphics.Clear(Color.FromArgb(22, 22, 22));
+            selectedGraphics.DrawRectangle(selectedPen, 11, 11, 121, 145);
+            var unselectedSamples = SelectionVisualProbe.CreateSamples(unselected);
+            var selectedSamples = SelectionVisualProbe.CreateSamples(selected);
+            AssertTrue(
+                SelectionVisualProbe.MeasureLocalizedMovement(unselectedSamples, selectedSamples) > 8,
+                "The selection edge probe must see the selected-card border without lowering the threshold.");
+            AssertEqual(
+                0,
+                SelectionVisualProbe.MeasureLocalizedMovement(selectedSamples, SelectionVisualProbe.CreateSamples(selected)));
+        }
 
         var observations = new Queue<SelectionRefreshObservation>(new[]
         {
@@ -2135,8 +2561,11 @@ internal static class Program
         AssertTrue(PanelCaptureGate.RequiresFirstCellNeighborRoundTrip(firstQueuedItem: true));
         AssertTrue(!PanelCaptureGate.RequiresFirstCellNeighborRoundTrip(firstQueuedItem: false));
         AssertTrue(PanelCaptureGate.IsStrongChangeCurrentFrame(21, 30, 20, 25));
-        AssertTrue(!PanelCaptureGate.IsStrongChangeCurrentFrame(0, 200, 20, 25), "A transient strong frame must not keep the final frame changed.");
+        AssertTrue(!PanelCaptureGate.IsStrongChangeCurrentFrame(0, 200, 20, 25));
         AssertTrue(!PanelCaptureGate.IsStrongChangeCurrentFrame(21, 20, 20, 25), "An early click animation must not prove a panel change.");
+        AssertTrue(PanelCaptureGate.LatchStrongChange(false, 21, 30, 20, 25));
+        AssertTrue(PanelCaptureGate.LatchStrongChange(true, 0, 200, 20, 25), "A proven detail change must remain latched while the target stabilizes.");
+        AssertTrue(!PanelCaptureGate.LatchStrongChange(false, 21, 20, 20, 25), "An early click animation must not enter the latch.");
         return Task.CompletedTask;
     }
 
@@ -2237,7 +2666,7 @@ internal static class Program
             try
             {
                 Console.SetOut(falseAdvanceCapture);
-                AssertEqual(0, ScanBenchmark.Run(scanDirectory, baselineDirectory: null));
+                AssertEqual(1, ScanBenchmark.Run(scanDirectory, baselineDirectory: null));
             }
             finally
             {
@@ -2247,6 +2676,110 @@ internal static class Program
             var falseAdvanceOutput = falseAdvanceCapture.ToString();
             AssertTrue(falseAdvanceOutput.Contains("current.row_scroll_false_advance_count=1", StringComparison.Ordinal));
             AssertTrue(falseAdvanceOutput.Contains("acceptance.no_false_scroll_advance=fail", StringComparison.Ordinal));
+
+            File.WriteAllLines(Path.Combine(scanDirectory, "scan.log"),
+            [
+                "[2026-07-22T00:00:00.0000000Z] Start scan. OcrWorkers=1, OcrBatchSize=1, OcrQueueCapacity=4, OcrIntraOpThreads=1, MaxItems=120",
+                "[2026-07-22T00:00:00.0100000Z] Traversal: overlap-signature-page. totalRows=20",
+                "[2026-07-22T00:00:00.0200000Z] EVENT #1 ROW_SCROLL_DONE: rowsAdvanced=2, decision=TwoRows",
+                "[2026-07-22T00:00:00.0300000Z] EVENT #2 OVERLAP_SCROLL_TWO_ROW_COVERAGE_ACCEPTED: rowsAdvanced=2",
+                "[2026-07-22T00:00:00.0400000Z] EVENT #3 SCAN_TERMINAL: visited=1, queued=1, completed=1, failed=0, partial=False, terminationCode=scan_complete, exportFile=export.json"
+            ]);
+            File.Copy(
+                Path.Combine(scanDirectory, "export.partial.json"),
+                Path.Combine(scanDirectory, "export.json"),
+                overwrite: true);
+            using var overshotCapture = new StringWriter(CultureInfo.InvariantCulture);
+            try
+            {
+                Console.SetOut(overshotCapture);
+                AssertEqual(1, ScanBenchmark.Run(scanDirectory, baselineDirectory: null));
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+            }
+
+            var overshotOutput = overshotCapture.ToString();
+            AssertTrue(overshotOutput.Contains("current.row_scroll_non_unit_done_count=1", StringComparison.Ordinal));
+            AssertTrue(overshotOutput.Contains("current.overlap_confirmed_two_row_accept_count=1", StringComparison.Ordinal));
+            AssertTrue(overshotOutput.Contains("acceptance.strict_one_way_scroll=fail", StringComparison.Ordinal));
+
+            const string identicalExport = "[{\"序号\":1,\"名称\":\"啄木鸟电音\",\"槽位\":1,\"品质\":\"S\",\"等级\":15,\"最大等级\":15,\"主属性\":{\"生命值\":2200},\"副属性\":[]},{\"序号\":2,\"名称\":\"啄木鸟电音\",\"槽位\":1,\"品质\":\"S\",\"等级\":15,\"最大等级\":15,\"主属性\":{\"生命值\":2200},\"副属性\":[]}]";
+            File.WriteAllText(Path.Combine(scanDirectory, "export.json"), identicalExport);
+            File.WriteAllLines(Path.Combine(scanDirectory, "scan.log"),
+            [
+                "[2026-07-22T00:00:00.0000000Z] Start scan. OcrWorkers=1, OcrBatchSize=1, OcrQueueCapacity=4, OcrIntraOpThreads=1, MaxItems=120",
+                "[2026-07-22T00:00:00.0100000Z] Traversal: overlap-signature-page. totalRows=20",
+                "[2026-07-22T00:00:00.0200000Z] EVENT #1 SCAN_TERMINAL: visited=2, queued=2, completed=2, failed=0, partial=False, terminationCode=scan_complete, exportFile=export.json"
+            ]);
+            using var duplicateCapture = new StringWriter(CultureInfo.InvariantCulture);
+            try
+            {
+                Console.SetOut(duplicateCapture);
+                AssertEqual(1, ScanBenchmark.Run(scanDirectory, baselineDirectory: null));
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+            }
+
+            AssertTrue(duplicateCapture.ToString().Contains("current.export_unverified_duplicates=1", StringComparison.Ordinal));
+            AssertTrue(duplicateCapture.ToString().Contains("acceptance.no_export_duplicates=fail", StringComparison.Ordinal));
+
+            File.AppendAllLines(Path.Combine(scanDirectory, "scan.log"),
+            [
+                "[2026-07-22T00:00:00.0140000Z] EVENT #2 ITEM_TARGET_VERIFICATION: index=1, kind=ChangedText",
+                "[2026-07-22T00:00:00.0150000Z] EVENT #3 ITEM_TARGET_VERIFICATION: index=2, kind=IdenticalNeighborRoundTrip"
+            ]);
+            using var verifiedDuplicateCapture = new StringWriter(CultureInfo.InvariantCulture);
+            try
+            {
+                Console.SetOut(verifiedDuplicateCapture);
+                AssertEqual(0, ScanBenchmark.Run(scanDirectory, baselineDirectory: null));
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+            }
+
+            AssertTrue(verifiedDuplicateCapture.ToString().Contains("current.export_verified_adjacent_duplicates=1", StringComparison.Ordinal));
+            AssertTrue(verifiedDuplicateCapture.ToString().Contains("current.export_unverified_duplicates=0", StringComparison.Ordinal));
+            AssertTrue(verifiedDuplicateCapture.ToString().Contains("acceptance.no_export_duplicates=pass", StringComparison.Ordinal));
+
+            File.WriteAllLines(Path.Combine(scanDirectory, "scan.log"),
+            [
+                "[2026-07-22T00:00:00.0000000Z] Start scan. OcrWorkers=1, OcrBatchSize=1, OcrQueueCapacity=4, OcrIntraOpThreads=1, MaxItems=120",
+                "[2026-07-22T00:00:00.0100000Z] Traversal: overlap-signature-page. totalRows=20",
+                "[2026-07-22T00:00:00.0200000Z] EVENT #1 ROW_SCROLL_SETTLE_START: tick=2/6, timeoutMs=500",
+                "[2026-07-22T00:00:00.0300000Z] EVENT #2 ROW_SCROLL_SETTLE_ACCEPT: tick=2/6, decision=OneRow",
+                "[2026-07-22T00:00:00.0320000Z] EVENT #3 ROW_SCROLL_PARTIAL_MOVE_CONTINUE: tick=1/6, decision=Ambiguous, movedDistance=22",
+                "[2026-07-22T00:00:00.0350000Z] EVENT #4 ROW_SCROLL_TIMING: scroll_tick_wait_ms=120.0, list_stable_ms=45.0, row_signature_ms=4.0, settle_samples=3, settle_elapsed_ms=45.0, post_scroll_viewport_ms=169.0",
+                "[2026-07-22T00:00:00.0400000Z] EVENT #5 PANEL_TARGET_EVIDENCE: evidence=selection_change",
+                "[2026-07-22T00:00:00.0500000Z] EVENT #6 PANEL_NEIGHBOR_ROUNDTRIP: phase=target_ready",
+                "[2026-07-22T00:00:00.0600000Z] EVENT #7 OCR_DRAIN_START: reason=capture_failure, queued=1, completed=0, failed=0, backlog=1",
+                "[2026-07-22T00:00:00.0700000Z] EVENT #8 OCR_DRAIN_DONE: queued=1, completed=1, failed=0, remaining=0, discarded=0",
+                "[2026-07-22T00:00:00.0800000Z] EVENT #9 SCAN_TERMINAL: visited=1, queued=1, completed=1, failed=0, partial=True, terminationCode=scan_navigation_failed, exportFile=export.partial.json"
+            ]);
+            using var drainCapture = new StringWriter(CultureInfo.InvariantCulture);
+            try
+            {
+                Console.SetOut(drainCapture);
+                AssertEqual(1, ScanBenchmark.Run(scanDirectory, baselineDirectory: null));
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+            }
+
+            var drainOutput = drainCapture.ToString();
+            AssertTrue(drainOutput.Contains("current.row_scroll_settle_accept_count=1", StringComparison.Ordinal));
+            AssertTrue(drainOutput.Contains("current.row_scroll_partial_move_continue_count=1", StringComparison.Ordinal));
+            AssertTrue(drainOutput.Contains("current.row_scroll_settle_ms_count=1", StringComparison.Ordinal));
+            AssertTrue(drainOutput.Contains("current.panel_target_evidence_count=1", StringComparison.Ordinal));
+            AssertTrue(drainOutput.Contains("current.panel_neighbor_roundtrip_count=1", StringComparison.Ordinal));
+            AssertTrue(drainOutput.Contains("current.ocr_drain_remaining_count=0", StringComparison.Ordinal));
+            AssertTrue(drainOutput.Contains("acceptance.ocr_drain_consistency=pass", StringComparison.Ordinal));
         }
         finally
         {

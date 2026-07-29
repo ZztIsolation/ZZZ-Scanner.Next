@@ -1,6 +1,6 @@
 # Testing
 
-## 2026-07-29 1.0.46 滚动状态确认候选
+## 2026-07-30 1.0.47 安全单行与高速扫描候选
 
 已执行：
 
@@ -8,17 +8,19 @@
 dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
 dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
 dotnet publish ZZZ-Scanner.Next.csproj -c Release -r win-x64 --self-contained false
-dotnet publish ZZZ-Scanner.Next.csproj -c Release -r win-x64 --self-contained true
 ```
 
 结果：
 
-- 原生回归 60 项全部通过；新增问题账号证据回放、旧弱证据拒绝、0/1/2 行合成图、全局亮度变化、局部高亮、相同行歧义、有界未移动后成功、持续歧义和取消测试，并验证“棘刺玫瑰”“谶羽之誓”的名称目录与清洗结果。
+- 原生回归 63 项全部通过；覆盖问题账号证据回放、0/1/2 行合成图、动画歧义后无输入稳定、严格单行事务、强两行阻断、滚动条精确一行对弱结构冲突的覆盖、目标选中双帧、详情变化锁存、邻格往返、失败终态、Benchmark 退出码和 OCR 排空门禁。
 - 问题证据 `moved=15 / noMove=8 / oneRow=40 / twoRows=60` 稳定判为 `NoMove`；旧自有账号证据 `77 / 75 / 69 / 61` 判为 `Ambiguous`，均不会提交一行位移。
-- FDD 与自包含 Release 发布编译均为 0 warning / 0 error；两种目录的真实 PP-OCRv5 runtime smoke 均通过，模型 SHA-256 为 `70ca955eba4729651da42e7cbcc69aaf41a601939ee5ffaa7a90efdfcd13db6d`。
-- Benchmark 新增 `row_scroll_no_move_count`、`row_scroll_ambiguous_count`、`row_scroll_false_advance_count` 和 `acceptance.no_false_scroll_advance`，自动测试同时覆盖正常为 0 与伪造 `NoMove` 前进被拒绝。
+- 最终本地候选为 iter29，Helper 1.3.1 与协议 v4 未修改。已知 `18:43` 与 `19:02` 坏日志均被拒绝并返回退出码 1，正确日志返回 0。
+- Benchmark 新增非单行完成、未验证重复、目标验证、变量 ROI 和 OCR drain correctness 门禁；任何 correctness 失败返回 1，无效输入返回 2。
 - 当前开发机缺少不低于 14.44.35211 的展开式 VC143 Redist layout，因此正式双 ZIP、manifest、大小和哈希由 Windows Release workflow 生成，本地未使用旧 VC runtime 冒充正式资产。
-- 实际游戏双账号全量扫描和三轮 120 件性能门禁由用户执行；在结果回传并通过前，不创建 `scanner-1.0.46` tag、不发布正式 Release，也不切换 Calculator 线上 manifest。
+- 默认 raw 的三次 120 件扫描耗时 `46.262s`、`45.860s`、`45.845s`；最终滚动证据修正后的正常起点复验为 `46.101s / 2.603件每秒`、`46.729s / 2.568件每秒`，浏览器端到端为 `46.828s / 2.563件每秒`。
+- 三份 120 件导出逐字节一致，SHA-256 为 `5d7f97614b8785ae5733f2785d36271a3eeb2fb09294000aa4d123bd04908102`；所有滚动均为单输入、单行推进，重复、未验证、回退和 OCR 错误均为 0。
+- 当前库存验收遍历 770 件、86/86 个逻辑行；导出 755 件 S 级，15 件 A 级按过滤配置跳过。缺行、重复、未验证、非单行滚动、回退、错误文件和 OCR drain 残留均为 0，吞吐 `2.630件每秒`。
+- 正式 FDD、自包含 ZIP、manifest、大小和 SHA 必须由两次 Windows Release workflow 生成并记录；本地 iter 候选不得作为正式发布资产。
 
 ## 2026-07-22 1.0.43 / Helper 1.3.1 正式发布归档
 

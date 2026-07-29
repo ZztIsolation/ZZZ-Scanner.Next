@@ -87,6 +87,152 @@ public static class SelectionRefreshTiming
         Math.Min(Math.Max(1, loadTimeoutMilliseconds), MaximumWaitMilliseconds);
 }
 
+internal static class SelectionVisualProbe
+{
+    private const int EdgeBandPixels = 24;
+    private const int SampleStride = 2;
+
+    public static int[] CreateSamples(Bitmap image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (image.Width <= 0 || image.Height <= 0)
+        {
+            return [];
+        }
+
+        var bandX = Math.Min(EdgeBandPixels, Math.Max(1, image.Width / 3));
+        var bandY = Math.Min(EdgeBandPixels, Math.Max(1, image.Height / 3));
+        var samples = new List<int>();
+        for (var y = 0; y < image.Height; y += SampleStride)
+        {
+            for (var x = 0; x < image.Width; x += SampleStride)
+            {
+                if (x >= bandX && x < image.Width - bandX
+                    && y >= bandY && y < image.Height - bandY)
+                {
+                    continue;
+                }
+
+                var color = image.GetPixel(x, y);
+                samples.Add((color.R * 299 + color.G * 587 + color.B * 114) / 1000);
+                samples.Add(Math.Max(0, ((color.R + color.G) / 2) - color.B));
+            }
+        }
+
+        return samples.ToArray();
+    }
+
+    public static int MeasureLocalizedMovement(
+        IReadOnlyList<int> before,
+        IReadOnlyList<int> after)
+    {
+        if (before.Count == 0 || before.Count != after.Count)
+        {
+            return int.MaxValue;
+        }
+
+        var differences = new int[before.Count];
+        for (var index = 0; index < differences.Length; index++)
+        {
+            differences[index] = Math.Abs(before[index] - after[index]);
+        }
+
+        Array.Sort(differences);
+        var retained = Math.Max(1, differences.Length / 4);
+        var start = differences.Length - retained;
+        var sum = 0L;
+        for (var index = start; index < differences.Length; index++)
+        {
+            sum += differences[index];
+        }
+
+        return (int)Math.Min(int.MaxValue, sum / retained);
+    }
+}
+
+internal static class PanelCaptureTimingPolicy
+{
+    public const int GdiSafeMinimumAcceptMilliseconds = 180;
+    public const int SafeRequiredStableFrames = 2;
+
+    public static int ResolvePollDelayMilliseconds(int requestedMilliseconds, string frameBackend) =>
+        string.Equals(frameBackend, "dxgi-raw", StringComparison.OrdinalIgnoreCase)
+            ? 0
+            : Math.Max(1, requestedMilliseconds);
+
+    public static int ResolveSafeMinimumAcceptMilliseconds(
+        int profileMinimumMilliseconds,
+        int requestedFloorMilliseconds,
+        int loadTimeoutMilliseconds,
+        string captureMode)
+    {
+        var captureMinimum = string.Equals(captureMode, "dxgi", StringComparison.OrdinalIgnoreCase)
+            ? Math.Clamp(requestedFloorMilliseconds, 90, 120)
+            : GdiSafeMinimumAcceptMilliseconds;
+        return Math.Clamp(
+            Math.Max(profileMinimumMilliseconds, captureMinimum),
+            60,
+            Math.Max(60, loadTimeoutMilliseconds));
+    }
+}
+
+internal sealed class PanelTargetEvidenceGate
+{
+    public const int RequiredStableFrames = 2;
+    public const double MinimumReliableChangeMilliseconds = 25.0;
+
+    public bool Changed { get; private set; }
+    public int StableFrames { get; private set; }
+    public double? ChangeMilliseconds { get; private set; }
+    public bool Stable => Changed && StableFrames >= RequiredStableFrames;
+
+    public bool Observe(bool changedFromBaseline, bool stableWithPreviousFrame, double elapsedMilliseconds)
+    {
+        if (!changedFromBaseline || elapsedMilliseconds < MinimumReliableChangeMilliseconds)
+        {
+            Changed = false;
+            StableFrames = 0;
+            ChangeMilliseconds = null;
+            return false;
+        }
+
+        Changed = true;
+        ChangeMilliseconds ??= elapsedMilliseconds;
+        StableFrames = stableWithPreviousFrame ? StableFrames + 1 : 1;
+        return Stable;
+    }
+
+    public bool CanPromote(
+        bool allowSelectionEvidence,
+        bool postScrollFirstCell,
+        bool selectionRoundTripReady,
+        out string blockedReason)
+    {
+        if (!Stable)
+        {
+            blockedReason = Changed ? "selection_change_not_stable" : "no_selection_change";
+            return false;
+        }
+
+        if (!selectionRoundTripReady)
+        {
+            blockedReason = postScrollFirstCell
+                ? "post_scroll_first_cell"
+                : "identical_neighbor_roundtrip_required";
+            return false;
+        }
+
+        if (!allowSelectionEvidence)
+        {
+            blockedReason = "retry_or_recover_context";
+            return false;
+        }
+
+        blockedReason = "";
+        return true;
+    }
+}
+
 public static class FirstPairBootstrapTiming
 {
     public const int MaximumWaitMilliseconds = 1200;
@@ -119,7 +265,8 @@ internal readonly record struct ScrollTopResetTrace(
     int Tolerance,
     bool Matched,
     int DelayMilliseconds,
-    long ElapsedMilliseconds);
+    long ElapsedMilliseconds,
+    string MatchReason = "none");
 
 internal readonly record struct ScrollTopResetResult(
     bool Confirmed,
@@ -134,7 +281,7 @@ internal readonly record struct ScrollTopResetResult(
 internal static class ScrollTopResetCoordinator
 {
     public const int WheelBatchSize = 4;
-    public const int MaximumWheelTicks = 12;
+    public const int MaximumWheelTicks = 120;
     public const int ProbeSampleCount = 3;
     public const int RequiredStableMatches = 2;
     public const int ProbeSampleDelayMilliseconds = 40;
@@ -155,7 +302,8 @@ internal static class ScrollTopResetCoordinator
         Action clickTop,
         Action<ScrollTopResetTrace>? trace,
         CancellationToken token,
-        Func<int, CancellationToken, Task>? delayAsync = null)
+        Func<int, CancellationToken, Task>? delayAsync = null,
+        Func<bool>? captureTopPosition = null)
     {
         ArgumentNullException.ThrowIfNull(captureTopPixel);
         ArgumentNullException.ThrowIfNull(wheelUp);
@@ -180,7 +328,14 @@ internal static class ScrollTopResetCoordinator
                 token.ThrowIfCancellationRequested();
                 lastActual = captureTopPixel();
                 probeSamples++;
-                var matched = IsTopColor(lastActual, expectedColor, tolerance);
+                var colorMatched = IsTopColor(lastActual, expectedColor, tolerance);
+                var positionMatched = captureTopPosition?.Invoke() == true;
+                var matched = colorMatched || positionMatched;
+                var matchReason = positionMatched
+                    ? "thumb_geometry"
+                    : colorMatched
+                        ? "top_color"
+                        : "none";
                 stableMatches = matched ? stableMatches + 1 : 0;
                 lastStableMatches = stableMatches;
                 trace?.Invoke(new ScrollTopResetTrace(
@@ -197,7 +352,8 @@ internal static class ScrollTopResetCoordinator
                     tolerance,
                     matched,
                     0,
-                    stopwatch.ElapsedMilliseconds));
+                    stopwatch.ElapsedMilliseconds,
+                    matchReason));
                 if (stableMatches >= RequiredStableMatches)
                 {
                     return true;
@@ -346,6 +502,33 @@ internal static class ScrollTopResetCoordinator
     }
 }
 
+internal static class ScrollbarTopResetPlanner
+{
+    public const int TopEdgeTolerancePixels = 2;
+
+    public static int GetTopCenterY(
+        int trackEndpointAY,
+        int trackEndpointBY,
+        int thumbStartY,
+        int thumbEndY)
+    {
+        var trackStart = Math.Min(trackEndpointAY, trackEndpointBY);
+        var trackEnd = Math.Max(trackEndpointAY, trackEndpointBY);
+        var trackHeight = Math.Max(1, trackEnd - trackStart + 1);
+        var thumbHeight = Math.Clamp(Math.Abs(thumbEndY - thumbStartY) + 1, 1, trackHeight);
+        return trackStart + (thumbHeight - 1) / 2;
+    }
+
+    public static bool IsAtTop(
+        int trackEndpointAY,
+        int trackEndpointBY,
+        int thumbStartY,
+        int thumbEndY) =>
+        Math.Abs(
+            Math.Min(thumbStartY, thumbEndY)
+            - Math.Min(trackEndpointAY, trackEndpointBY)) <= TopEdgeTolerancePixels;
+}
+
 internal enum RowAdvanceDecision
 {
     NoMove,
@@ -460,6 +643,9 @@ internal readonly record struct RowAdvanceEvidence(
     int MovedDistance,
     string Reason)
 {
+    public bool UsesScrollbarPosition =>
+        Reason.StartsWith("scrollbar_", StringComparison.Ordinal);
+
     public int? AcceptedRows => Decision switch
     {
         RowAdvanceDecision.NoMove => 0,
@@ -475,6 +661,120 @@ internal static class RowAdvanceEvaluator
     public const int ClearMargin = 12;
     public const int StrongMargin = 18;
     public const int MovementTolerance = 6;
+
+    public static RowAdvanceEvidence ReconcileScrollbarPosition(
+        RowAdvanceEvidence structuralEvidence,
+        int directionalPixelDelta,
+        double pixelsPerRow)
+    {
+        if (pixelsPerRow < 1)
+        {
+            return structuralEvidence;
+        }
+
+        var alignmentTolerance = Math.Max(1.5, pixelsPerRow * 0.35);
+        if (directionalPixelDelta < -alignmentTolerance)
+        {
+            return structuralEvidence with
+            {
+                Decision = RowAdvanceDecision.Ambiguous,
+                Strong = false,
+                Reason = "scrollbar_moved_opposite_direction"
+            };
+        }
+
+        var estimatedRows = Math.Max(0, (int)Math.Round(
+            Math.Max(0, directionalPixelDelta) / pixelsPerRow,
+            MidpointRounding.AwayFromZero));
+        var residual = Math.Abs(directionalPixelDelta - estimatedRows * pixelsPerRow);
+        if (residual > alignmentTolerance)
+        {
+            return structuralEvidence with
+            {
+                Decision = RowAdvanceDecision.Ambiguous,
+                Strong = false,
+                Reason = "scrollbar_position_between_rows"
+            };
+        }
+
+        if (estimatedRows > 2)
+        {
+            return structuralEvidence with
+            {
+                Decision = RowAdvanceDecision.Ambiguous,
+                BestRows = estimatedRows,
+                Strong = false,
+                Reason = "scrollbar_advanced_more_than_two_rows"
+            };
+        }
+
+        var scrollbarDecision = estimatedRows switch
+        {
+            0 => RowAdvanceDecision.NoMove,
+            1 => RowAdvanceDecision.OneRow,
+            2 => RowAdvanceDecision.TwoRows,
+            _ => RowAdvanceDecision.Ambiguous
+        };
+        if (estimatedRows == 0
+            && structuralEvidence.MovedDistance > MovementTolerance)
+        {
+            return structuralEvidence with
+            {
+                Decision = RowAdvanceDecision.Ambiguous,
+                Strong = false,
+                Reason = "scrollbar_grid_movement_conflict"
+            };
+        }
+
+        var hasPositiveStructureConflict = estimatedRows > 0
+            && structuralEvidence.Decision is RowAdvanceDecision.OneRow or RowAdvanceDecision.TwoRows
+            && structuralEvidence.Decision != scrollbarDecision;
+        if (hasPositiveStructureConflict
+            && structuralEvidence.Decision == RowAdvanceDecision.TwoRows
+            && structuralEvidence.Strong)
+        {
+            return structuralEvidence;
+        }
+
+        if (hasPositiveStructureConflict && structuralEvidence.Strong)
+        {
+            return structuralEvidence with
+            {
+                Decision = RowAdvanceDecision.Ambiguous,
+                Strong = false,
+                Reason = "scrollbar_row_structure_conflict"
+            };
+        }
+
+        var selectedScore = estimatedRows switch
+        {
+            0 => structuralEvidence.NoMoveScore,
+            1 => structuralEvidence.OneRowScore,
+            2 => structuralEvidence.TwoRowScore,
+            _ => structuralEvidence.BestScore
+        };
+        var secondScore = estimatedRows switch
+        {
+            0 => Math.Min(structuralEvidence.OneRowScore, structuralEvidence.TwoRowScore),
+            1 => Math.Min(structuralEvidence.NoMoveScore, structuralEvidence.TwoRowScore),
+            2 => Math.Min(structuralEvidence.NoMoveScore, structuralEvidence.OneRowScore),
+            _ => structuralEvidence.SecondScore
+        };
+        return structuralEvidence with
+        {
+            Decision = scrollbarDecision,
+            BestRows = estimatedRows,
+            BestScore = selectedScore,
+            SecondScore = secondScore,
+            Margin = secondScore - selectedScore,
+            Strong = residual <= Math.Max(1, pixelsPerRow * 0.25),
+            Reason = estimatedRows == 0
+                ? "scrollbar_no_move_confirmed"
+                : hasPositiveStructureConflict
+                    ? $"scrollbar_{estimatedRows}_row_position_confirmed_weak_structure_override"
+                    : $"scrollbar_{estimatedRows}_row_position_confirmed"
+        };
+    }
 
     public static RowAdvanceEvidence Evaluate(
         int noMoveScore,
@@ -544,37 +844,97 @@ internal enum RowScrollCoordinatorOutcome
     NoMovementStop
 }
 
+internal enum RowScrollPhase
+{
+    FastProbe,
+    Settle
+}
+
+internal readonly record struct RowScrollObservation(
+    RowAdvanceEvidence Evidence,
+    int FrameDistance,
+    int? ScrollbarPixelDelta = null)
+{
+    public bool Stable => FrameDistance <= RowScrollCoordinator.StableFrameTolerance;
+    public bool ConfirmedZeroMovement => Stable
+        && Evidence.Decision == RowAdvanceDecision.NoMove
+        && Evidence.MovedDistance <= RowAdvanceEvaluator.MovementTolerance
+        && ScrollbarPixelDelta == 0;
+}
+
 internal readonly record struct RowScrollCoordinatorTrace(
     int Tick,
     int Sample,
-    RowAdvanceEvidence Evidence,
+    RowScrollPhase Phase,
+    RowScrollObservation Observation,
     string Action);
 
 internal readonly record struct RowScrollCoordinatorResult(
     RowScrollCoordinatorOutcome Outcome,
     int Tick,
     int Sample,
-    RowAdvanceEvidence Evidence)
+    RowScrollPhase Phase,
+    RowScrollObservation Observation,
+    int SettleSamples,
+    double SettleElapsedMilliseconds)
 {
     public bool Accepted => Outcome == RowScrollCoordinatorOutcome.Accepted;
+    public RowAdvanceEvidence Evidence => Observation.Evidence;
+}
+
+internal static class RowScrollReleasePolicy
+{
+    public static bool TryCreateSettleTimeoutProvisional(
+        RowScrollCoordinatorResult result,
+        out RowAdvanceEvidence provisionalEvidence)
+    {
+        provisionalEvidence = result.Evidence;
+        if (result.Outcome != RowScrollCoordinatorOutcome.AmbiguousStop
+            || !result.Evidence.Strong
+            || !string.Equals(
+                result.Evidence.Reason,
+                "insufficient_stable_confirmation",
+                StringComparison.Ordinal)
+            || result.Evidence.BestRows is not (1 or 2))
+        {
+            return false;
+        }
+
+        provisionalEvidence = result.Evidence with
+        {
+            Decision = result.Evidence.BestRows == 1
+                ? RowAdvanceDecision.OneRow
+                : RowAdvanceDecision.TwoRows,
+            Reason = "settle_timeout_strong_positive_release_pending"
+        };
+        return true;
+    }
 }
 
 internal static class RowScrollCoordinator
 {
     public const int MaximumSamplesPerTick = 3;
+    public const int MaximumSettleMilliseconds = 500;
+    public const int StableFrameTolerance = 4;
+    public const int MinimumPartialMovementDistance = 12;
 
     public static async Task<RowScrollCoordinatorResult> RunAsync(
         int maximumTicks,
         ScrollAcceptMode acceptMode,
+        int settlePollMilliseconds,
         Func<int, CancellationToken, Task> issueWheelAsync,
-        Func<int, int, CancellationToken, Task<RowAdvanceEvidence>> captureEvidenceAsync,
+        Func<int, int, RowScrollPhase, CancellationToken, Task<RowScrollObservation>> captureObservationAsync,
         Action<RowScrollCoordinatorTrace>? trace,
         CancellationToken token)
     {
         ArgumentNullException.ThrowIfNull(issueWheelAsync);
-        ArgumentNullException.ThrowIfNull(captureEvidenceAsync);
-        maximumTicks = Math.Max(1, maximumTicks);
-        RowAdvanceEvidence lastEvidence = default;
+        ArgumentNullException.ThrowIfNull(captureObservationAsync);
+        maximumTicks = Math.Clamp(maximumTicks, 1, 2);
+        settlePollMilliseconds = Math.Max(1, settlePollMilliseconds);
+        var maximumSettleSamples = Math.Max(1, (int)Math.Ceiling(MaximumSettleMilliseconds / (double)settlePollMilliseconds));
+        RowScrollObservation lastObservation = default;
+        var totalSettleSamples = 0;
+        var settleWatch = new System.Diagnostics.Stopwatch();
 
         for (var tick = 1; tick <= maximumTicks; tick++)
         {
@@ -582,88 +942,240 @@ internal static class RowScrollCoordinator
             await issueWheelAsync(tick, token);
             RowAdvanceDecision? consecutiveDecision = null;
             var consecutiveFrames = 0;
+            var enterSettle = false;
 
             for (var sample = 1; sample <= MaximumSamplesPerTick; sample++)
             {
                 token.ThrowIfCancellationRequested();
-                lastEvidence = await captureEvidenceAsync(tick, sample, token);
+                lastObservation = await captureObservationAsync(tick, sample, RowScrollPhase.FastProbe, token);
+                var evidence = lastObservation.Evidence;
 
-                if (lastEvidence.Decision == RowAdvanceDecision.NoMove)
+                if (IsConfirmedOvershot(lastObservation))
                 {
-                    var outcome = tick == maximumTicks
-                        ? RowScrollCoordinatorOutcome.NoMovementStop
-                        : (RowScrollCoordinatorOutcome?)null;
                     trace?.Invoke(new RowScrollCoordinatorTrace(
                         tick,
                         sample,
-                        lastEvidence,
-                        outcome is null ? "next_tick" : "stop_no_movement"));
-                    if (outcome is not null)
-                    {
-                        return new RowScrollCoordinatorResult(outcome.Value, tick, sample, lastEvidence);
-                    }
+                        RowScrollPhase.FastProbe,
+                        lastObservation,
+                        "accept_overshot_for_block"));
+                    return Result(RowScrollCoordinatorOutcome.Accepted, tick, sample, RowScrollPhase.FastProbe, lastObservation);
+                }
 
+                if (evidence.Decision == RowAdvanceDecision.NoMove)
+                {
+                    enterSettle = true;
+                    trace?.Invoke(new RowScrollCoordinatorTrace(
+                        tick,
+                        sample,
+                        RowScrollPhase.FastProbe,
+                        lastObservation,
+                        lastObservation.Stable
+                            ? "enter_settle_no_move"
+                            : "enter_settle_unstable_no_move"));
                     break;
                 }
 
-                if (lastEvidence.Decision is RowAdvanceDecision.OneRow or RowAdvanceDecision.TwoRows)
+                if (evidence.Decision is RowAdvanceDecision.OneRow or RowAdvanceDecision.TwoRows)
                 {
-                    if (consecutiveDecision == lastEvidence.Decision)
+                    ObservePositive(lastObservation, ref consecutiveDecision, ref consecutiveFrames);
+                    if (CanAccept(lastObservation, consecutiveFrames, acceptMode))
                     {
-                        consecutiveFrames++;
-                    }
-                    else
-                    {
-                        consecutiveDecision = lastEvidence.Decision;
-                        consecutiveFrames = 1;
-                    }
-
-                    var earlyStrongAcceptance = acceptMode == ScrollAcceptMode.EarlyOneRow && lastEvidence.Strong;
-                    if (earlyStrongAcceptance || consecutiveFrames >= 2)
-                    {
-                        trace?.Invoke(new RowScrollCoordinatorTrace(tick, sample, lastEvidence, "accept"));
-                        return new RowScrollCoordinatorResult(
-                            RowScrollCoordinatorOutcome.Accepted,
-                            tick,
-                            sample,
-                            lastEvidence);
+                        trace?.Invoke(new RowScrollCoordinatorTrace(tick, sample, RowScrollPhase.FastProbe, lastObservation, "accept"));
+                        return Result(RowScrollCoordinatorOutcome.Accepted, tick, sample, RowScrollPhase.FastProbe, lastObservation);
                     }
                 }
                 else
                 {
                     consecutiveDecision = null;
                     consecutiveFrames = 0;
+                    enterSettle = true;
                 }
 
-                var finalSample = sample == MaximumSamplesPerTick;
                 trace?.Invoke(new RowScrollCoordinatorTrace(
                     tick,
                     sample,
-                    lastEvidence,
-                    finalSample ? "stop_ambiguous" : "resample"));
-                if (finalSample)
+                    RowScrollPhase.FastProbe,
+                    lastObservation,
+                    enterSettle || sample == MaximumSamplesPerTick ? "enter_settle" : "resample"));
+                if (enterSettle || sample == MaximumSamplesPerTick)
                 {
-                    var ambiguous = lastEvidence with
+                    enterSettle = true;
+                    break;
+                }
+            }
+
+            if (!enterSettle)
+            {
+                continue;
+            }
+
+            consecutiveDecision = null;
+            consecutiveFrames = 0;
+            var consecutiveStableNoMove = 0;
+            settleWatch.Start();
+            var settlePhaseWatch = System.Diagnostics.Stopwatch.StartNew();
+            for (var settleSample = 1; settleSample <= maximumSettleSamples; settleSample++)
+            {
+                token.ThrowIfCancellationRequested();
+                totalSettleSamples++;
+                lastObservation = await captureObservationAsync(tick, settleSample, RowScrollPhase.Settle, token);
+                var evidence = lastObservation.Evidence;
+
+                if (evidence.Decision is RowAdvanceDecision.OneRow or RowAdvanceDecision.TwoRows)
+                {
+                    consecutiveStableNoMove = 0;
+                    if (IsConfirmedOvershot(lastObservation))
+                    {
+                        trace?.Invoke(new RowScrollCoordinatorTrace(
+                            tick,
+                            settleSample,
+                            RowScrollPhase.Settle,
+                            lastObservation,
+                            "accept_overshot_for_block"));
+                        settleWatch.Stop();
+                        return Result(RowScrollCoordinatorOutcome.Accepted, tick, settleSample, RowScrollPhase.Settle, lastObservation);
+                    }
+
+                    ObservePositive(lastObservation, ref consecutiveDecision, ref consecutiveFrames);
+                    if (CanAccept(lastObservation, consecutiveFrames, acceptMode))
+                    {
+                        trace?.Invoke(new RowScrollCoordinatorTrace(tick, settleSample, RowScrollPhase.Settle, lastObservation, "accept_settled"));
+                        settleWatch.Stop();
+                        return Result(RowScrollCoordinatorOutcome.Accepted, tick, settleSample, RowScrollPhase.Settle, lastObservation);
+                    }
+                }
+                else if (lastObservation.ConfirmedZeroMovement)
+                {
+                    consecutiveDecision = null;
+                    consecutiveFrames = 0;
+                    consecutiveStableNoMove++;
+                }
+                else
+                {
+                    consecutiveDecision = null;
+                    consecutiveFrames = 0;
+                    consecutiveStableNoMove = 0;
+                }
+
+                var settleTimedOut = settleSample == maximumSettleSamples
+                    || settlePhaseWatch.ElapsedMilliseconds >= MaximumSettleMilliseconds;
+                if (!settleTimedOut)
+                {
+                    trace?.Invoke(new RowScrollCoordinatorTrace(
+                        tick,
+                        settleSample,
+                        RowScrollPhase.Settle,
+                        lastObservation,
+                        "settle_resample"));
+                    continue;
+                }
+
+                if (consecutiveStableNoMove >= 3 && lastObservation.ConfirmedZeroMovement)
+                {
+                    var action = tick < maximumTicks
+                        ? "retry_after_full_no_move_window"
+                        : "stop_no_movement";
+                    trace?.Invoke(new RowScrollCoordinatorTrace(
+                        tick,
+                        settleSample,
+                        RowScrollPhase.Settle,
+                        lastObservation,
+                        action));
+                    if (tick == maximumTicks)
+                    {
+                        settleWatch.Stop();
+                        return Result(RowScrollCoordinatorOutcome.NoMovementStop, tick, settleSample, RowScrollPhase.Settle, lastObservation);
+                    }
+
+                    break;
+                }
+
+                trace?.Invoke(new RowScrollCoordinatorTrace(
+                    tick,
+                    settleSample,
+                    RowScrollPhase.Settle,
+                    lastObservation,
+                    "stop_ambiguous"));
+                {
+                    var ambiguous = evidence with
                     {
                         Decision = RowAdvanceDecision.Ambiguous,
-                        Reason = lastEvidence.Decision == RowAdvanceDecision.Ambiguous
-                            ? lastEvidence.Reason
-                            : "insufficient_consecutive_confirmation"
+                        Reason = evidence.Decision == RowAdvanceDecision.Ambiguous
+                            ? evidence.Reason
+                            : "insufficient_stable_confirmation"
                     };
-                    return new RowScrollCoordinatorResult(
-                        RowScrollCoordinatorOutcome.AmbiguousStop,
-                        tick,
-                        sample,
-                        ambiguous);
+                    lastObservation = lastObservation with { Evidence = ambiguous };
+                    settleWatch.Stop();
+                    return Result(RowScrollCoordinatorOutcome.AmbiguousStop, tick, settleSample, RowScrollPhase.Settle, lastObservation);
                 }
+            }
+            settleWatch.Stop();
+        }
+
+        return Result(RowScrollCoordinatorOutcome.NoMovementStop, maximumTicks, 1, RowScrollPhase.FastProbe, lastObservation);
+
+        void ObservePositive(
+            RowScrollObservation observation,
+            ref RowAdvanceDecision? decision,
+            ref int frames)
+        {
+            if (!observation.Stable)
+            {
+                decision = null;
+                frames = 0;
+                return;
+            }
+
+            if (decision == observation.Evidence.Decision)
+            {
+                frames++;
+            }
+            else
+            {
+                decision = observation.Evidence.Decision;
+                frames = 1;
             }
         }
 
-        return new RowScrollCoordinatorResult(
-            RowScrollCoordinatorOutcome.NoMovementStop,
-            maximumTicks,
-            1,
-            lastEvidence);
+        static bool CanAccept(
+            RowScrollObservation observation,
+            int consecutiveFrames,
+            ScrollAcceptMode mode)
+        {
+            if (!observation.Stable)
+            {
+                return false;
+            }
+
+            var evidence = observation.Evidence;
+            var earlyStrongOneRow = mode == ScrollAcceptMode.EarlyOneRow
+                && evidence.Decision == RowAdvanceDecision.OneRow
+                && evidence.Strong
+                && !evidence.UsesScrollbarPosition;
+            return earlyStrongOneRow || consecutiveFrames >= 2;
+        }
+
+        static bool IsConfirmedOvershot(RowScrollObservation observation) =>
+            observation.Evidence.Decision == RowAdvanceDecision.TwoRows
+            && (observation.Stable
+                || string.Equals(
+                    observation.Evidence.Reason,
+                    "scrollbar_overshot_above_single_row_limit",
+                    StringComparison.Ordinal));
+
+        RowScrollCoordinatorResult Result(
+            RowScrollCoordinatorOutcome outcome,
+            int tick,
+            int sample,
+            RowScrollPhase phase,
+            RowScrollObservation observation) => new(
+                outcome,
+                tick,
+                sample,
+                phase,
+                observation,
+                totalSettleSamples,
+                settleWatch.Elapsed.TotalMilliseconds);
     }
 }
 
@@ -741,6 +1253,18 @@ public static class PanelCaptureGate
         double minimumReliableChangeMilliseconds) =>
         changeDistance > strongChangeTolerance
         && elapsedMilliseconds >= minimumReliableChangeMilliseconds;
+
+    public static bool LatchStrongChange(
+        bool alreadyChanged,
+        int changeDistance,
+        double elapsedMilliseconds,
+        int strongChangeTolerance,
+        double minimumReliableChangeMilliseconds) =>
+        alreadyChanged || IsStrongChangeCurrentFrame(
+            changeDistance,
+            elapsedMilliseconds,
+            strongChangeTolerance,
+            minimumReliableChangeMilliseconds);
 }
 
 public static class SelectionRefreshWaiter

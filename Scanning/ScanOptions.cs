@@ -34,6 +34,18 @@ public enum PanelAcceptMode
     AdaptiveEarlyFullRoi
 }
 
+internal enum TargetVerificationKind
+{
+    ChangedText,
+    IdenticalNeighborRoundTrip
+}
+
+internal static class TargetVerificationPolicy
+{
+    public static bool AllowsAdjacentIdentical(TargetVerificationKind kind) =>
+        kind == TargetVerificationKind.IdenticalNeighborRoundTrip;
+}
+
 public enum PostScrollPanelAcceptMode
 {
     Safe,
@@ -74,11 +86,25 @@ public static class ScanModeDefaults
     public static ScrollAcceptMode ScrollAccept(bool fastMode) =>
         fastMode ? ScrollAcceptMode.EarlyOneRow : ScrollAcceptMode.Safe;
 
-    public static PanelAcceptMode PanelAccept(bool fastMode) =>
-        fastMode ? PanelAcceptMode.AdaptiveEarlyFullRoi : PanelAcceptMode.Safe;
+    public static PanelAcceptMode PanelAccept(bool fastMode) => PanelAcceptMode.Safe;
 
     public static OverlapConflictMode OverlapConflict(bool fastMode) =>
         fastMode ? OverlapConflictMode.Recover : OverlapConflictMode.Recheck;
+
+    public static void ApplyFastSafety(ScanOptions options)
+    {
+        if (!options.FastMode)
+        {
+            return;
+        }
+
+        options.PanelStabilityMode = PanelStabilityMode.TextCore;
+        options.PanelAcceptMode = PanelAcceptMode.Safe;
+        options.PostScrollPanelAcceptMode = PostScrollPanelAcceptMode.Safe;
+        options.PanelMinAcceptFloorMs = 120;
+        options.SameRowPanelMinAcceptFloorMs = 120;
+        options.PostScrollPanelMinAcceptFloorMs = 120;
+    }
 }
 
 public sealed class ScanOptions
@@ -198,4 +224,67 @@ public sealed class ScanRunResult
     public int Completed { get; set; }
     public int Failed { get; set; }
     public string Error { get; set; } = "";
+}
+
+internal enum ScanEarlyStopDisposition
+{
+    None,
+    DrainQueuedOcr,
+    DiscardQueuedOcr
+}
+
+internal static class ScanEarlyStopPolicy
+{
+    public static ScanEarlyStopDisposition Resolve(
+        bool captureCompleted,
+        bool hasFailure,
+        bool cancellationRequested,
+        bool hasStopReason)
+    {
+        if (captureCompleted)
+        {
+            return ScanEarlyStopDisposition.None;
+        }
+
+        if (hasFailure && !cancellationRequested)
+        {
+            return ScanEarlyStopDisposition.DrainQueuedOcr;
+        }
+
+        return cancellationRequested || hasStopReason || !captureCompleted
+            ? ScanEarlyStopDisposition.DiscardQueuedOcr
+            : ScanEarlyStopDisposition.None;
+    }
+}
+
+internal sealed record ScanTerminalSnapshot(
+    string OutputDirectory,
+    string ExportFile,
+    int Items,
+    int Visited,
+    int Queued,
+    int Completed,
+    int Failed,
+    bool Partial,
+    string TerminationCode);
+
+internal static class ScanRunResultFactory
+{
+    public static ScanRunResult FromFailure(Exception exception, string fallbackOutputDirectory)
+    {
+        var terminal = (exception as ScanSessionDiagnosticException)?.TerminalSnapshot;
+        return new ScanRunResult
+        {
+            Success = false,
+            Status = "failed",
+            OutputDirectory = terminal?.OutputDirectory ?? fallbackOutputDirectory,
+            ExportFile = terminal?.ExportFile ?? "",
+            Items = terminal?.Items ?? 0,
+            Visited = terminal?.Visited ?? 0,
+            Queued = terminal?.Queued ?? 0,
+            Completed = terminal?.Completed ?? 0,
+            Failed = terminal?.Failed ?? 0,
+            Error = exception.ToString()
+        };
+    }
 }
