@@ -1,5 +1,5 @@
 {
-  "version": "2026-06-24",
+  "version": "2026-07-29",
   "source": {
     "primaryPages": [
       "https://wiki.biligame.com/zzz/%E9%A9%B1%E5%8A%A8%E7%9B%98%E5%9B%BE%E9%89%B4",
@@ -32,7 +32,9 @@
     { "name": "月光骑士颂", "wikiListOrder": 21, "sourcePage": "https://wiki.biligame.com/zzz/%E6%9C%88%E5%85%89%E9%AA%91%E5%A3%AB%E9%A2%82", "minRarity": "B", "maxRarity": "S" },
     { "name": "拂晓生花", "wikiListOrder": 22, "sourcePage": "https://wiki.biligame.com/zzz/%E6%8B%82%E6%99%93%E7%94%9F%E8%8A%B1", "minRarity": "B", "maxRarity": "S" },
     { "name": "呼啸沙龙", "wikiListOrder": 23, "sourcePage": "https://baike.mihoyo.com/zzz/wiki/channel/map/2/46", "minRarity": "B", "maxRarity": "S" },
-    { "name": "拂晓行纪", "wikiListOrder": 24, "sourcePage": "https://baike.mihoyo.com/zzz/wiki/channel/map/2/46", "minRarity": "B", "maxRarity": "S" }
+    { "name": "拂晓行纪", "wikiListOrder": 24, "sourcePage": "https://baike.mihoyo.com/zzz/wiki/channel/map/2/46", "minRarity": "B", "maxRarity": "S" },
+    { "name": "棘刺玫瑰", "wikiListOrder": 25, "sourcePage": "https://baike.mihoyo.com/zzz/wiki/channel/map/2/46", "minRarity": "B", "maxRarity": "S" },
+    { "name": "谶羽之誓", "wikiListOrder": 26, "sourcePage": "https://baike.mihoyo.com/zzz/wiki/channel/map/2/46", "minRarity": "B", "maxRarity": "S" }
   ],
   "extraNameCandidates": [
     "沧浪行歌",

@@ -171,6 +171,62 @@ internal static class ScanDiagnosticDetails
         };
     }
 
+    public static IReadOnlyDictionary<string, object?> Terminal(ScanTerminalSnapshot snapshot)
+    {
+        return new Dictionary<string, object?>
+        {
+            ["partial"] = snapshot.Partial,
+            ["items"] = snapshot.Items,
+            ["visited"] = snapshot.Visited,
+            ["queued"] = snapshot.Queued,
+            ["completed"] = snapshot.Completed,
+            ["failed"] = snapshot.Failed,
+            ["terminationCode"] = snapshot.TerminationCode
+        };
+    }
+
+    public static IReadOnlyDictionary<string, object?> RowScroll(
+        string direction,
+        int tick,
+        int maximumTicks,
+        int sample,
+        RowAdvanceDecision decision,
+        int noMoveScore,
+        int oneRowScore,
+        int twoRowScore,
+        int bestScore,
+        int secondScore,
+        int margin,
+        int movedDistance,
+        int frameDistance,
+        string observationPhase,
+        int settleSamples,
+        double settleElapsedMilliseconds,
+        string reason)
+    {
+        return new Dictionary<string, object?>
+        {
+            ["phase"] = "row_scroll",
+            ["direction"] = direction,
+            ["tick"] = tick,
+            ["maximumTicks"] = maximumTicks,
+            ["sample"] = sample,
+            ["decision"] = decision.ToString(),
+            ["noMoveScore"] = noMoveScore,
+            ["oneRowScore"] = oneRowScore,
+            ["twoRowScore"] = twoRowScore,
+            ["bestScore"] = bestScore,
+            ["secondScore"] = secondScore,
+            ["margin"] = margin,
+            ["movedDistance"] = movedDistance,
+            ["frameDistance"] = frameDistance,
+            ["observationPhase"] = observationPhase,
+            ["settleSamples"] = settleSamples,
+            ["settleElapsedMs"] = Math.Round(settleElapsedMilliseconds, 1),
+            ["reason"] = reason
+        };
+    }
+
     public static IReadOnlyDictionary<string, object?>? FromException(Exception exception)
     {
         return exception is IScanDiagnosticException diagnostic ? diagnostic.DiagnosticDetails : null;

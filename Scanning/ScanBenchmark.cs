@@ -25,11 +25,11 @@ public static class ScanBenchmark
         RegexOptions.Compiled);
 
     private static readonly Regex CellTimingRegex = new(
-        @"CELL_TIMING: index=(?<index>\d+).*?(?:afterScroll=(?<afterScroll>True|False), postScrollFirstCell=(?<postScrollFirst>True|False), )?panelWaitMs=(?<panel>[\d.]+), enqueueWaitMs=(?<enqueue>[\d.]+), fallback=(?<fallback>True|False), visibleRois=(?<visible>\d+)/(?<total>\d+), totalMs=(?<cellTotal>[\d.]+)(?:, panelFrames=(?<frames>\d+), changeMs=(?<change>[\d.]+|NA)(?:, selectionChangeMs=(?<selection>[\d.]+|NA))?, fullRoiMs=(?<fullRoi>[\d.]+|NA), stableMs=(?<stable>[\d.]+|NA)(?:, panelTextStableMs=(?<textStable>[\d.]+|NA), panelStableSource=(?<stableSource>[^,]+), panelStabilityReason=(?<stabilityReason>[^,]+), rarityProbeMs=(?<rarityProbe>[\d.]+), selectionProbeMs=(?<selectionProbe>[\d.]+))?(?:, captureMs=(?<capture>[\d.]+), signatureMs=(?<signature>[\d.]+), visibleRoiMs=(?<visibleRoi>[\d.]+), frameLoopMs=(?<frameLoop>[\d.]+)(?:, frameToBitmapMs=(?<frameToBitmap>[\d.]+), bitmapCreatedCount=(?<bitmapCreated>\d+))?(?:, quickAccept=(?<quickAccept>True|False), quickRejectReason=(?<quickReject>[^,]+))?(?:, adaptiveThrottleMs=(?<throttle>[\d.]+), ocrBacklogBeforeEnqueue=(?<backlog>\d+), adaptivePanelMinMs=(?<panelMin>\d+), adaptivePanelSamples=(?<panelSamples>\d+), adaptivePanelReason=(?<panelReason>[^,]+)(?:, panelAcceptMode=(?<panelAcceptMode>[^,]+)(?:, postScrollAcceptMode=(?<postScrollAcceptMode>[^,]+), panelMinFloorMs=(?<panelMinFloor>\d+))?, roiCompleteFrames=(?<roiCompleteFrames>\d+), selectedStableFrames=(?<selectedStableFrames>\d+), acceptGateReason=(?<acceptGateReason>[^,]+)(?:, panelFloorMode=(?<panelFloorMode>[^,]+), sameRowPanelFloorMs=(?<sameRowPanelFloor>\d+), postScrollPanelFloorMs=(?<postScrollPanelFloor>\d+), panelFloorReason=(?<panelFloorReason>[^,]+), floorWaitLimitedMs=(?<floorWaitLimited>[\d.]+), panelAcceptElapsedVsFloorMs=(?<acceptElapsedVsFloor>[-\d.]+), scrollTickDelayMs=(?<scrollTickDelay>\d+))?)?)?)?)?",
+        @"CELL_TIMING: index=(?<index>\d+).*?(?:afterScroll=(?<afterScroll>True|False), postScrollFirstCell=(?<postScrollFirst>True|False), )?panelWaitMs=(?<panel>[\d.]+), enqueueWaitMs=(?<enqueue>[\d.]+), fallback=(?<fallback>True|False), visibleRois=(?<visible>\d+)/(?<total>\d+), totalMs=(?<cellTotal>[\d.]+)(?:, panelFrames=(?<frames>\d+), changeMs=(?<change>[\d.]+|NA)(?:, selectionChangeMs=(?<selection>[\d.]+|NA))?, fullRoiMs=(?<fullRoi>[\d.]+|NA), stableMs=(?<stable>[\d.]+|NA)(?:, panelTextStableMs=(?<textStable>[\d.]+|NA), panelStableSource=(?<stableSource>[^,]+), panelStabilityReason=(?<stabilityReason>[^,]+)(?:, targetSelectionStableFrames=(?<targetSelectionStableFrames>\d+), targetVerificationKind=(?<targetVerificationKind>[^,]+))?, rarityProbeMs=(?<rarityProbe>[\d.]+), selectionProbeMs=(?<selectionProbe>[\d.]+))?(?:, captureMs=(?<capture>[\d.]+), signatureMs=(?<signature>[\d.]+), visibleRoiMs=(?<visibleRoi>[\d.]+), frameLoopMs=(?<frameLoop>[\d.]+)(?:, frameToBitmapMs=(?<frameToBitmap>[\d.]+), bitmapCreatedCount=(?<bitmapCreated>\d+))?(?:, quickAccept=(?<quickAccept>True|False), quickRejectReason=(?<quickReject>[^,]+))?(?:, adaptiveThrottleMs=(?<throttle>[\d.]+), ocrBacklogBeforeEnqueue=(?<backlog>\d+), adaptivePanelMinMs=(?<panelMin>\d+), adaptivePanelSamples=(?<panelSamples>\d+), adaptivePanelReason=(?<panelReason>[^,]+)(?:, panelAcceptMode=(?<panelAcceptMode>[^,]+)(?:, postScrollAcceptMode=(?<postScrollAcceptMode>[^,]+), panelMinFloorMs=(?<panelMinFloor>\d+))?, roiCompleteFrames=(?<roiCompleteFrames>\d+), selectedStableFrames=(?<selectedStableFrames>\d+), acceptGateReason=(?<acceptGateReason>[^,]+)(?:, panelFloorMode=(?<panelFloorMode>[^,]+), sameRowPanelFloorMs=(?<sameRowPanelFloor>\d+), postScrollPanelFloorMs=(?<postScrollPanelFloor>\d+), panelFloorReason=(?<panelFloorReason>[^,]+), floorWaitLimitedMs=(?<floorWaitLimited>[\d.]+), panelAcceptElapsedVsFloorMs=(?<acceptElapsedVsFloor>[-\d.]+), scrollTickDelayMs=(?<scrollTickDelay>\d+))?)?)?)?)?",
         RegexOptions.Compiled);
 
     private static readonly Regex ScrollTimingRegex = new(
-        @"ROW_SCROLL_TIMING: .*?scroll_tick_wait_ms=(?<tick>[\d.]+), list_stable_ms=(?<stable>[\d.]+), row_signature_ms=(?<row>[\d.]+), post_scroll_viewport_ms=(?<viewport>[\d.]+)",
+        @"ROW_SCROLL_TIMING: .*?scroll_tick_wait_ms=(?<tick>[\d.]+), list_stable_ms=(?<stable>[\d.]+), row_signature_ms=(?<row>[\d.]+)(?:, settle_samples=(?<settleSamples>\d+), settle_elapsed_ms=(?<settle>[\d.]+))?, post_scroll_viewport_ms=(?<viewport>[\d.]+)",
         RegexOptions.Compiled);
 
     private static readonly Regex StartRegex = new(
@@ -104,7 +104,7 @@ public static class ScanBenchmark
         }
 
         WriteDiagnosis(current);
-        return 0;
+        return IsCorrectnessPass(current) ? 0 : 1;
     }
 
     public static int RunStabilitySuite(string scanParent)
@@ -167,6 +167,15 @@ public static class ScanBenchmark
         Write("suite", "slot_fixed_value_violation_sum", reports.Sum(report => report.SlotFixedValueViolationCount));
         Write("suite", "incomplete_roi_sum", reports.Sum(report => report.IncompleteRoiCount));
         Write("suite", "row_scroll_overshot_sum", reports.Sum(report => report.RowScrollOvershotCount));
+        Write("suite", "row_scroll_no_move_sum", reports.Sum(report => report.RowScrollNoMoveCount));
+        Write("suite", "row_scroll_ambiguous_sum", reports.Sum(report => report.RowScrollAmbiguousCount));
+        Write("suite", "row_scroll_settle_accept_sum", reports.Sum(report => report.RowScrollSettleAcceptCount));
+        Write("suite", "row_scroll_settle_timeout_sum", reports.Sum(report => report.RowScrollSettleTimeoutCount));
+        Write("suite", "row_scroll_partial_move_continue_sum", reports.Sum(report => report.RowScrollPartialMoveContinueCount));
+        Write("suite", "row_scroll_false_advance_sum", reports.Sum(report => report.RowScrollFalseAdvanceCount));
+        Write("suite", "panel_target_evidence_sum", reports.Sum(report => report.PanelTargetEvidenceCount));
+        Write("suite", "panel_neighbor_roundtrip_sum", reports.Sum(report => report.PanelNeighborRoundTripCount));
+        Write("suite", "ocr_drain_inconsistent_sum", reports.Count(report => !report.OcrDrainConsistent));
         Write("suite", "overlap_conflict_sum", reports.Sum(report => report.OverlapConflictCount));
         Write("suite", "overlap_conflict_recheck_sum", reports.Sum(report => report.OverlapConflictRecheckCount));
         Write("suite", "overlap_conflict_recovered_sum", reports.Sum(report => report.OverlapConflictRecoveredCount));
@@ -181,7 +190,7 @@ public static class ScanBenchmark
         Write("suite", "speed_vs_baseline_percent", speedVsBaselinePercent);
         Write("suite", "recommended_candidate", recommendedCandidate.ToString().ToLowerInvariant());
         Write("suite", "reject_reason", rejectReason);
-        return reports.Count == 0 ? 2 : 0;
+        return reports.Count == 0 ? 2 : correctnessFailCount == 0 ? 0 : 1;
     }
 
     private static IEnumerable<string> EnumerateScanDirectories(string scanParent)
@@ -232,7 +241,22 @@ public static class ScanBenchmark
         var traversal = ParseTraversal(lines);
         var overlapSummary = ParseOverlapTraversalSummary(lines, events);
         var exportFile = ResolveExportFile(scanDirectory, terminal?.ExportFile);
-        var exportStats = ReadExportStats(exportFile);
+        var verifiedIdenticalNeighborIndices = events
+            .Where(item => item.Kind == "ITEM_TARGET_VERIFICATION"
+                && item.Detail.Contains("kind=IdenticalNeighborRoundTrip", StringComparison.OrdinalIgnoreCase)
+                && TryReadEventInt(item, "index", out _))
+            .Select(item =>
+            {
+                TryReadEventInt(item, "index", out var index);
+                return index;
+            })
+            .ToHashSet();
+        var exportStats = ReadExportStats(exportFile, verifiedIdenticalNeighborIndices);
+        var invalidRoiTimeoutCount = events.Count(item => item.Kind == "PANEL_CAPTURE_TIMEOUT"
+            && (item.Detail.Contains("acceptGateReason=required_core_missing", StringComparison.OrdinalIgnoreCase)
+                || item.Detail.Contains("acceptGateReason=incomplete_substat_pair", StringComparison.OrdinalIgnoreCase)
+                || item.Detail.Contains("acceptGateReason=substat_gap", StringComparison.OrdinalIgnoreCase)
+                || item.Detail.Contains("acceptGateReason=invalid_roi_layout", StringComparison.OrdinalIgnoreCase)));
         var non15FileCount = Directory.EnumerateFiles(scanDirectory, "*.non15.txt").Count();
         var inferredPartial = terminal?.Partial
             ?? string.Equals(Path.GetFileName(exportFile), "export.partial.json", StringComparison.OrdinalIgnoreCase);
@@ -276,6 +300,8 @@ public static class ScanBenchmark
             ExportItemCount = exportStats.ItemCount,
             ExportDuplicateGroupCount = exportStats.DuplicateGroupCount,
             ExportDuplicateItemCount = exportStats.DuplicateItemCount,
+            ExportVerifiedAdjacentDuplicateCount = exportStats.VerifiedAdjacentDuplicateCount,
+            ExportUnverifiedDuplicateCount = exportStats.UnverifiedDuplicateCount,
             SlotOutOfRangeCount = exportStats.SlotOutOfRangeCount,
             SlotMainStatViolationCount = exportStats.SlotMainStatViolationCount,
             SlotFixedValueViolationCount = exportStats.SlotFixedValueViolationCount,
@@ -305,13 +331,40 @@ public static class ScanBenchmark
             OverlapScannedLogicalRowsCount = overlapSummary.ScannedRows,
             OverlapMissingLogicalRowsCount = overlapSummary.MissingRows,
             FullScanComplete = overlapSummary.FullScanComplete,
-            RowScrollOvershotCount = events.Count(x => x.Kind == "ROW_SCROLL_OVERSHOT"),
+            RowScrollOvershotCount = events.Count(x => x.Kind is "ROW_SCROLL_OVERSHOT" or "ROW_SCROLL_OVERSHOT_BLOCKED"),
             RowScrollRecoveryAcceptedCount = events.Count(x => x.Kind == "ROW_SCROLL_RECOVERY_ACCEPTED"),
             RowScrollRecoveryFailCount = events.Count(x => x.Kind == "ROW_SCROLL_RECOVERY_FAIL"),
             RowScrollStrictStopCount = events.Count(x => x.Kind == "ROW_SCROLL_STRICT_STOP"),
+            RowScrollNoMoveCount = events.Count(x => x.Kind == "ROW_SCROLL_NO_MOVE_CONFIRMED"),
+            RowScrollAmbiguousCount = events.Count(x => x.Kind == "ROW_SCROLL_AMBIGUOUS_STOP"),
+            RowScrollSettleStartCount = events.Count(x => x.Kind == "ROW_SCROLL_SETTLE_START"),
+            RowScrollSettleAcceptCount = events.Count(x => x.Kind == "ROW_SCROLL_SETTLE_ACCEPT"),
+            RowScrollSettleTimeoutCount = events.Count(x => x.Kind == "ROW_SCROLL_SETTLE_TIMEOUT"),
+            RowScrollPartialMoveContinueCount = events.Count(x => x.Kind == "ROW_SCROLL_PARTIAL_MOVE_CONTINUE"),
+            RowScrollFalseAdvanceCount = events.Count(x =>
+                x.Kind is "ROW_SCROLL_DONE" or "ROW_SCROLL_RECOVERED" or "OVERLAP_SCROLL_ACCEPTED"
+                && (x.Detail.Contains("decision=NoMove", StringComparison.OrdinalIgnoreCase)
+                    || x.Detail.Contains("decision=Ambiguous", StringComparison.OrdinalIgnoreCase)
+                    || x.Detail.Contains("rowsAdvanced=0", StringComparison.OrdinalIgnoreCase))),
+            NonUnitRowScrollDoneCount = events.Count(x => x.Kind == "ROW_SCROLL_DONE"
+                && (!TryReadEventInt(x, "rowsAdvanced", out var rowsAdvanced) || rowsAdvanced != 1)),
+            PanelTargetEvidenceCount = events.Count(x => x.Kind == "PANEL_TARGET_EVIDENCE"),
+            PanelNeighborRoundTripCount = events.Count(x => x.Kind == "PANEL_NEIGHBOR_ROUNDTRIP"
+                && x.Detail.Contains("phase=target_ready", StringComparison.OrdinalIgnoreCase)),
+            TargetVerificationEventCount = events.Count(x => x.Kind == "ITEM_TARGET_VERIFICATION"),
+            TargetVerificationUnknownCount = events.Count(x => x.Kind == "ITEM_TARGET_VERIFICATION"
+                && !x.Detail.Contains("kind=ChangedText", StringComparison.OrdinalIgnoreCase)
+                && !x.Detail.Contains("kind=IdenticalNeighborRoundTrip", StringComparison.OrdinalIgnoreCase)),
+            TargetSelectionEvidenceMissingCount = cellTimings.Count(x => x.TargetSelectionStableFrames is null),
+            TargetSelectionUnderStableCount = cellTimings.Count(x => x.TargetSelectionStableFrames is < 2),
+            OcrDrainStartCount = events.Count(x => x.Kind == "OCR_DRAIN_START"),
+            OcrDrainDoneCount = events.Count(x => x.Kind == "OCR_DRAIN_DONE"),
+            OcrDrainRemainingCount = SumEventInt(events, "OCR_DRAIN_DONE", "remaining"),
+            OcrDrainDiscardedCount = SumEventInt(events, "OCR_DRAIN_DONE", "discarded"),
             EdgeClickBlockedCount = events.Count(x => x.Kind == "EDGE_CLICK_BLOCKED"),
             MinVisibleRois = cellTimings.Count > 0 ? cellTimings.Min(x => x.VisibleRois) : null,
-            IncompleteRoiCount = cellTimings.Count(x => x.VisibleRois < x.TotalRois),
+            IncompleteRoiCount = cellTimings.Count(x => !IsCompleteVariableRoiLayout(x.VisibleRois, x.TotalRois))
+                + invalidRoiTimeoutCount,
             LastVisited = terminal?.Counters.Visited ?? scanOnceCounters?.Visited ?? lastCounters?.Visited ?? resourceCounters?.Visited,
             LastQueued = terminal?.Counters.Queued ?? scanOnceCounters?.Queued ?? lastCounters?.Queued ?? resourceCounters?.Queued,
             LastCompleted = terminal?.Counters.Completed ?? scanOnceCounters?.Completed ?? lastCounters?.Completed ?? resourceCounters?.Completed,
@@ -336,6 +389,7 @@ public static class ScanBenchmark
             SelectedStableFrames = Stats.From(cellTimings.Where(x => x.SelectedStableFrames is not null).Select(x => x.SelectedStableFrames!.Value)),
             PanelStable = Stats.From(cellTimings.Where(x => x.StableMs is not null).Select(x => x.StableMs!.Value)),
             PanelTextStable = Stats.From(cellTimings.Where(x => x.TextStableMs is not null).Select(x => x.TextStableMs!.Value)),
+            TargetSelectionStableFrames = Stats.From(cellTimings.Where(x => x.TargetSelectionStableFrames is not null).Select(x => x.TargetSelectionStableFrames!.Value)),
             RarityProbe = Stats.From(cellTimings.Where(x => x.RarityProbeMs is not null).Select(x => x.RarityProbeMs!.Value)),
             SelectionProbe = Stats.From(cellTimings.Where(x => x.SelectionProbeMs is not null).Select(x => x.SelectionProbeMs!.Value)),
             PanelCapture = Stats.From(cellTimings.Where(x => x.CaptureMs is not null).Select(x => x.CaptureMs!.Value)),
@@ -355,6 +409,7 @@ public static class ScanBenchmark
             ScrollTickDelay = Stats.From(cellTimings.Where(x => x.ScrollTickDelayMs is not null).Select(x => x.ScrollTickDelayMs!.Value)),
             ScrollTickWait = Stats.From(scrollTimings.Select(x => x.ScrollTickWaitMs)),
             ScrollListStable = Stats.From(scrollTimings.Select(x => x.ListStableMs)),
+            RowScrollSettle = Stats.From(scrollTimings.Where(x => x.SettleMs is not null).Select(x => x.SettleMs!.Value)),
             RowSignature = Stats.From(scrollTimings.Select(x => x.RowSignatureMs)),
             PostScrollViewport = Stats.From(scrollTimings.Select(x => x.PostScrollViewportMs)),
             CellTotal = Stats.From(cellTimings.Select(x => x.TotalMs)),
@@ -387,7 +442,8 @@ public static class ScanBenchmark
                 && report.Non15FileCount > 0
                 && report.LastFailed == 0
                 && ExportMatchesCompleted(report) is not false
-                && report.OverlapHardStopCount == 0);
+                && report.OverlapHardStopCount == 0
+                && report.RowScrollFalseAdvanceCount == 0);
         report.QuickAcceptCount = cellTimings.Count(x => x.QuickAccept == true);
         report.QuickRejectCount = cellTimings.Count(x => x.QuickAccept == false);
         report.AcceptGateReasons = cellTimings
@@ -441,6 +497,26 @@ public static class ScanBenchmark
         return events;
     }
 
+    private static int SumEventInt(IReadOnlyList<ScanEvent> events, string kind, string key)
+    {
+        var regex = new Regex($@"(?:^|,\s*){Regex.Escape(key)}=(?<value>\d+)(?:,|$)", RegexOptions.IgnoreCase);
+        return events
+            .Where(item => string.Equals(item.Kind, kind, StringComparison.Ordinal))
+            .Select(item => regex.Match(item.Detail))
+            .Where(match => match.Success)
+            .Sum(match => ParseInt(match.Groups["value"].Value));
+    }
+
+    private static bool TryReadEventInt(ScanEvent item, string key, out int value)
+    {
+        var match = Regex.Match(
+            item.Detail,
+            $@"(?:^|,\s*){Regex.Escape(key)}=(?<value>-?\d+)(?:,|$)",
+            RegexOptions.IgnoreCase);
+        value = match.Success ? ParseInt(match.Groups["value"].Value) : 0;
+        return match.Success;
+    }
+
     private static List<CellTiming> ParseCellTimings(IEnumerable<string> lines)
     {
         var timings = new List<CellTiming>();
@@ -470,6 +546,8 @@ public static class ScanBenchmark
                 ParseOptionalDouble(match.Groups["textStable"].Value),
                 match.Groups["stableSource"].Success ? match.Groups["stableSource"].Value : null,
                 match.Groups["stabilityReason"].Success ? match.Groups["stabilityReason"].Value : null,
+                ParseOptionalDouble(match.Groups["targetSelectionStableFrames"].Value),
+                match.Groups["targetVerificationKind"].Success ? match.Groups["targetVerificationKind"].Value : null,
                 ParseOptionalDouble(match.Groups["rarityProbe"].Value),
                 ParseOptionalDouble(match.Groups["selectionProbe"].Value),
                 ParseOptionalDouble(match.Groups["capture"].Value),
@@ -516,6 +594,7 @@ public static class ScanBenchmark
                 ParseDouble(match.Groups["tick"].Value),
                 ParseDouble(match.Groups["stable"].Value),
                 ParseDouble(match.Groups["row"].Value),
+                ParseOptionalDouble(match.Groups["settle"].Value),
                 ParseDouble(match.Groups["viewport"].Value)));
         }
 
@@ -840,11 +919,11 @@ public static class ScanBenchmark
         return null;
     }
 
-    private static ExportStats ReadExportStats(string exportFile)
+    private static ExportStats ReadExportStats(string exportFile, IReadOnlySet<int> verifiedIdenticalNeighborIndices)
     {
         if (!File.Exists(exportFile))
         {
-            return new ExportStats(null, 0, 0, 0, 0, 0);
+            return new ExportStats(null, 0, 0, 0, 0, 0, 0, 0);
         }
 
         try
@@ -853,11 +932,14 @@ public static class ScanBenchmark
             using var document = JsonDocument.Parse(File.ReadAllText(exportFile));
             if (document.RootElement.ValueKind != JsonValueKind.Array)
             {
-                return new ExportStats(null, 0, 0, 0, 0, 0);
+                return new ExportStats(null, 0, 0, 0, 0, 0, 0, 0);
             }
 
             var itemCount = 0;
             var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
+            string? previousFingerprint = null;
+            var verifiedAdjacentDuplicates = 0;
+            var unverifiedDuplicates = 0;
             var slotOutOfRange = 0;
             var slotMainStatViolation = 0;
             var slotFixedValueViolation = 0;
@@ -865,7 +947,23 @@ public static class ScanBenchmark
             {
                 itemCount++;
                 var fingerprint = ExportFingerprint(item);
+                var alreadySeen = fingerprints.ContainsKey(fingerprint);
+                if (alreadySeen)
+                {
+                    var verifiedAdjacent = string.Equals(previousFingerprint, fingerprint, StringComparison.Ordinal)
+                        && verifiedIdenticalNeighborIndices.Contains(itemCount);
+                    if (verifiedAdjacent)
+                    {
+                        verifiedAdjacentDuplicates++;
+                    }
+                    else
+                    {
+                        unverifiedDuplicates++;
+                    }
+                }
+
                 fingerprints[fingerprint] = fingerprints.TryGetValue(fingerprint, out var count) ? count + 1 : 1;
+                previousFingerprint = fingerprint;
                 var export = item.Deserialize<DriveDiscExport>(JsonDefaults.Read);
                 if (export is not null)
                 {
@@ -890,12 +988,29 @@ public static class ScanBenchmark
 
             var duplicateGroups = fingerprints.Values.Count(count => count > 1);
             var duplicateItems = fingerprints.Values.Where(count => count > 1).Sum();
-            return new ExportStats(itemCount, duplicateGroups, duplicateItems, slotOutOfRange, slotMainStatViolation, slotFixedValueViolation);
+            return new ExportStats(
+                itemCount,
+                duplicateGroups,
+                duplicateItems,
+                verifiedAdjacentDuplicates,
+                unverifiedDuplicates,
+                slotOutOfRange,
+                slotMainStatViolation,
+                slotFixedValueViolation);
         }
         catch
         {
-            return new ExportStats(null, 0, 0, 0, 0, 0);
+            return new ExportStats(null, 0, 0, 0, 0, 0, 0, 0);
         }
+    }
+
+    internal static bool IsCompleteVariableRoiLayout(int visibleRois, int totalRois)
+    {
+        const int requiredCoreRois = 4;
+        return totalRois >= requiredCoreRois
+            && visibleRois >= requiredCoreRois
+            && visibleRois <= totalRois
+            && (visibleRois - requiredCoreRois) % 2 == 0;
     }
 
     private static string ResolveExportFile(string scanDirectory, string? terminalExportFile)
@@ -1114,6 +1229,8 @@ public static class ScanBenchmark
         Write(prefix, "export_matches_completed", ExportMatchesCompleted(report));
         Write(prefix, "export_duplicate_groups", report.ExportDuplicateGroupCount);
         Write(prefix, "export_duplicate_items", report.ExportDuplicateItemCount);
+        Write(prefix, "export_verified_adjacent_duplicates", report.ExportVerifiedAdjacentDuplicateCount);
+        Write(prefix, "export_unverified_duplicates", report.ExportUnverifiedDuplicateCount);
         Write(prefix, "slot_out_of_range_count", report.SlotOutOfRangeCount);
         Write(prefix, "slot_mainstat_violation_count", report.SlotMainStatViolationCount);
         Write(prefix, "slot_fixed_value_violation_count", report.SlotFixedValueViolationCount);
@@ -1162,6 +1279,24 @@ public static class ScanBenchmark
         Write(prefix, "row_scroll_recovery_accepted_count", report.RowScrollRecoveryAcceptedCount);
         Write(prefix, "row_scroll_recovery_fail_count", report.RowScrollRecoveryFailCount);
         Write(prefix, "row_scroll_strict_stop_count", report.RowScrollStrictStopCount);
+        Write(prefix, "row_scroll_no_move_count", report.RowScrollNoMoveCount);
+        Write(prefix, "row_scroll_ambiguous_count", report.RowScrollAmbiguousCount);
+        Write(prefix, "row_scroll_settle_start_count", report.RowScrollSettleStartCount);
+        Write(prefix, "row_scroll_settle_accept_count", report.RowScrollSettleAcceptCount);
+        Write(prefix, "row_scroll_settle_timeout_count", report.RowScrollSettleTimeoutCount);
+        Write(prefix, "row_scroll_partial_move_continue_count", report.RowScrollPartialMoveContinueCount);
+        Write(prefix, "row_scroll_false_advance_count", report.RowScrollFalseAdvanceCount);
+        Write(prefix, "row_scroll_non_unit_done_count", report.NonUnitRowScrollDoneCount);
+        Write(prefix, "panel_target_evidence_count", report.PanelTargetEvidenceCount);
+        Write(prefix, "panel_neighbor_roundtrip_count", report.PanelNeighborRoundTripCount);
+        Write(prefix, "target_verification_event_count", report.TargetVerificationEventCount);
+        Write(prefix, "target_verification_unknown_count", report.TargetVerificationUnknownCount);
+        Write(prefix, "target_selection_evidence_missing_count", report.TargetSelectionEvidenceMissingCount);
+        Write(prefix, "target_selection_under_stable_count", report.TargetSelectionUnderStableCount);
+        Write(prefix, "ocr_drain_start_count", report.OcrDrainStartCount);
+        Write(prefix, "ocr_drain_done_count", report.OcrDrainDoneCount);
+        Write(prefix, "ocr_drain_remaining_count", report.OcrDrainRemainingCount);
+        Write(prefix, "ocr_drain_discarded_count", report.OcrDrainDiscardedCount);
         Write(prefix, "edge_click_blocked_count", report.EdgeClickBlockedCount);
         Write(prefix, "min_visible_rois", report.MinVisibleRois);
         Write(prefix, "incomplete_roi_count", report.IncompleteRoiCount);
@@ -1184,6 +1319,7 @@ public static class ScanBenchmark
         WriteStats(prefix, "selected_stable_frames", report.SelectedStableFrames);
         WriteStats(prefix, "panel_stable_ms", report.PanelStable);
         WriteStats(prefix, "panel_text_stable_ms", report.PanelTextStable);
+        WriteStats(prefix, "target_selection_stable_frames", report.TargetSelectionStableFrames);
         WriteStats(prefix, "rarity_probe_ms", report.RarityProbe);
         WriteStats(prefix, "selection_probe_ms", report.SelectionProbe);
         WriteStats(prefix, "capture_ms", report.PanelCapture);
@@ -1204,6 +1340,7 @@ public static class ScanBenchmark
         WriteStats(prefix, "scroll_tick_delay_ms", report.ScrollTickDelay);
         WriteStats(prefix, "scroll_tick_wait_ms", report.ScrollTickWait);
         WriteStats(prefix, "scroll_list_stable_ms", report.ScrollListStable);
+        WriteStats(prefix, "row_scroll_settle_ms", report.RowScrollSettle);
         WriteStats(prefix, "row_signature_ms", report.RowSignature);
         WriteStats(prefix, "post_scroll_viewport_ms", report.PostScrollViewport);
         WriteStats(prefix, "cell_total_ms", report.CellTotal);
@@ -1262,6 +1399,7 @@ public static class ScanBenchmark
         WriteDelta("panel_signature_delta_percent", current.PanelSignature.Average, baseline.PanelSignature.Average);
         WriteDelta("visible_roi_delta_percent", current.VisibleRoi.Average, baseline.VisibleRoi.Average);
         WriteDelta("scroll_list_stable_delta_percent", current.ScrollListStable.Average, baseline.ScrollListStable.Average);
+        WriteDelta("row_scroll_settle_delta_percent", current.RowScrollSettle.Average, baseline.RowScrollSettle.Average);
         WriteDelta("row_signature_delta_percent", current.RowSignature.Average, baseline.RowSignature.Average);
         WriteDelta("ocr_total_delta_percent", current.OcrTotal.Average, baseline.OcrTotal.Average);
         WriteDelta("ocr_total_per_item_delta_percent", current.OcrTotalPerItem.Average, baseline.OcrTotalPerItem.Average);
@@ -1291,7 +1429,7 @@ public static class ScanBenchmark
         Write("acceptance", "no_incomplete_roi", report.IncompleteRoiCount == 0 ? "pass" : "fail");
         Write("acceptance", "no_error_files", report.ErrorFileCount == 0 ? "pass" : "fail");
         Write("acceptance", "export_consistency", ExportMatchesCompleted(report) is false ? "risk" : "pass");
-        Write("acceptance", "no_export_duplicates", report.ExportDuplicateItemCount == 0 ? "pass" : "fail");
+        Write("acceptance", "no_export_duplicates", report.ExportUnverifiedDuplicateCount == 0 ? "pass" : "fail");
         Write("acceptance", "slot_safety", report.SlotSafetyPass ? "pass" : "fail");
         Write("acceptance", "backlog_not_saturated", IsBacklogSaturated(report) ? "risk" : "pass");
         Write("acceptance", "no_unsafe_visual_row2", report.UnsafeVisualRow2ClickCount == 0 ? "pass" : "fail");
@@ -1301,8 +1439,18 @@ public static class ScanBenchmark
             && string.Equals(report.TerminationCode, "non_level_15_stop", StringComparison.OrdinalIgnoreCase);
         Write("acceptance", "overlap_no_missing_rows", !report.FullScanExpected || validNonLevel15Stop ? "skip" : report.OverlapMissingLogicalRowsCount == 0 ? "pass" : "fail");
         Write("acceptance", "full_scan_complete", !report.FullScanExpected ? "skip" : report.EffectiveFullScanComplete ? "pass" : "fail");
-        Write("acceptance", "strict_one_way_scroll", report.RowScrollOvershotCount == 0 && report.RowScrollRecoveryAcceptedCount == 0 && report.RowScrollStrictStopCount == 0 ? "pass" : "risk");
+        Write("acceptance", "strict_one_way_scroll", report.RowScrollOvershotCount == 0
+            && report.RowScrollRecoveryAcceptedCount == 0
+            && report.RowScrollStrictStopCount == 0
+            && report.NonUnitRowScrollDoneCount == 0
+            && report.OverlapConfirmedTwoRowAcceptCount == 0
+                ? "pass"
+                : "fail");
         Write("acceptance", "scroll_overshot_recovered", report.RowScrollRecoveryFailCount == 0 && report.RowScrollOvershotCount <= report.RowScrollRecoveryAcceptedCount ? "pass" : "risk");
+        Write("acceptance", "no_false_scroll_advance", report.RowScrollFalseAdvanceCount == 0 ? "pass" : "fail");
+        Write("acceptance", "target_verification_consistency", report.TargetVerificationConsistent ? "pass" : "fail");
+        Write("acceptance", "panel_minimum_floor", report.PanelMinimumFloorPass ? "pass" : "fail");
+        Write("acceptance", "ocr_drain_consistency", report.OcrDrainStartCount == 0 ? "skip" : report.OcrDrainConsistent && ExportMatchesCompleted(report) != false ? "pass" : "fail");
     }
 
     private static void WriteStats(string prefix, string name, Stats stats)
@@ -1478,9 +1626,11 @@ public static class ScanBenchmark
         }
 
         var exportMatchesCompleted = ExportMatchesCompleted(report);
+        var validNonLevel15Stop = report.EffectiveFullScanComplete
+            && string.Equals(report.TerminationCode, "non_level_15_stop", StringComparison.OrdinalIgnoreCase);
         return report.LastFailed == 0
             && report.ErrorFileCount == 0
-            && report.ExportDuplicateItemCount == 0
+            && report.ExportUnverifiedDuplicateCount == 0
             && report.SlotSafetyPass
             && report.IncompleteRoiCount == 0
             && report.QuickAcceptCount == 0
@@ -1488,7 +1638,16 @@ public static class ScanBenchmark
             && report.RowScrollRecoveryAcceptedCount == 0
             && report.RowScrollRecoveryFailCount == 0
             && report.RowScrollStrictStopCount == 0
+            && report.RowScrollFalseAdvanceCount == 0
+            && report.NonUnitRowScrollDoneCount == 0
+            && report.OverlapConfirmedTwoRowAcceptCount == 0
+            && report.TargetVerificationConsistent
+            && report.PanelMinimumFloorPass
+            && report.OcrDrainConsistent
             && report.UnsafeVisualRow2ClickCount == 0
+            && report.OverlapHardStopCount == 0
+            && (report.Partial != true || validNonLevel15Stop)
+            && (!report.FullScanExpected || report.EffectiveFullScanComplete)
             && exportMatchesCompleted != false;
     }
 
@@ -1562,6 +1721,8 @@ public static class ScanBenchmark
         public int? ExportItemCount { get; set; }
         public int ExportDuplicateGroupCount { get; set; }
         public int ExportDuplicateItemCount { get; set; }
+        public int ExportVerifiedAdjacentDuplicateCount { get; set; }
+        public int ExportUnverifiedDuplicateCount { get; set; }
         public int SlotOutOfRangeCount { get; set; }
         public int SlotMainStatViolationCount { get; set; }
         public int SlotFixedValueViolationCount { get; set; }
@@ -1606,6 +1767,33 @@ public static class ScanBenchmark
         public int RowScrollRecoveryAcceptedCount { get; set; }
         public int RowScrollRecoveryFailCount { get; set; }
         public int RowScrollStrictStopCount { get; set; }
+        public int RowScrollNoMoveCount { get; set; }
+        public int RowScrollAmbiguousCount { get; set; }
+        public int RowScrollSettleStartCount { get; set; }
+        public int RowScrollSettleAcceptCount { get; set; }
+        public int RowScrollSettleTimeoutCount { get; set; }
+        public int RowScrollPartialMoveContinueCount { get; set; }
+        public int RowScrollFalseAdvanceCount { get; set; }
+        public int NonUnitRowScrollDoneCount { get; set; }
+        public int PanelTargetEvidenceCount { get; set; }
+        public int PanelNeighborRoundTripCount { get; set; }
+        public int TargetVerificationEventCount { get; set; }
+        public int TargetVerificationUnknownCount { get; set; }
+        public int TargetSelectionEvidenceMissingCount { get; set; }
+        public int TargetSelectionUnderStableCount { get; set; }
+        public bool TargetVerificationConsistent => TargetVerificationEventCount == 0
+            || (TargetVerificationUnknownCount == 0
+                && TargetSelectionEvidenceMissingCount == 0
+                && TargetSelectionUnderStableCount == 0
+                && LastCompleted == TargetVerificationEventCount);
+        public int OcrDrainStartCount { get; set; }
+        public int OcrDrainDoneCount { get; set; }
+        public int OcrDrainRemainingCount { get; set; }
+        public int OcrDrainDiscardedCount { get; set; }
+        public bool OcrDrainConsistent => OcrDrainStartCount == 0
+            || (OcrDrainDoneCount == OcrDrainStartCount
+                && OcrDrainRemainingCount == 0
+                && OcrDrainDiscardedCount == 0);
         public int EdgeClickBlockedCount { get; set; }
         public int? MinVisibleRois { get; set; }
         public int IncompleteRoiCount { get; set; }
@@ -1631,6 +1819,7 @@ public static class ScanBenchmark
         public Stats SelectedStableFrames { get; set; }
         public Stats PanelStable { get; set; }
         public Stats PanelTextStable { get; set; }
+        public Stats TargetSelectionStableFrames { get; set; }
         public Stats RarityProbe { get; set; }
         public Stats SelectionProbe { get; set; }
         public Stats PanelCapture { get; set; }
@@ -1642,6 +1831,8 @@ public static class ScanBenchmark
         public Stats AdaptiveThrottle { get; set; }
         public Stats OcrBacklogBeforeEnqueue { get; set; }
         public Stats AdaptivePanelMin { get; set; }
+        public bool PanelMinimumFloorPass => AdaptivePanelMin.Count == 0
+            || AdaptivePanelMin.Minimum is >= 120;
         public Stats PanelMinAcceptFloor { get; set; }
         public Stats SameRowPanelFloor { get; set; }
         public Stats PostScrollPanelFloor { get; set; }
@@ -1650,6 +1841,7 @@ public static class ScanBenchmark
         public Stats ScrollTickDelay { get; set; }
         public Stats ScrollTickWait { get; set; }
         public Stats ScrollListStable { get; set; }
+        public Stats RowScrollSettle { get; set; }
         public Stats RowSignature { get; set; }
         public Stats PostScrollViewport { get; set; }
         public Stats CellTotal { get; set; }
@@ -1691,9 +1883,9 @@ public static class ScanBenchmark
 
     private readonly record struct ClickPosition(int LogicalRow, int VisualRow, int VisibleTopLogicalRow, string State);
 
-    private readonly record struct CellTiming(int Index, double PanelWaitMs, double EnqueueWaitMs, bool Fallback, int VisibleRois, int TotalRois, double TotalMs, bool AfterScroll, bool PostScrollFirstCell, double? PanelFrames, double? ChangeMs, double? SelectionChangeMs, double? FullRoiMs, double? StableMs, double? TextStableMs, string? StableSource, string? StabilityReason, double? RarityProbeMs, double? SelectionProbeMs, double? CaptureMs, double? SignatureMs, double? VisibleRoiMs, double? FrameLoopMs, double? FrameToBitmapMs, double? BitmapCreatedCount, bool? QuickAccept, string? QuickRejectReason, double? AdaptiveThrottleMs, double? OcrBacklogBeforeEnqueue, double? AdaptivePanelMinMs, string? PanelAcceptMode, string? PostScrollAcceptMode, double? PanelMinFloorMs, double? RoiCompleteFrames, double? SelectedStableFrames, string? AcceptGateReason, string? PanelFloorMode, double? SameRowPanelFloorMs, double? PostScrollPanelFloorMs, string? PanelFloorReason, double? FloorWaitLimitedMs, double? PanelAcceptElapsedVsFloorMs, double? ScrollTickDelayMs);
+    private readonly record struct CellTiming(int Index, double PanelWaitMs, double EnqueueWaitMs, bool Fallback, int VisibleRois, int TotalRois, double TotalMs, bool AfterScroll, bool PostScrollFirstCell, double? PanelFrames, double? ChangeMs, double? SelectionChangeMs, double? FullRoiMs, double? StableMs, double? TextStableMs, string? StableSource, string? StabilityReason, double? TargetSelectionStableFrames, string? TargetVerificationKind, double? RarityProbeMs, double? SelectionProbeMs, double? CaptureMs, double? SignatureMs, double? VisibleRoiMs, double? FrameLoopMs, double? FrameToBitmapMs, double? BitmapCreatedCount, bool? QuickAccept, string? QuickRejectReason, double? AdaptiveThrottleMs, double? OcrBacklogBeforeEnqueue, double? AdaptivePanelMinMs, string? PanelAcceptMode, string? PostScrollAcceptMode, double? PanelMinFloorMs, double? RoiCompleteFrames, double? SelectedStableFrames, string? AcceptGateReason, string? PanelFloorMode, double? SameRowPanelFloorMs, double? PostScrollPanelFloorMs, string? PanelFloorReason, double? FloorWaitLimitedMs, double? PanelAcceptElapsedVsFloorMs, double? ScrollTickDelayMs);
 
-    private readonly record struct ScrollTiming(double ScrollTickWaitMs, double ListStableMs, double RowSignatureMs, double PostScrollViewportMs);
+    private readonly record struct ScrollTiming(double ScrollTickWaitMs, double ListStableMs, double RowSignatureMs, double? SettleMs, double PostScrollViewportMs);
 
     private readonly record struct CounterSnapshot(int Visited, int Queued, int Completed, int Failed);
 
@@ -1709,6 +1901,8 @@ public static class ScanBenchmark
         int? ItemCount,
         int DuplicateGroupCount,
         int DuplicateItemCount,
+        int VerifiedAdjacentDuplicateCount,
+        int UnverifiedDuplicateCount,
         int SlotOutOfRangeCount,
         int SlotMainStatViolationCount,
         int SlotFixedValueViolationCount);

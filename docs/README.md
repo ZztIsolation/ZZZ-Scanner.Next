@@ -9,7 +9,7 @@ ZZZ Scanner Next 是旧版命令行扫描器的独立重写版，目标是做成
 - 非侵入式扫描：只使用窗口前置、鼠标点击、滚轮和屏幕截图，不读取或注入游戏进程。
 - 快速扫描：扫描线程负责点击和截图，多个 OCR worker 异步消费队列。
 - 数据驱动：驱动盘名称、词条候选、词条数值、扫描点位都在 `Data/*.json`。
-- 重叠签名稳定遍历：默认使用 `OverlapSignaturePage`，以逻辑行集合记录已扫行，首屏扫描 1/2/3 行，中间优先扫描未读的安全行，若滚动偶发推进两行则允许补扫落到视觉第 2 行的缺口。
+- 重叠签名稳定遍历：默认使用 `OverlapSignaturePage`，以逻辑行集合记录已扫行，首屏扫描 1/2/3 行；下行事务只接受单行推进，两行、过冲或最终位移模糊时安全停止并保留部分结果。
 - 可设置读取范围：支持只读前 N 个、`0=不限制`、S 级任意等级与 0-4 条连续副词条、临时显示调试截图。
 
 ## 入口
@@ -46,6 +46,8 @@ ZZZ Scanner Next 是旧版命令行扫描器的独立重写版，目标是做成
 
 1.0.32 收紧 `selection_changed_stable_full_roi`：滚动后首格、retry/fallback/recover 场景、以及 selection 变化时间没有明确正值时，不允许只凭选中态变化接受详情面板。同排相邻格的弱 panel change 或点击后 25ms 内的过早 panel change 也不会开启接受门，而是记录 `PANEL_WEAK_CHANGE_BLOCKED` 并触发 stale retry。benchmark 输出 `selection_only_accept_count`、`post_scroll_selection_only_blocked_count`、`weak_panel_change_blocked_count` 和 `fast_exact_profile_accept_count`。
 
+1.0.47 为相似盘片增加组合证据：普通同排项必须同时满足目标选中变化稳定双帧和完整稳定详情 ROI；首件、滚动后首件与 retry 必须先完成一次悬停隔离的邻格往返。详情强变化可以锁存，但 TextCore 与选中稳定仍逐帧确认。滚动动画出现歧义后会停止输入并在 500ms 内等待稳定，不能消歧时安全停止并保留已经排空 OCR 的部分结果。
+
 - 已验证高速模式：
   `ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode`
 
@@ -54,14 +56,13 @@ ZZZ Scanner Next 是旧版命令行扫描器的独立重写版，目标是做成
 - 截图后端实验：
   `ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi`
 
-`--capture-mode` 支持 `gdi` 和 `dxgi`。默认仍为 GDI；DXGI 初始化失败、取帧超时或尺寸异常时会自动回退 GDI，并在 `scan.log` 记录回退原因。
-1.0.20 起内部增加 frame API 和 `captureFrameBackend` 诊断；DXGI raw BGRA 仍是显式实验路径，本机发布候选默认使用已验证的 `bitmap-fallback`。
-1.0.21 继续保留 raw/quick accept 诊断，但实测 quick panel accept 与 raw frame 缓存都不能作为默认：前者会重复或变慢，后者会复用旧帧导致重复导出。
+`--capture-mode` 支持 `gdi` 和 `dxgi`。网页高速扫描默认使用 DXGI；初始化失败、取帧超时或尺寸异常时会自动回退 GDI，并在 `scan.log` 记录回退原因。
+1.0.47 起 DXGI 默认直接读取 raw BGRA 帧。`ZZZ_SCANNER_DXGI_RAW=0` 强制 bitmap 路径，`1` 强制 raw，未设置时使用 `default-raw`；日志同时记录 `dxgiFramePolicy` 与 `captureFrameBackend`。
 
 - 面板稳定判定实验：
   `ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi --panel-stability-mode text-core`
 
-`--panel-stability-mode` 支持 `panel`、`text-core` 和 `auto`。`text-core` 只把 12 个 OCR ROI 的文字核心区作为稳定探针，不改变“看到变化、稳定、12 ROI 完整”边界。1.0.22 实测 text-core/auto 没有速度收益，因此 fast-mode 默认仍使用 `panel`，text-core/auto 仅保留为显式实验与诊断。
+`--panel-stability-mode` 支持 `panel`、`text-core` 和 `auto`。`text-core` 只把可见 OCR ROI 的文字核心区作为稳定探针，不改变“看到变化、稳定、ROI 完整”边界。1.0.47 的 fast mode 强制使用 `Safe + TextCore`、120ms 下限和两帧稳定；网页传入的旧宽松参数只能兼容解析，不能降低这些门槛。
 
 - 滚动接受策略实验：
   `ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi --scroll-accept-mode early-one-row`
