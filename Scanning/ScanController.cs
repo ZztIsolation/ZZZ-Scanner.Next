@@ -20,16 +20,7 @@ public sealed class ScanController
     private const double MinReliablePanelChangeMs = 25.0;
     private const int ListMovementTolerance = 6;
     private const int ListStableTolerance = 4;
-    private const int RowShiftMatchTolerance = 36;
-    private const int RowShiftClearMargin = 8;
-    private const int RowShiftLooseMargin = 12;
-    private const int RowShiftStrongMatchTolerance = 18;
-    private const int RowShiftAmbiguousMovementTolerance = 18;
     private const int ScrollMaxSmallTicks = 6;
-    private const int OverlapSignatureMatchTolerance = 48;
-    private const int OverlapSignatureClearMargin = 12;
-    private const int OverlapSignatureStrongMargin = 18;
-    private const int OverlapSignatureRecheckFrames = 3;
     private const int ConsecutiveIdenticalDuplicateThreshold = 3;
     private const int SignatureColumns = 8;
     private const int SignatureRows = 4;
@@ -845,7 +836,6 @@ public sealed class ScanController
             }
 
             var beforeTop = visibleTopLogicalRow;
-            var beforeScrollRows = CaptureRowSignatures(window, rowSignatureRects);
             var scroll = await ScrollSafeBandOneRowWithRetryAsync(
                 window,
                 profile,
@@ -854,80 +844,42 @@ public sealed class ScanController
                 rowSignatureRects,
                 visibleTopLogicalRow,
                 maxVisibleTop,
+                allowTwoRows: true,
                 scanLog,
                 options.ScrollTickDelayOverrideMs,
                 token);
             if (!scroll.Success)
             {
-                throw NavigationFailure($"重叠签名扫描滚动失败：{scroll.Message}");
+                throw NavigationFailure($"重叠签名扫描滚动失败：{scroll.Message}", scroll.DiagnosticDetails);
             }
 
-            ImageSignature[] afterRows;
-            if (scroll.AfterRows is not null)
+            var signatureEvidence = scroll.Evidence;
+            var rowsAdvanced = scroll.RowsAdvanced;
+            if (rowsAdvanced is < 1 or > 2)
             {
-                afterRows = scroll.AfterRows;
-            }
-            else
-            {
-                await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
-                afterRows = CaptureRowSignatures(window, rowSignatureRects);
-            }
-            var signatureEvidence = EstimateVisibleTopAdvanceBySignatures(beforeScrollRows, afterRows);
-            var signatureAdvanced = signatureEvidence.AcceptedRows;
-            var scrollRowsAdvanced = Math.Clamp(Math.Max(1, scroll.RowsAdvanced), 1, visibleRows - 1);
-            if (signatureAdvanced is > 0 && signatureAdvanced.Value != scrollRowsAdvanced)
-            {
-                scanLog.WriteEvent("OVERLAP_SCROLL_SIGNATURE_MISMATCH", $"iteration={iteration}, fromTop={beforeTop}, requestedToTop={beforeTop + 1}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced.Value}, signatureBestScore={signatureEvidence.BestScore}, signatureSecondScore={signatureEvidence.SecondScore}, signatureMargin={signatureEvidence.Margin}, signatureAmbiguous={signatureEvidence.Ambiguous}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-                var resolution = await ResolveOverlapScrollConflictAsync(
-                    window,
-                    profile,
-                    listGridRect,
-                    rowSignatureRects,
-                    beforeScrollRows,
-                    beforeTop,
-                    scrollRowsAdvanced,
-                    signatureEvidence,
-                    options.OverlapConflictMode,
-                    scannedLogicalRows,
-                    totalRows,
-                    visibleRows,
-                    scanLog,
-                    iteration,
-                    scannedThisViewport,
-                    token);
-                if (!resolution.Success)
-                {
-                    scanLog.WriteEvent("OVERLAP_SCROLL_CONFLICT_HARD_STOP", $"iteration={iteration}, fromTop={beforeTop}, requestedToTop={beforeTop + 1}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced.Value}, mode={options.OverlapConflictMode}, reason={resolution.Reason}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-                    throw NavigationFailure($"重叠签名扫描检测到滚动估计与下一屏签名不一致：previousTop={beforeTop}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced.Value}。为避免重复或漏扫，本次停止。");
-                }
-
-                afterRows = resolution.Rows ?? afterRows;
-                scrollRowsAdvanced = resolution.RowsAdvanced;
-                signatureEvidence = resolution.Evidence;
-                signatureAdvanced = signatureEvidence.AcceptedRows;
+                throw NavigationFailure(
+                    $"重叠签名扫描收到无效滚动结论：rowsAdvanced={rowsAdvanced}。",
+                    scroll.DiagnosticDetails);
             }
 
-            if (scrollRowsAdvanced > 1)
+            if (rowsAdvanced > 1)
             {
-                var coverage = VerifyOverlapGapCoverage(scannedLogicalRows, beforeTop, scrollRowsAdvanced, visibleRows, totalRows);
+                var coverage = VerifyOverlapGapCoverage(scannedLogicalRows, beforeTop, rowsAdvanced, visibleRows, totalRows);
                 if (!coverage.Safe)
                 {
-                    scanLog.WriteEvent("OVERLAP_SCROLL_UNCONFIRMED_OVERSHOT", $"iteration={iteration}, fromTop={beforeTop}, requestedToTop={beforeTop + 1}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced?.ToString() ?? "NA"}, rowsAdvanced={scrollRowsAdvanced}, missingRows={string.Join("|", coverage.MissingRows)}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-                    throw NavigationFailure($"重叠签名扫描检测到未被下一屏签名确认的越行滚动：previousTop={beforeTop}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced?.ToString() ?? "NA"}。为避免重复读取，本次停止。");
+                    scanLog.WriteEvent("OVERLAP_SCROLL_UNCONFIRMED_OVERSHOT", $"iteration={iteration}, fromTop={beforeTop}, requestedToTop={beforeTop + 1}, rowsAdvanced={rowsAdvanced}, decision={signatureEvidence.Decision}, missingRows={string.Join("|", coverage.MissingRows)}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
+                    throw NavigationFailure(
+                        $"重叠签名扫描检测到未覆盖的两行滚动：previousTop={beforeTop}, rowsAdvanced={rowsAdvanced}。为避免漏扫，本次停止。",
+                        scroll.DiagnosticDetails);
                 }
 
-                scanLog.WriteEvent("OVERLAP_SCROLL_TWO_ROW_COVERAGE_ACCEPTED", $"iteration={iteration}, fromTop={beforeTop}, toTop={Math.Min(maxVisibleTop, beforeTop + scrollRowsAdvanced)}, rowsAdvanced={scrollRowsAdvanced}, signatureRows={signatureAdvanced?.ToString() ?? "NA"}, signatureBestScore={signatureEvidence.BestScore}, signatureSecondScore={signatureEvidence.SecondScore}, signatureMargin={signatureEvidence.Margin}, coveredRows={string.Join("|", coverage.CoveredRows)}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
+                scanLog.WriteEvent("OVERLAP_SCROLL_TWO_ROW_COVERAGE_ACCEPTED", $"iteration={iteration}, fromTop={beforeTop}, toTop={Math.Min(maxVisibleTop, beforeTop + rowsAdvanced)}, rowsAdvanced={rowsAdvanced}, decision={signatureEvidence.Decision}, signatureBestScore={signatureEvidence.BestScore}, signatureSecondScore={signatureEvidence.SecondScore}, signatureMargin={signatureEvidence.Margin}, coveredRows={string.Join("|", coverage.CoveredRows)}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
             }
 
-            var rowsAdvanced = scrollRowsAdvanced;
-            if (signatureAdvanced is > 0 && signatureAdvanced.Value == scrollRowsAdvanced)
-            {
-                rowsAdvanced = signatureAdvanced.Value;
-            }
             visibleTopLogicalRow = Math.Min(maxVisibleTop, visibleTopLogicalRow + rowsAdvanced);
-            lastScrollChangedViewport = rowsAdvanced > 0;
-            scanLog.WriteEvent("OVERLAP_SCROLL_ACCEPTED", $"iteration={iteration}, fromTop={beforeTop}, toTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, scrollRows={scroll.RowsAdvanced}, signatureRows={signatureAdvanced?.ToString() ?? "NA"}, signatureBestRows={signatureEvidence.BestRows}, signatureBestScore={signatureEvidence.BestScore}, signatureSecondScore={signatureEvidence.SecondScore}, signatureMargin={signatureEvidence.Margin}, signatureAmbiguous={signatureEvidence.Ambiguous}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-            runtimeState.ProfileHealth.ObserveOverlap(signatureEvidence.Ambiguous, scanLog.Write);
+            lastScrollChangedViewport = true;
+            scanLog.WriteEvent("OVERLAP_SCROLL_ACCEPTED", $"iteration={iteration}, fromTop={beforeTop}, toTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, decision={signatureEvidence.Decision}, signatureBestRows={signatureEvidence.BestRows}, signatureBestScore={signatureEvidence.BestScore}, signatureSecondScore={signatureEvidence.SecondScore}, signatureMargin={signatureEvidence.Margin}, reason={signatureEvidence.Reason}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
+            runtimeState.ProfileHealth.ObserveOverlap(false, scanLog.Write);
         }
 
         if (scannedLogicalRows.Count < totalRows)
@@ -1649,15 +1601,20 @@ public sealed class ScanController
                 rowSignatureRects,
                 visibleTopLogicalRow,
                 maxVisibleTop,
+                allowTwoRows: false,
                 scanLog,
                 scrollTickDelayOverrideMs,
                 token);
             if (!result.Success)
             {
-                throw NavigationFailure($"安全带逐行滚动失败：{result.Message}");
+                throw NavigationFailure($"安全带逐行滚动失败：{result.Message}", result.DiagnosticDetails);
             }
 
-            var rowsAdvanced = Math.Max(1, result.RowsAdvanced);
+            var rowsAdvanced = result.RowsAdvanced;
+            if (rowsAdvanced <= 0)
+            {
+                throw NavigationFailure("安全带逐行滚动没有得到可提交的正向位移。", result.DiagnosticDetails);
+            }
             var nextVisibleTop = Math.Min(maxVisibleTop, visibleTopLogicalRow + rowsAdvanced);
             if (rowsAdvanced != 1)
             {
@@ -1684,7 +1641,11 @@ public sealed class ScanController
                         throw NavigationFailure($"安全带逐行滚动越过目标行且回退失败：previousTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, nextTop={nextVisibleTop}, desiredTop={desiredTop}, recovery={recovery.Message}。为避免重复读取，本次停止。");
                     }
 
-                    var rowsRecovered = Math.Max(1, recovery.RowsAdvanced);
+                    var rowsRecovered = recovery.RowsAdvanced;
+                    if (rowsRecovered <= 0)
+                    {
+                        throw NavigationFailure("安全带回退没有得到可提交的位移。", recovery.DiagnosticDetails);
+                    }
                     nextVisibleTop = Math.Max(1, nextVisibleTop - rowsRecovered);
                     if (nextVisibleTop > desiredTop)
                     {
@@ -1770,123 +1731,6 @@ public sealed class ScanController
         }
     }
 
-    private static RowAdvanceEvidence EstimateVisibleTopAdvanceBySignatures(
-        IReadOnlyList<ImageSignature> beforeRows,
-        IReadOnlyList<ImageSignature> afterRows)
-    {
-        var bestRows = 0;
-        var bestScore = int.MaxValue;
-        var secondScore = int.MaxValue;
-        var scores = new int[3];
-        for (var rows = 0; rows <= 2; rows++)
-        {
-            var score = AverageSignatureDistanceForShift(beforeRows, afterRows, rows);
-            scores[rows] = score;
-            if (score < bestScore)
-            {
-                secondScore = bestScore;
-                bestScore = score;
-                bestRows = rows;
-            }
-            else if (score < secondScore)
-            {
-                secondScore = score;
-            }
-        }
-
-        var margin = secondScore == int.MaxValue ? 0 : secondScore - bestScore;
-        var acceptedRows = bestRows > 0
-            && bestScore <= OverlapSignatureMatchTolerance
-            && margin >= OverlapSignatureClearMargin
-            ? bestRows
-            : (int?)null;
-        var ambiguous = bestRows > 0
-            && bestScore <= OverlapSignatureMatchTolerance
-            && margin < OverlapSignatureClearMargin;
-        var strongRows = bestRows > 0
-            && bestScore <= OverlapSignatureMatchTolerance
-            && margin >= OverlapSignatureStrongMargin
-            ? bestRows
-            : (int?)null;
-        return new RowAdvanceEvidence(bestRows, bestScore, secondScore, margin, acceptedRows, strongRows, ambiguous, scores[0], scores[1], scores[2]);
-    }
-
-    private static async Task<OverlapConflictResolution> ResolveOverlapScrollConflictAsync(
-        GameWindow window,
-        ScanProfile profile,
-        Rectangle listGridRect,
-        IReadOnlyList<Rectangle> rowSignatureRects,
-        IReadOnlyList<ImageSignature> beforeScrollRows,
-        int beforeTop,
-        int scrollRowsAdvanced,
-        RowAdvanceEvidence initialEvidence,
-        OverlapConflictMode mode,
-        IReadOnlySet<int> scannedLogicalRows,
-        int totalRows,
-        int visibleRows,
-        ScanLog scanLog,
-        int iteration,
-        bool scannedThisViewport,
-        CancellationToken token)
-    {
-        if (mode == OverlapConflictMode.Strict)
-        {
-            return OverlapConflictResolution.Fail("strict_mode");
-        }
-
-        RowAdvanceEvidence latestEvidence = initialEvidence;
-        ImageSignature[]? latestRows = null;
-        var strongTwoRowFrames = initialEvidence.StrongRows == 2 ? 1 : 0;
-        var ambiguousTwoRowFrames = initialEvidence.BestRows == 2 && initialEvidence.Ambiguous ? 1 : 0;
-        var pollMs = Math.Max(10, profile.LoadPollMs);
-        for (var frame = 1; frame <= OverlapSignatureRecheckFrames; frame++)
-        {
-            token.ThrowIfCancellationRequested();
-            await Task.Delay(pollMs, token);
-            latestRows = CaptureRowSignatures(window, rowSignatureRects);
-            latestEvidence = EstimateVisibleTopAdvanceBySignatures(beforeScrollRows, latestRows);
-            scanLog.WriteEvent("OVERLAP_SCROLL_SIGNATURE_RECHECK_FRAME", $"iteration={iteration}, frame={frame}/{OverlapSignatureRecheckFrames}, fromTop={beforeTop}, scrollRows={scrollRowsAdvanced}, bestRows={latestEvidence.BestRows}, acceptedRows={latestEvidence.AcceptedRows?.ToString() ?? "NA"}, strongRows={latestEvidence.StrongRows?.ToString() ?? "NA"}, bestScore={latestEvidence.BestScore}, secondScore={latestEvidence.SecondScore}, margin={latestEvidence.Margin}, ambiguous={latestEvidence.Ambiguous}, scores=0:{latestEvidence.NoMoveScore}|1:{latestEvidence.OneRowScore}|2:{latestEvidence.TwoRowScore}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-
-            if (latestEvidence.AcceptedRows == scrollRowsAdvanced)
-            {
-                scanLog.WriteEvent("OVERLAP_SCROLL_SIGNATURE_RECHECK_RECOVERED", $"iteration={iteration}, fromTop={beforeTop}, rowsAdvanced={scrollRowsAdvanced}, frame={frame}, bestScore={latestEvidence.BestScore}, secondScore={latestEvidence.SecondScore}, margin={latestEvidence.Margin}");
-                return OverlapConflictResolution.Ok(scrollRowsAdvanced, latestEvidence, latestRows, "recheck_matched_scroll");
-            }
-
-            if (latestEvidence.StrongRows == 2)
-            {
-                strongTwoRowFrames++;
-            }
-
-            if (latestEvidence.BestRows == 2 && latestEvidence.Ambiguous)
-            {
-                ambiguousTwoRowFrames++;
-            }
-        }
-
-        if (mode == OverlapConflictMode.Recover && strongTwoRowFrames >= 2)
-        {
-            var coverage = VerifyOverlapGapCoverage(scannedLogicalRows, beforeTop, rowsAdvanced: 2, visibleRows, totalRows);
-            if (coverage.Safe)
-            {
-                scanLog.WriteEvent("OVERLAP_SCROLL_SIGNATURE_TWO_ROW_RECOVERED", $"iteration={iteration}, fromTop={beforeTop}, toTop={Math.Min(beforeTop + 2, Math.Max(1, totalRows - visibleRows + 1))}, rowsAdvanced=2, strongFrames={strongTwoRowFrames}, bestScore={latestEvidence.BestScore}, secondScore={latestEvidence.SecondScore}, margin={latestEvidence.Margin}, coveredRows={string.Join("|", coverage.CoveredRows)}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-                var acceptedEvidence = latestEvidence with { AcceptedRows = 2, StrongRows = 2, Ambiguous = false };
-                return OverlapConflictResolution.Ok(2, acceptedEvidence, latestRows, "strong_two_row_coverage");
-            }
-
-            return OverlapConflictResolution.Fail($"strong_two_row_missing_coverage={string.Join("|", coverage.MissingRows)}");
-        }
-
-        if (mode == OverlapConflictMode.Recover && scrollRowsAdvanced == 1)
-        {
-            scanLog.WriteEvent("OVERLAP_SCROLL_SIGNATURE_AMBIGUOUS_ACCEPTED", $"iteration={iteration}, fromTop={beforeTop}, rowsAdvanced={scrollRowsAdvanced}, bestRows={latestEvidence.BestRows}, bestScore={latestEvidence.BestScore}, secondScore={latestEvidence.SecondScore}, margin={latestEvidence.Margin}, ambiguousFrames={ambiguousTwoRowFrames}, strongTwoRowFrames={strongTwoRowFrames}, reason=no_confirmed_two_row, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-            var acceptedEvidence = latestEvidence with { AcceptedRows = scrollRowsAdvanced, StrongRows = null, Ambiguous = true };
-            return OverlapConflictResolution.Ok(scrollRowsAdvanced, acceptedEvidence, latestRows, "unconfirmed_signature_accepted_as_scroll");
-        }
-
-        return OverlapConflictResolution.Fail($"unresolved bestRows={latestEvidence.BestRows}, acceptedRows={latestEvidence.AcceptedRows?.ToString() ?? "NA"}, strongRows={latestEvidence.StrongRows?.ToString() ?? "NA"}, margin={latestEvidence.Margin}");
-    }
-
     private static OverlapGapCoverage VerifyOverlapGapCoverage(
         IReadOnlySet<int> scannedLogicalRows,
         int beforeTop,
@@ -1908,35 +1752,13 @@ public sealed class ScanController
         return new OverlapGapCoverage(missingRows.Length == 0, leavingRows, missingRows);
     }
 
-    private static int AverageSignatureDistanceForShift(
-        IReadOnlyList<ImageSignature> beforeRows,
-        IReadOnlyList<ImageSignature> afterRows,
-        int rowsAdvanced)
-    {
-        var sum = 0;
-        var count = 0;
-        for (var beforeIndex = rowsAdvanced; beforeIndex < beforeRows.Count; beforeIndex++)
-        {
-            var afterIndex = beforeIndex - rowsAdvanced;
-            if (afterIndex < 0 || afterIndex >= afterRows.Count)
-            {
-                continue;
-            }
-
-            sum += SignatureDistance(beforeRows[beforeIndex], afterRows[afterIndex]);
-            count++;
-        }
-
-        return count == 0 ? int.MaxValue : sum / count;
-    }
-
     private static void LogOverlapViewport(
         ScanLog scanLog,
         int iteration,
         int visibleTopLogicalRow,
         int maxVisibleTop,
         int totalRows,
-        IReadOnlyList<ImageSignature> rowSignatures)
+        IReadOnlyList<RowVisualSignature> rowSignatures)
     {
         var state = ViewportStateLabel(visibleTopLogicalRow, maxVisibleTop);
         var rows = string.Join(",", rowSignatures.Select((signature, index) =>
@@ -1972,6 +1794,7 @@ public sealed class ScanController
         IReadOnlyList<Rectangle> rowSignatureRects,
         int visibleTopLogicalRow,
         int maxVisibleTop,
+        bool allowTwoRows,
         ScanLog scanLog,
         int scrollTickDelayOverrideMs,
         CancellationToken token)
@@ -1980,7 +1803,7 @@ public sealed class ScanController
         ScrollRowsResult last = default;
         for (var attempt = 1; attempt <= 3; attempt++)
         {
-            last = await ScrollSafeBandOneRowAsync(window, profile, scrollAcceptMode, listGridRect, rowSignatureRects, visibleTopLogicalRow, maxVisibleTop, scanLog, scrollTickDelayOverrideMs, token);
+            last = await ScrollSafeBandOneRowAsync(window, profile, scrollAcceptMode, listGridRect, rowSignatureRects, visibleTopLogicalRow, maxVisibleTop, allowTwoRows, scanLog, scrollTickDelayOverrideMs, token);
             if (last.Success)
             {
                 return last;
@@ -2012,74 +1835,29 @@ public sealed class ScanController
         IReadOnlyList<Rectangle> rowSignatureRects,
         int visibleTopLogicalRow,
         int maxVisibleTop,
+        bool allowTwoRows,
         ScanLog scanLog,
         int scrollTickDelayOverrideMs,
         CancellationToken token)
     {
         if (visibleTopLogicalRow >= maxVisibleTop)
         {
-            return ScrollRowsResult.Fail($"already at bottom visibleTopLogicalRow={visibleTopLogicalRow}");
+            return ScrollRowsResult.Fail($"already at bottom visibleTopLogicalRow={visibleTopLogicalRow}", retryable: false);
         }
 
-        var wheelPoint = window.ToScreenPoint(profile.Point("listWheelArea"));
-        var neutralPoint = ListNeutralPoint(window, listGridRect);
-        window.MoveCursor(neutralPoint);
-        var beforeViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
-        var beforeGrid = beforeViewport.Grid;
-        var beforeRows = beforeViewport.Rows;
-        var maxTicks = ScrollSmallTickLimit(profile);
-        var effectiveScrollTickDelayMs = EffectiveScrollTickDelay(profile, scrollTickDelayOverrideMs);
-        scanLog.WriteEvent("ROW_SCROLL_START", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, maxVisibleTop={maxVisibleTop}, delta={profile.ScrollTickDelta}, maxTicks={maxTicks}, scrollTickDelayMs={effectiveScrollTickDelayMs}, wheelPoint={wheelPoint}, neutralPoint={neutralPoint}");
-        for (var tick = 1; tick <= maxTicks; tick++)
-        {
-            scanLog.WriteEvent("ROW_SCROLL_TICK", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, tick={tick}/{maxTicks}, delta={profile.ScrollTickDelta}");
-            window.MoveCursor(wheelPoint);
-            window.MouseWheel(profile.ScrollTickDelta);
-            window.MoveCursor(neutralPoint);
-            var scrollTickWait = Stopwatch.StartNew();
-            await Task.Delay(effectiveScrollTickDelayMs, token);
-            scrollTickWait.Stop();
-
-            var viewportSignature = Stopwatch.StartNew();
-            var settled = await WaitForOneRowDownSettledAsync(window, profile, scrollAcceptMode, listGridRect, rowSignatureRects, beforeGrid, beforeRows, token);
-            viewportSignature.Stop();
-            var movedDistance = settled.MovedDistance;
-            var verification = settled.Verification;
-            var estimatedRows = settled.EstimatedRows;
-            var twoRowsClearlyBetter = estimatedRows == 2;
-            var oneRowMatched = verification.OneRowScore <= RowShiftMatchTolerance
-                || verification.OneRowScore <= verification.NoMoveScore + RowShiftClearMargin
-                || verification.OneRowScore <= verification.TwoRowScore + RowShiftClearMargin;
-            var success = settled.Success;
-            scanLog.WriteEvent("ROW_SCROLL_TIMING", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, tick={tick}/{maxTicks}, scroll_tick_wait_ms={scrollTickWait.Elapsed.TotalMilliseconds:F1}, list_stable_ms={settled.WaitMilliseconds:F1}, row_signature_ms={settled.SignatureMilliseconds:F1}, post_scroll_viewport_ms={viewportSignature.Elapsed.TotalMilliseconds:F1}");
-            scanLog.WriteEvent("ROW_SCROLL_VERIFY", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow + 1}, tick={tick}/{maxTicks}, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, noMoveScore={verification.NoMoveScore}, twoRowScore={verification.TwoRowScore}, oneRowMatched={oneRowMatched}, twoRowsClearlyBetter={twoRowsClearlyBetter}, estimatedRows={estimatedRows}, success={success}");
-
-            if (success)
-            {
-                scanLog.WriteEvent("ROW_SCROLL_DONE", $"fromTop={visibleTopLogicalRow}, estimatedToTop={visibleTopLogicalRow + 1}, requestedToTop={visibleTopLogicalRow + 1}, rowsAdvanced=1, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, twoRowScore={verification.TwoRowScore}, ticks={tick}");
-                return ScrollRowsResult.Ok($"safe-band advanced 1 row from {visibleTopLogicalRow}", 1, settled.AfterViewport.Rows);
-            }
-
-            if (estimatedRows > 1)
-            {
-                scanLog.WriteEvent("ROW_SCROLL_OVERSHOT_BLOCKED", $"fromTop={visibleTopLogicalRow}, estimatedToTop={Math.Min(maxVisibleTop, visibleTopLogicalRow + estimatedRows)}, requestedToTop={visibleTopLogicalRow + 1}, rowsAdvanced={estimatedRows}, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, twoRowScore={verification.TwoRowScore}, ticks={tick}");
-                return ScrollRowsResult.Fail($"scroll advanced {estimatedRows} rows while only one row was requested, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, twoRowScore={verification.TwoRowScore}", retryable: false);
-            }
-
-            if (movedDistance > RowShiftAmbiguousMovementTolerance)
-            {
-                scanLog.WriteEvent("ROW_SCROLL_AMBIGUOUS", $"fromTop={visibleTopLogicalRow}, expectedToTop={visibleTopLogicalRow + 1}, tick={tick}/{maxTicks}, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, noMoveScore={verification.NoMoveScore}, twoRowScore={verification.TwoRowScore}, action=continue_downward");
-            }
-        }
-
-        await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
-        var finalViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
-        var finalGrid = finalViewport.Grid;
-        var finalRows = finalViewport.Rows;
-        var finalMovedDistance = SignatureDistance(beforeGrid, finalGrid);
-        var finalVerification = VerifyOneRowDown(beforeRows, finalRows);
-        scanLog.WriteEvent("ROW_SCROLL_FAIL", $"fromTop={visibleTopLogicalRow}, expectedToTop={visibleTopLogicalRow + 1}, ticks={maxTicks}, movedDistance={finalMovedDistance}, oneRowScore={finalVerification.OneRowScore}, noMoveScore={finalVerification.NoMoveScore}, twoRowScore={finalVerification.TwoRowScore}");
-        return ScrollRowsResult.Fail($"one-row verification failed after {maxTicks} tick(s), movedDistance={finalMovedDistance}, oneRowScore={finalVerification.OneRowScore}, twoRowScore={finalVerification.TwoRowScore}");
+        return await ScrollVerifiedRowShiftAsync(
+            window,
+            profile,
+            scrollAcceptMode,
+            listGridRect,
+            rowSignatureRects,
+            visibleTopLogicalRow,
+            maxVisibleTop,
+            upward: false,
+            allowTwoRows,
+            scanLog,
+            scrollTickDelayOverrideMs,
+            token);
     }
 
     private static async Task<ScrollRowsResult> ScrollSafeBandOneRowUpAsync(
@@ -2094,58 +1872,171 @@ public sealed class ScanController
     {
         if (visibleTopLogicalRow <= 1)
         {
-            return ScrollRowsResult.Fail($"already at top visibleTopLogicalRow={visibleTopLogicalRow}");
+            return ScrollRowsResult.Fail($"already at top visibleTopLogicalRow={visibleTopLogicalRow}", retryable: false);
         }
 
-        var delta = -profile.ScrollTickDelta;
+        return await ScrollVerifiedRowShiftAsync(
+            window,
+            profile,
+            ScrollAcceptMode.Safe,
+            listGridRect,
+            rowSignatureRects,
+            visibleTopLogicalRow,
+            maxVisibleTop: visibleTopLogicalRow,
+            upward: true,
+            allowTwoRows: true,
+            scanLog,
+            scrollTickDelayOverrideMs,
+            token);
+    }
+
+    private static async Task<ScrollRowsResult> ScrollVerifiedRowShiftAsync(
+        GameWindow window,
+        ScanProfile profile,
+        ScrollAcceptMode scrollAcceptMode,
+        Rectangle listGridRect,
+        IReadOnlyList<Rectangle> rowSignatureRects,
+        int visibleTopLogicalRow,
+        int maxVisibleTop,
+        bool upward,
+        bool allowTwoRows,
+        ScanLog scanLog,
+        int scrollTickDelayOverrideMs,
+        CancellationToken token)
+    {
+        var delta = upward ? -profile.ScrollTickDelta : profile.ScrollTickDelta;
+        var targetTop = upward ? visibleTopLogicalRow - 1 : visibleTopLogicalRow + 1;
+        var direction = upward ? "up" : "down";
+        var startEvent = upward ? "ROW_SCROLL_RECOVERY_START" : "ROW_SCROLL_START";
+        var tickEvent = upward ? "ROW_SCROLL_RECOVERY_TICK" : "ROW_SCROLL_TICK";
+        var doneEvent = upward ? "ROW_SCROLL_RECOVERED" : "ROW_SCROLL_DONE";
         var maxTicks = ScrollSmallTickLimit(profile);
-        window.MoveCursor(window.ToScreenPoint(profile.Point("listWheelArea")));
+        var wheelPoint = window.ToScreenPoint(profile.Point("listWheelArea"));
+        var neutralPoint = ListNeutralPoint(window, listGridRect);
+        var effectiveScrollTickDelayMs = EffectiveScrollTickDelay(profile, scrollTickDelayOverrideMs);
+        var pollMilliseconds = Math.Max(10, profile.LoadPollMs);
+        window.MoveCursor(neutralPoint);
         var beforeViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
         var beforeGrid = beforeViewport.Grid;
         var beforeRows = beforeViewport.Rows;
-        scanLog.WriteEvent("ROW_SCROLL_RECOVERY_START", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow - 1}, delta={delta}, maxTicks={maxTicks}");
-        for (var tick = 1; tick <= maxTicks; tick++)
+        var latestViewport = beforeViewport;
+        var totalWatch = Stopwatch.StartNew();
+        var wheelWaitMilliseconds = 0.0;
+        var signatureMilliseconds = 0.0;
+        scanLog.WriteEvent(startEvent, $"direction={direction}, fromTop={visibleTopLogicalRow}, toTop={targetTop}, maxVisibleTop={maxVisibleTop}, delta={delta}, maxTicks={maxTicks}, samplesPerTick={RowScrollCoordinator.MaximumSamplesPerTick}, scrollTickDelayMs={effectiveScrollTickDelayMs}, wheelPoint={wheelPoint}, neutralPoint={neutralPoint}");
+
+        var result = await RowScrollCoordinator.RunAsync(
+            maxTicks,
+            scrollAcceptMode,
+            async (tick, cancellationToken) =>
+            {
+                scanLog.WriteEvent(tickEvent, $"direction={direction}, fromTop={visibleTopLogicalRow}, toTop={targetTop}, tick={tick}/{maxTicks}, delta={delta}");
+                window.MoveCursor(wheelPoint);
+                window.MouseWheel(delta);
+                window.MoveCursor(neutralPoint);
+                var wait = Stopwatch.StartNew();
+                await Task.Delay(effectiveScrollTickDelayMs, cancellationToken);
+                wait.Stop();
+                wheelWaitMilliseconds += wait.Elapsed.TotalMilliseconds;
+            },
+            async (tick, sample, cancellationToken) =>
+            {
+                if (sample > 1)
+                {
+                    await Task.Delay(pollMilliseconds, cancellationToken);
+                }
+
+                var signatureWatch = Stopwatch.StartNew();
+                latestViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
+                signatureWatch.Stop();
+                signatureMilliseconds += signatureWatch.Elapsed.TotalMilliseconds;
+                var movedDistance = SignatureDistance(beforeGrid, latestViewport.Grid);
+                var verification = upward
+                    ? VerifyOneRowUp(beforeRows, latestViewport.Rows)
+                    : VerifyOneRowDown(beforeRows, latestViewport.Rows);
+                var evidence = RowAdvanceEvaluator.Evaluate(
+                    verification.NoMoveScore,
+                    verification.OneRowScore,
+                    verification.TwoRowScore,
+                    movedDistance);
+                scanLog.WriteEvent("ROW_SCROLL_EVIDENCE", $"direction={direction}, fromTop={visibleTopLogicalRow}, requestedToTop={targetTop}, tick={tick}/{maxTicks}, sample={sample}/{RowScrollCoordinator.MaximumSamplesPerTick}, decision={evidence.Decision}, bestRows={evidence.BestRows}, bestScore={evidence.BestScore}, secondScore={evidence.SecondScore}, margin={evidence.Margin}, strong={evidence.Strong}, movedDistance={evidence.MovedDistance}, scores=0:{evidence.NoMoveScore}|1:{evidence.OneRowScore}|2:{evidence.TwoRowScore}, reason={evidence.Reason}");
+                return evidence;
+            },
+            trace =>
+            {
+                if (trace.Evidence.Decision == RowAdvanceDecision.NoMove)
+                {
+                    scanLog.WriteEvent("ROW_SCROLL_NO_MOVE_CONFIRMED", $"direction={direction}, fromTop={visibleTopLogicalRow}, requestedToTop={targetTop}, tick={trace.Tick}/{maxTicks}, sample={trace.Sample}/{RowScrollCoordinator.MaximumSamplesPerTick}, action={trace.Action}, bestScore={trace.Evidence.BestScore}, margin={trace.Evidence.Margin}, movedDistance={trace.Evidence.MovedDistance}, reason={trace.Evidence.Reason}");
+                }
+            },
+            token);
+        totalWatch.Stop();
+
+        var evidence = result.Outcome == RowScrollCoordinatorOutcome.NoMovementStop
+            ? result.Evidence with { Reason = "scroll_no_movement_after_max_ticks" }
+            : result.Evidence;
+        var details = ScanDiagnosticDetails.RowScroll(
+            direction,
+            result.Tick,
+            maxTicks,
+            result.Sample,
+            evidence.Decision,
+            evidence.NoMoveScore,
+            evidence.OneRowScore,
+            evidence.TwoRowScore,
+            evidence.BestScore,
+            evidence.SecondScore,
+            evidence.Margin,
+            evidence.MovedDistance,
+            evidence.Reason);
+        scanLog.WriteEvent("ROW_SCROLL_TIMING", $"direction={direction}, fromTop={visibleTopLogicalRow}, toTop={targetTop}, tick={result.Tick}/{maxTicks}, scroll_tick_wait_ms={wheelWaitMilliseconds:F1}, list_stable_ms={Math.Max(0, totalWatch.Elapsed.TotalMilliseconds - wheelWaitMilliseconds - signatureMilliseconds):F1}, row_signature_ms={signatureMilliseconds:F1}, post_scroll_viewport_ms={totalWatch.Elapsed.TotalMilliseconds:F1}");
+
+        if (!result.Accepted)
         {
-            scanLog.WriteEvent("ROW_SCROLL_RECOVERY_TICK", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow - 1}, tick={tick}/{maxTicks}, delta={delta}");
-            window.MouseWheel(delta);
-            await Task.Delay(EffectiveScrollTickDelay(profile, scrollTickDelayOverrideMs), token);
-            await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
-
-            var afterViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
-            var afterGrid = afterViewport.Grid;
-            var afterRows = afterViewport.Rows;
-            var movedDistance = SignatureDistance(beforeGrid, afterGrid);
-            var verification = VerifyOneRowUp(beforeRows, afterRows);
-            var estimatedRows = EstimateRowsAdvanced(verification, movedDistance);
-            var twoRowsClearlyBetter = estimatedRows == 2;
-            var oneRowMatched = verification.OneRowScore <= RowShiftMatchTolerance
-                || verification.OneRowScore <= verification.NoMoveScore + RowShiftClearMargin
-                || verification.OneRowScore <= verification.TwoRowScore + RowShiftClearMargin;
-            var success = estimatedRows > 0;
-            scanLog.WriteEvent("ROW_SCROLL_RECOVERY_VERIFY", $"fromTop={visibleTopLogicalRow}, toTop={visibleTopLogicalRow - 1}, tick={tick}/{maxTicks}, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, noMoveScore={verification.NoMoveScore}, twoRowScore={verification.TwoRowScore}, oneRowMatched={oneRowMatched}, twoRowsClearlyBetter={twoRowsClearlyBetter}, estimatedRows={estimatedRows}, success={success}");
-
-            if (success)
+            if (result.Outcome == RowScrollCoordinatorOutcome.NoMovementStop)
             {
-                var eventName = estimatedRows == 1 ? "ROW_SCROLL_RECOVERED" : "ROW_SCROLL_RECOVERY_OVERSHOT";
-                scanLog.WriteEvent(eventName, $"fromTop={visibleTopLogicalRow}, estimatedToTop={Math.Max(1, visibleTopLogicalRow - estimatedRows)}, requestedToTop={visibleTopLogicalRow - 1}, rowsRecovered={estimatedRows}, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, twoRowScore={verification.TwoRowScore}, ticks={tick}");
-                return ScrollRowsResult.Ok($"safe-band recovered {estimatedRows} row(s) from {visibleTopLogicalRow}", estimatedRows);
+                scanLog.WriteEvent("ROW_SCROLL_FAIL", $"direction={direction}, fromTop={visibleTopLogicalRow}, expectedToTop={targetTop}, ticks={result.Tick}/{maxTicks}, decision={evidence.Decision}, movedDistance={evidence.MovedDistance}, scores=0:{evidence.NoMoveScore}|1:{evidence.OneRowScore}|2:{evidence.TwoRowScore}, reason=scroll_no_movement_after_max_ticks");
+                return ScrollRowsResult.Fail(
+                    $"scroll produced no confirmed movement after {result.Tick} tick(s)",
+                    retryable: false,
+                    evidence,
+                    details);
             }
 
-            if (movedDistance > RowShiftAmbiguousMovementTolerance)
-            {
-                scanLog.WriteEvent("ROW_SCROLL_RECOVERY_AMBIGUOUS", $"fromTop={visibleTopLogicalRow}, expectedToTop={visibleTopLogicalRow - 1}, tick={tick}/{maxTicks}, movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, noMoveScore={verification.NoMoveScore}, twoRowScore={verification.TwoRowScore}");
-                return ScrollRowsResult.Fail($"ambiguous recovery movement after {tick} tick(s), movedDistance={movedDistance}, oneRowScore={verification.OneRowScore}, twoRowScore={verification.TwoRowScore}", retryable: false);
-            }
+            scanLog.WriteEvent("ROW_SCROLL_AMBIGUOUS_STOP", $"direction={direction}, fromTop={visibleTopLogicalRow}, expectedToTop={targetTop}, tick={result.Tick}/{maxTicks}, sample={result.Sample}/{RowScrollCoordinator.MaximumSamplesPerTick}, decision={evidence.Decision}, bestRows={evidence.BestRows}, bestScore={evidence.BestScore}, secondScore={evidence.SecondScore}, margin={evidence.Margin}, movedDistance={evidence.MovedDistance}, scores=0:{evidence.NoMoveScore}|1:{evidence.OneRowScore}|2:{evidence.TwoRowScore}, reason={evidence.Reason}");
+            return ScrollRowsResult.Fail(
+                $"scroll evidence remained ambiguous after {result.Sample} sample(s): {evidence.Reason}",
+                retryable: false,
+                evidence,
+                details);
         }
 
-        await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
-        var finalViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
-        var finalGrid = finalViewport.Grid;
-        var finalRows = finalViewport.Rows;
-        var finalMovedDistance = SignatureDistance(beforeGrid, finalGrid);
-        var finalVerification = VerifyOneRowUp(beforeRows, finalRows);
-        scanLog.WriteEvent("ROW_SCROLL_RECOVERY_FAIL", $"fromTop={visibleTopLogicalRow}, expectedToTop={visibleTopLogicalRow - 1}, ticks={maxTicks}, movedDistance={finalMovedDistance}, oneRowScore={finalVerification.OneRowScore}, noMoveScore={finalVerification.NoMoveScore}, twoRowScore={finalVerification.TwoRowScore}");
-        return ScrollRowsResult.Fail($"one-row recovery failed after {maxTicks} tick(s), movedDistance={finalMovedDistance}, oneRowScore={finalVerification.OneRowScore}, twoRowScore={finalVerification.TwoRowScore}");
+        var rowsAdvanced = evidence.AcceptedRows ?? 0;
+        if (rowsAdvanced <= 0)
+        {
+            return ScrollRowsResult.Fail("row-scroll coordinator accepted a non-positive decision", retryable: false, evidence, details);
+        }
+
+        if (rowsAdvanced == 2 && !allowTwoRows)
+        {
+            scanLog.WriteEvent("ROW_SCROLL_OVERSHOT_BLOCKED", $"direction={direction}, fromTop={visibleTopLogicalRow}, requestedToTop={targetTop}, rowsAdvanced=2, tick={result.Tick}/{maxTicks}, sample={result.Sample}, bestScore={evidence.BestScore}, margin={evidence.Margin}, movedDistance={evidence.MovedDistance}, reason=strict_single_row_path");
+            return ScrollRowsResult.Fail(
+                "scroll advanced two rows while the current traversal requires exactly one row",
+                retryable: false,
+                evidence,
+                details);
+        }
+
+        var estimatedTop = upward
+            ? Math.Max(1, visibleTopLogicalRow - rowsAdvanced)
+            : Math.Min(maxVisibleTop, visibleTopLogicalRow + rowsAdvanced);
+        scanLog.WriteEvent(doneEvent, $"direction={direction}, fromTop={visibleTopLogicalRow}, estimatedToTop={estimatedTop}, requestedToTop={targetTop}, rowsAdvanced={rowsAdvanced}, tick={result.Tick}/{maxTicks}, sample={result.Sample}, decision={evidence.Decision}, bestScore={evidence.BestScore}, margin={evidence.Margin}, movedDistance={evidence.MovedDistance}, reason={evidence.Reason}");
+        return ScrollRowsResult.Ok(
+            $"confirmed {direction} movement of {rowsAdvanced} row(s) from {visibleTopLogicalRow}",
+            rowsAdvanced,
+            latestViewport.Rows,
+            evidence,
+            details);
     }
 
     private static Rectangle[] BuildVisualRowSignatureRects(Rectangle listGridRect, int visibleRows)
@@ -2186,9 +2077,9 @@ public sealed class ScanController
         return Rectangle.FromLTRB(left, top, right, bottom);
     }
 
-    private static ImageSignature[] CaptureRowSignatures(GameWindow window, IReadOnlyList<Rectangle> rowSignatureRects)
+    private static RowVisualSignature[] CaptureRowSignatures(GameWindow window, IReadOnlyList<Rectangle> rowSignatureRects)
     {
-        var signatures = new ImageSignature[rowSignatureRects.Count];
+        var signatures = new RowVisualSignature[rowSignatureRects.Count];
         if (rowSignatureRects.Count == 0)
         {
             return signatures;
@@ -2204,7 +2095,7 @@ public sealed class ScanController
         for (var i = 0; i < signatures.Length; i++)
         {
             var rect = rowSignatureRects[i];
-            signatures[i] = CreateSignature(image, new Rectangle(rect.Left - bounds.Left, rect.Top - bounds.Top, rect.Width, rect.Height));
+            signatures[i] = RowVisualSignatureExtractor.Create(image, new Rectangle(rect.Left - bounds.Left, rect.Top - bounds.Top, rect.Width, rect.Height));
         }
 
         return signatures;
@@ -2213,11 +2104,11 @@ public sealed class ScanController
     private static ViewportSignatures CaptureViewportSignatures(GameWindow window, Rectangle listGridRect, IReadOnlyList<Rectangle> rowSignatureRects)
     {
         using var image = window.CaptureFrame(listGridRect);
-        var rows = new ImageSignature[rowSignatureRects.Count];
+        var rows = new RowVisualSignature[rowSignatureRects.Count];
         for (var i = 0; i < rows.Length; i++)
         {
             var rect = rowSignatureRects[i];
-            rows[i] = CreateSignature(image, new Rectangle(rect.Left - listGridRect.Left, rect.Top - listGridRect.Top, rect.Width, rect.Height));
+            rows[i] = RowVisualSignatureExtractor.Create(image, new Rectangle(rect.Left - listGridRect.Left, rect.Top - listGridRect.Top, rect.Width, rect.Height));
         }
 
         return new ViewportSignatures(
@@ -2225,108 +2116,7 @@ public sealed class ScanController
             rows);
     }
 
-    private static async Task<ScrollSettleResult> WaitForOneRowDownSettledAsync(
-        GameWindow window,
-        ScanProfile profile,
-        ScrollAcceptMode scrollAcceptMode,
-        Rectangle listGridRect,
-        IReadOnlyList<Rectangle> rowSignatureRects,
-        ImageSignature beforeGrid,
-        IReadOnlyList<ImageSignature> beforeRows,
-        CancellationToken token)
-    {
-        var timeout = TimeSpan.FromMilliseconds(Math.Max(
-            Math.Max(1, profile.MinListStableTimeoutMs),
-            Math.Min(profile.LoadTimeoutMs, Math.Max(1, profile.ListStableTimeoutMs))));
-        var interval = TimeSpan.FromMilliseconds(Math.Max(10, profile.LoadPollMs));
-        var requiredStableFrames = Math.Max(1, profile.ListStableConfirmFrames);
-        var start = DateTime.UtcNow;
-        ViewportSignatures? previousOneRowCandidate = null;
-        var stableFrames = 0;
-        var polls = 0;
-        var signatureMilliseconds = 0.0;
-        ScrollSettleResult? last = null;
-
-        while (DateTime.UtcNow - start < timeout)
-        {
-            token.ThrowIfCancellationRequested();
-            var signatureWatch = Stopwatch.StartNew();
-            var afterViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
-            signatureWatch.Stop();
-            signatureMilliseconds += signatureWatch.Elapsed.TotalMilliseconds;
-            polls++;
-
-            var movedDistance = SignatureDistance(beforeGrid, afterViewport.Grid);
-            var verification = VerifyOneRowDown(beforeRows, afterViewport.Rows);
-            var estimatedRows = EstimateRowsAdvanced(verification, movedDistance);
-            var success = false;
-
-            if (estimatedRows == 1)
-            {
-                if (scrollAcceptMode == ScrollAcceptMode.EarlyOneRow)
-                {
-                    success = true;
-                }
-                else
-                {
-                    if (previousOneRowCandidate is { } previous
-                        && SignatureDistance(previous.Grid, afterViewport.Grid) <= ListStableTolerance)
-                    {
-                        stableFrames++;
-                    }
-                    else
-                    {
-                        stableFrames = 0;
-                    }
-
-                    previousOneRowCandidate = afterViewport;
-                    success = stableFrames >= requiredStableFrames;
-                }
-            }
-            else
-            {
-                previousOneRowCandidate = null;
-                stableFrames = 0;
-            }
-
-            last = new ScrollSettleResult(
-                afterViewport,
-                verification,
-                movedDistance,
-                estimatedRows,
-                success,
-                polls,
-                (DateTime.UtcNow - start).TotalMilliseconds,
-                signatureMilliseconds);
-
-            if (success || estimatedRows > 1)
-            {
-                return last.Value;
-            }
-
-            await Task.Delay(interval, token);
-        }
-
-        if (last is { } final)
-        {
-            return final;
-        }
-
-        var fallbackViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
-        var fallbackMovedDistance = SignatureDistance(beforeGrid, fallbackViewport.Grid);
-        var fallbackVerification = VerifyOneRowDown(beforeRows, fallbackViewport.Rows);
-        return new ScrollSettleResult(
-            fallbackViewport,
-            fallbackVerification,
-            fallbackMovedDistance,
-            EstimateRowsAdvanced(fallbackVerification, fallbackMovedDistance),
-            Success: false,
-            Polls: polls,
-            WaitMilliseconds: timeout.TotalMilliseconds,
-            SignatureMilliseconds: signatureMilliseconds);
-    }
-
-    private static RowScrollVerification VerifyOneRowDown(IReadOnlyList<ImageSignature> beforeRows, IReadOnlyList<ImageSignature> afterRows)
+    private static RowScrollVerification VerifyOneRowDown(IReadOnlyList<RowVisualSignature> beforeRows, IReadOnlyList<RowVisualSignature> afterRows)
     {
         var noMove = AverageSignatureDistance(beforeRows, afterRows, [(0, 0), (1, 1), (2, 2), (3, 3)]);
         var oneRow = AverageSignatureDistance(beforeRows, afterRows, [(1, 0), (2, 1), (3, 2)]);
@@ -2334,40 +2124,12 @@ public sealed class ScanController
         return new RowScrollVerification(oneRow, noMove, twoRows);
     }
 
-    private static RowScrollVerification VerifyOneRowUp(IReadOnlyList<ImageSignature> beforeRows, IReadOnlyList<ImageSignature> afterRows)
+    private static RowScrollVerification VerifyOneRowUp(IReadOnlyList<RowVisualSignature> beforeRows, IReadOnlyList<RowVisualSignature> afterRows)
     {
         var noMove = AverageSignatureDistance(beforeRows, afterRows, [(0, 0), (1, 1), (2, 2), (3, 3)]);
         var oneRow = AverageSignatureDistance(beforeRows, afterRows, [(0, 1), (1, 2), (2, 3)]);
         var twoRows = AverageSignatureDistance(beforeRows, afterRows, [(0, 2), (1, 3)]);
         return new RowScrollVerification(oneRow, noMove, twoRows);
-    }
-
-    private static int EstimateRowsAdvanced(RowScrollVerification verification, int movedDistance)
-    {
-        if (movedDistance <= ListMovementTolerance)
-        {
-            return 0;
-        }
-
-        var oneRowMatched = verification.OneRowScore <= RowShiftMatchTolerance
-            || verification.OneRowScore <= verification.NoMoveScore + RowShiftClearMargin
-            || verification.OneRowScore <= verification.TwoRowScore + RowShiftClearMargin
-            || (verification.TwoRowScore > RowShiftStrongMatchTolerance
-                && verification.OneRowScore <= verification.NoMoveScore + RowShiftLooseMargin);
-        if (oneRowMatched)
-        {
-            return 1;
-        }
-
-        var twoRowsClearlyBest = verification.TwoRowScore <= RowShiftStrongMatchTolerance
-            && verification.TwoRowScore + (RowShiftClearMargin * 2) < verification.OneRowScore
-            && verification.TwoRowScore + (RowShiftClearMargin * 2) < verification.NoMoveScore;
-        if (twoRowsClearlyBest)
-        {
-            return 2;
-        }
-
-        return 0;
     }
 
     private static int ScrollTickDelay(ScanProfile profile)
@@ -2402,7 +2164,7 @@ public sealed class ScanController
         return value.HasValue ? value.Value.ToString() : "NA";
     }
 
-    private static int AverageSignatureDistance(IReadOnlyList<ImageSignature> beforeRows, IReadOnlyList<ImageSignature> afterRows, IReadOnlyList<(int Before, int After)> pairs)
+    private static int AverageSignatureDistance(IReadOnlyList<RowVisualSignature> beforeRows, IReadOnlyList<RowVisualSignature> afterRows, IReadOnlyList<(int Before, int After)> pairs)
     {
         var sum = 0;
         var count = 0;
@@ -2410,7 +2172,7 @@ public sealed class ScanController
         {
             if (pair.Before < beforeRows.Count && pair.After < afterRows.Count)
             {
-                sum += SignatureDistance(beforeRows[pair.Before], afterRows[pair.After]);
+                sum += RowVisualSignatureExtractor.Distance(beforeRows[pair.Before], afterRows[pair.After]);
                 count++;
             }
         }
@@ -5583,54 +5345,37 @@ public sealed class ScanController
 
     private readonly record struct ImageSignature(ulong Hash, int[] Samples);
 
-    private readonly record struct ViewportSignatures(ImageSignature Grid, ImageSignature[] Rows);
+    private readonly record struct ViewportSignatures(ImageSignature Grid, RowVisualSignature[] Rows);
 
     private readonly record struct SafeBandMoveResult(int VisibleTopLogicalRow, bool Scrolled);
 
-    private readonly record struct ScrollSettleResult(
-        ViewportSignatures AfterViewport,
-        RowScrollVerification Verification,
-        int MovedDistance,
-        int EstimatedRows,
-        bool Success,
-        int Polls,
-        double WaitMilliseconds,
-        double SignatureMilliseconds);
-
     private readonly record struct RowScrollVerification(int OneRowScore, int NoMoveScore, int TwoRowScore);
-
-    private readonly record struct RowAdvanceEvidence(
-        int BestRows,
-        int BestScore,
-        int SecondScore,
-        int Margin,
-        int? AcceptedRows,
-        int? StrongRows,
-        bool Ambiguous,
-        int NoMoveScore,
-        int OneRowScore,
-        int TwoRowScore);
-
-    private readonly record struct OverlapConflictResolution(
-        bool Success,
-        int RowsAdvanced,
-        RowAdvanceEvidence Evidence,
-        ImageSignature[]? Rows,
-        string Reason)
-    {
-        public static OverlapConflictResolution Ok(int rowsAdvanced, RowAdvanceEvidence evidence, ImageSignature[]? rows, string reason) =>
-            new(true, rowsAdvanced, evidence, rows, reason);
-
-        public static OverlapConflictResolution Fail(string reason) =>
-            new(false, 0, default, null, reason);
-    }
 
     private readonly record struct OverlapGapCoverage(bool Safe, int[] CoveredRows, int[] MissingRows);
 
-    private readonly record struct ScrollRowsResult(bool Success, string Message, int RowsAdvanced = 0, bool Retryable = true, ImageSignature[]? AfterRows = null)
+    private readonly record struct ScrollRowsResult(
+        bool Success,
+        string Message,
+        int RowsAdvanced = 0,
+        bool Retryable = true,
+        RowVisualSignature[]? AfterRows = null,
+        RowAdvanceEvidence Evidence = default,
+        IReadOnlyDictionary<string, object?>? DiagnosticDetails = null)
     {
-        public static ScrollRowsResult Ok(string message, int rowsAdvanced = 0, ImageSignature[]? afterRows = null) => new(true, message, rowsAdvanced, AfterRows: afterRows);
-        public static ScrollRowsResult Fail(string message, bool retryable = true) => new(false, message, Retryable: retryable);
+        public static ScrollRowsResult Ok(
+            string message,
+            int rowsAdvanced = 0,
+            RowVisualSignature[]? afterRows = null,
+            RowAdvanceEvidence evidence = default,
+            IReadOnlyDictionary<string, object?>? diagnosticDetails = null) =>
+            new(true, message, rowsAdvanced, AfterRows: afterRows, Evidence: evidence, DiagnosticDetails: diagnosticDetails);
+
+        public static ScrollRowsResult Fail(
+            string message,
+            bool retryable = true,
+            RowAdvanceEvidence evidence = default,
+            IReadOnlyDictionary<string, object?>? diagnosticDetails = null) =>
+            new(false, message, Retryable: retryable, Evidence: evidence, DiagnosticDetails: diagnosticDetails);
     }
 
 }

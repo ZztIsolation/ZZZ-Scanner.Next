@@ -2,12 +2,15 @@
 
 ## Unreleased
 
-## 2026-07-23 1.0.46 候选
+## 2026-07-29 1.0.46
 
 - 列表置顶恢复 1.0.39 的 `scrollBarTop` 单像素 RGB 判定，使用 profile 中的 `scrollBar=#808080` 和各通道容差 26；不再使用会被连续上滚回弹动画干扰的顶部/轨道亮度块作为成功依据。
 - 顶部复位改为有界输入：输入前先取最多 3 个样本并要求连续 2 次匹配；未确认时最多执行 3 批、每批 4 个向上滚轮 tick，每批后完全停止输入 160ms 再采样。12 tick 后只允许点击一次滚动条顶部，并在停稳后强制复检。
 - 顶部点击后仍无法确认时返回现有 `scan_navigation_failed`，并保持 `visited/queued/completed=0`，避免继续上滑或从未确认的位置生成 `scan_item`。新增 `RESET_TOP_COLOR_PROBE`、`RESET_TOP_SETTLE`、`RESET_TOP_CONFIRMED` 和 `RESET_TOP_FAILED` 本地诊断。
-- Scanner 候选版本升至 1.0.46；1.0.45 的首两件事务识别、仓库预检、遍历、协议 v4 和导出结构均保持不变，Helper 继续冻结为 1.3.1。本候选仅通过草稿 PR 和 Actions artifacts 交付，不发布 tag、Release、manifest、CDN 或服务器更新。
+- 向下滚动改为统一的 `NoMove`、`OneRow`、`TwoRows`、`Ambiguous` 四态判定。0 行位移现在是可以否决逻辑前进的正式证据，删除了会把 `noMove=8 / oneRow=40 / twoRows=60` 误判为一行的宽松估算和外层二次猜测。
+- 行签名升级为 `24x8` 中位亮度归一化结构采样，并剔除最高 10% 的局部异常差异；全局亮度变化和悬停高亮不再单独左右滚动结论。每个滚轮 tick 最多取证 3 帧，最多发送 6 个小 tick，持续歧义或持续未移动均返回 `scan_navigation_failed` 并保留部分导出。
+- 逻辑顶部改为事务式提交：只有统一协调器确认一行或两行位移后才能前进，删除最低前进一行的兜底。新增 `ROW_SCROLL_EVIDENCE`、`ROW_SCROLL_NO_MOVE_CONFIRMED`、`ROW_SCROLL_AMBIGUOUS_STOP`，Benchmark 增加未移动、歧义和错误前进计数及 `no_false_scroll_advance` 门禁。
+- Scanner 版本为 1.0.46；1.0.45 的首两件事务识别、仓库预检、协议 v4 和导出结构均保持不变，Helper 继续冻结为 1.3.1。
 
 ## 2026-07-22 1.0.45
 

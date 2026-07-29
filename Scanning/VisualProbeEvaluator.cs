@@ -346,6 +346,327 @@ internal static class ScrollTopResetCoordinator
     }
 }
 
+internal enum RowAdvanceDecision
+{
+    NoMove,
+    OneRow,
+    TwoRows,
+    Ambiguous
+}
+
+internal readonly record struct RowVisualSignature(ulong Hash, short[] NormalizedLuminance);
+
+internal static class RowVisualSignatureExtractor
+{
+    public const int Columns = 24;
+    public const int Rows = 8;
+    public const int TrimPercent = 10;
+
+    public static RowVisualSignature Create(Bitmap image, Rectangle rect) =>
+        Create(image.Width, image.Height, image.GetPixel, rect);
+
+    public static RowVisualSignature Create(CapturedFrame image, Rectangle rect) =>
+        Create(image.Width, image.Height, image.GetPixel, rect);
+
+    public static int Distance(RowVisualSignature left, RowVisualSignature right)
+    {
+        var leftSamples = left.NormalizedLuminance;
+        var rightSamples = right.NormalizedLuminance;
+        if (leftSamples.Length == 0 || leftSamples.Length != rightSamples.Length)
+        {
+            return left.Hash == right.Hash ? 0 : int.MaxValue;
+        }
+
+        var differences = new int[leftSamples.Length];
+        for (var index = 0; index < differences.Length; index++)
+        {
+            differences[index] = Math.Abs(leftSamples[index] - rightSamples[index]);
+        }
+
+        Array.Sort(differences);
+        var dropped = differences.Length * TrimPercent / 100;
+        var retained = Math.Max(1, differences.Length - dropped);
+        var sum = 0L;
+        for (var index = 0; index < retained; index++)
+        {
+            sum += differences[index];
+        }
+
+        return (int)Math.Min(int.MaxValue, sum / retained);
+    }
+
+    private static RowVisualSignature Create(
+        int width,
+        int height,
+        Func<int, int, Color> getPixel,
+        Rectangle rect)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            return new RowVisualSignature(0, []);
+        }
+
+        rect = Rectangle.Intersect(rect, new Rectangle(0, 0, width, height));
+        if (rect.Width <= 0 || rect.Height <= 0)
+        {
+            return new RowVisualSignature(0, []);
+        }
+
+        var luminance = new int[Columns * Rows];
+        const ulong offset = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        var hash = offset;
+        var index = 0;
+        for (var row = 0; row < Rows; row++)
+        {
+            var y = rect.Top + Math.Min(rect.Height - 1, ((row * 2 + 1) * rect.Height) / (Rows * 2));
+            for (var column = 0; column < Columns; column++)
+            {
+                var x = rect.Left + Math.Min(rect.Width - 1, ((column * 2 + 1) * rect.Width) / (Columns * 2));
+                var color = getPixel(x, y);
+                luminance[index++] = (color.R * 299 + color.G * 587 + color.B * 114) / 1000;
+                hash ^= color.R;
+                hash *= prime;
+                hash ^= color.G;
+                hash *= prime;
+                hash ^= color.B;
+                hash *= prime;
+            }
+        }
+
+        var ordered = (int[])luminance.Clone();
+        Array.Sort(ordered);
+        var median = (ordered[(ordered.Length - 1) / 2] + ordered[ordered.Length / 2]) / 2;
+        var normalized = new short[luminance.Length];
+        for (var sample = 0; sample < luminance.Length; sample++)
+        {
+            normalized[sample] = (short)(luminance[sample] - median);
+        }
+
+        return new RowVisualSignature(hash, normalized);
+    }
+}
+
+internal readonly record struct RowAdvanceEvidence(
+    RowAdvanceDecision Decision,
+    int BestRows,
+    int BestScore,
+    int SecondScore,
+    int Margin,
+    bool Strong,
+    int NoMoveScore,
+    int OneRowScore,
+    int TwoRowScore,
+    int MovedDistance,
+    string Reason)
+{
+    public int? AcceptedRows => Decision switch
+    {
+        RowAdvanceDecision.NoMove => 0,
+        RowAdvanceDecision.OneRow => 1,
+        RowAdvanceDecision.TwoRows => 2,
+        _ => null
+    };
+}
+
+internal static class RowAdvanceEvaluator
+{
+    public const int MatchTolerance = 48;
+    public const int ClearMargin = 12;
+    public const int StrongMargin = 18;
+    public const int MovementTolerance = 6;
+
+    public static RowAdvanceEvidence Evaluate(
+        int noMoveScore,
+        int oneRowScore,
+        int twoRowScore,
+        int movedDistance)
+    {
+        var ordered = new[]
+        {
+            (Rows: 0, Score: noMoveScore),
+            (Rows: 1, Score: oneRowScore),
+            (Rows: 2, Score: twoRowScore)
+        }
+        .OrderBy(candidate => candidate.Score)
+        .ThenBy(candidate => candidate.Rows)
+        .ToArray();
+        var best = ordered[0];
+        var secondScore = ordered[1].Score;
+        var margin = secondScore == int.MaxValue || best.Score == int.MaxValue
+            ? 0
+            : Math.Max(0, secondScore - best.Score);
+        var strong = best.Score <= MatchTolerance && margin >= StrongMargin;
+
+        if (best.Score > MatchTolerance)
+        {
+            return Evidence(RowAdvanceDecision.Ambiguous, "no_structural_match");
+        }
+
+        if (margin < ClearMargin)
+        {
+            return Evidence(RowAdvanceDecision.Ambiguous, "insufficient_margin");
+        }
+
+        if (best.Rows == 0)
+        {
+            return Evidence(RowAdvanceDecision.NoMove, "no_move_structurally_confirmed");
+        }
+
+        if (movedDistance <= MovementTolerance)
+        {
+            return Evidence(RowAdvanceDecision.Ambiguous, "positive_shift_without_grid_movement");
+        }
+
+        return Evidence(
+            best.Rows == 1 ? RowAdvanceDecision.OneRow : RowAdvanceDecision.TwoRows,
+            best.Rows == 1 ? "one_row_structurally_confirmed" : "two_rows_structurally_confirmed");
+
+        RowAdvanceEvidence Evidence(RowAdvanceDecision decision, string reason) => new(
+            decision,
+            best.Rows,
+            best.Score,
+            secondScore,
+            margin,
+            strong,
+            noMoveScore,
+            oneRowScore,
+            twoRowScore,
+            movedDistance,
+            reason);
+    }
+}
+
+internal enum RowScrollCoordinatorOutcome
+{
+    Accepted,
+    AmbiguousStop,
+    NoMovementStop
+}
+
+internal readonly record struct RowScrollCoordinatorTrace(
+    int Tick,
+    int Sample,
+    RowAdvanceEvidence Evidence,
+    string Action);
+
+internal readonly record struct RowScrollCoordinatorResult(
+    RowScrollCoordinatorOutcome Outcome,
+    int Tick,
+    int Sample,
+    RowAdvanceEvidence Evidence)
+{
+    public bool Accepted => Outcome == RowScrollCoordinatorOutcome.Accepted;
+}
+
+internal static class RowScrollCoordinator
+{
+    public const int MaximumSamplesPerTick = 3;
+
+    public static async Task<RowScrollCoordinatorResult> RunAsync(
+        int maximumTicks,
+        ScrollAcceptMode acceptMode,
+        Func<int, CancellationToken, Task> issueWheelAsync,
+        Func<int, int, CancellationToken, Task<RowAdvanceEvidence>> captureEvidenceAsync,
+        Action<RowScrollCoordinatorTrace>? trace,
+        CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(issueWheelAsync);
+        ArgumentNullException.ThrowIfNull(captureEvidenceAsync);
+        maximumTicks = Math.Max(1, maximumTicks);
+        RowAdvanceEvidence lastEvidence = default;
+
+        for (var tick = 1; tick <= maximumTicks; tick++)
+        {
+            token.ThrowIfCancellationRequested();
+            await issueWheelAsync(tick, token);
+            RowAdvanceDecision? consecutiveDecision = null;
+            var consecutiveFrames = 0;
+
+            for (var sample = 1; sample <= MaximumSamplesPerTick; sample++)
+            {
+                token.ThrowIfCancellationRequested();
+                lastEvidence = await captureEvidenceAsync(tick, sample, token);
+
+                if (lastEvidence.Decision == RowAdvanceDecision.NoMove)
+                {
+                    var outcome = tick == maximumTicks
+                        ? RowScrollCoordinatorOutcome.NoMovementStop
+                        : (RowScrollCoordinatorOutcome?)null;
+                    trace?.Invoke(new RowScrollCoordinatorTrace(
+                        tick,
+                        sample,
+                        lastEvidence,
+                        outcome is null ? "next_tick" : "stop_no_movement"));
+                    if (outcome is not null)
+                    {
+                        return new RowScrollCoordinatorResult(outcome.Value, tick, sample, lastEvidence);
+                    }
+
+                    break;
+                }
+
+                if (lastEvidence.Decision is RowAdvanceDecision.OneRow or RowAdvanceDecision.TwoRows)
+                {
+                    if (consecutiveDecision == lastEvidence.Decision)
+                    {
+                        consecutiveFrames++;
+                    }
+                    else
+                    {
+                        consecutiveDecision = lastEvidence.Decision;
+                        consecutiveFrames = 1;
+                    }
+
+                    var earlyStrongAcceptance = acceptMode == ScrollAcceptMode.EarlyOneRow && lastEvidence.Strong;
+                    if (earlyStrongAcceptance || consecutiveFrames >= 2)
+                    {
+                        trace?.Invoke(new RowScrollCoordinatorTrace(tick, sample, lastEvidence, "accept"));
+                        return new RowScrollCoordinatorResult(
+                            RowScrollCoordinatorOutcome.Accepted,
+                            tick,
+                            sample,
+                            lastEvidence);
+                    }
+                }
+                else
+                {
+                    consecutiveDecision = null;
+                    consecutiveFrames = 0;
+                }
+
+                var finalSample = sample == MaximumSamplesPerTick;
+                trace?.Invoke(new RowScrollCoordinatorTrace(
+                    tick,
+                    sample,
+                    lastEvidence,
+                    finalSample ? "stop_ambiguous" : "resample"));
+                if (finalSample)
+                {
+                    var ambiguous = lastEvidence with
+                    {
+                        Decision = RowAdvanceDecision.Ambiguous,
+                        Reason = lastEvidence.Decision == RowAdvanceDecision.Ambiguous
+                            ? lastEvidence.Reason
+                            : "insufficient_consecutive_confirmation"
+                    };
+                    return new RowScrollCoordinatorResult(
+                        RowScrollCoordinatorOutcome.AmbiguousStop,
+                        tick,
+                        sample,
+                        ambiguous);
+                }
+            }
+        }
+
+        return new RowScrollCoordinatorResult(
+            RowScrollCoordinatorOutcome.NoMovementStop,
+            maximumTicks,
+            1,
+            lastEvidence);
+    }
+}
+
 public readonly record struct FirstPairWitnessCoordinate(int VisualRow, int Column);
 
 public static class FirstPairWitnessPlanner

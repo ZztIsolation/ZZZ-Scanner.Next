@@ -171,6 +171,40 @@ internal static class ScanDiagnosticDetails
         };
     }
 
+    public static IReadOnlyDictionary<string, object?> RowScroll(
+        string direction,
+        int tick,
+        int maximumTicks,
+        int sample,
+        RowAdvanceDecision decision,
+        int noMoveScore,
+        int oneRowScore,
+        int twoRowScore,
+        int bestScore,
+        int secondScore,
+        int margin,
+        int movedDistance,
+        string reason)
+    {
+        return new Dictionary<string, object?>
+        {
+            ["phase"] = "row_scroll",
+            ["direction"] = direction,
+            ["tick"] = tick,
+            ["maximumTicks"] = maximumTicks,
+            ["sample"] = sample,
+            ["decision"] = decision.ToString(),
+            ["noMoveScore"] = noMoveScore,
+            ["oneRowScore"] = oneRowScore,
+            ["twoRowScore"] = twoRowScore,
+            ["bestScore"] = bestScore,
+            ["secondScore"] = secondScore,
+            ["margin"] = margin,
+            ["movedDistance"] = movedDistance,
+            ["reason"] = reason
+        };
+    }
+
     public static IReadOnlyDictionary<string, object?>? FromException(Exception exception)
     {
         return exception is IScanDiagnosticException diagnostic ? diagnostic.DiagnosticDetails : null;

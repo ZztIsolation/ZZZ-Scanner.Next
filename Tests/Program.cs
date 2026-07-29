@@ -46,6 +46,10 @@ internal static class Program
             ("scrollbar top color probe", TestScrollbarTopColorProbeAsync),
             ("bounded scrollbar top reset", TestBoundedScrollbarTopResetAsync),
             ("scrollbar top reset cancellation", TestScrollbarTopResetCancellationAsync),
+            ("row advance evidence", TestRowAdvanceEvidenceAsync),
+            ("normalized row structural signatures", TestRowStructuralSignaturesAsync),
+            ("bounded row scroll coordination", TestRowScrollCoordinationAsync),
+            ("row scroll coordination cancellation", TestRowScrollCoordinationCancellationAsync),
             ("Scanner supervisor lifecycle", TestScannerSupervisorLifecycleAsync),
             ("Helper scanner message limit", TestHelperScannerMessageLimitAsync),
             ("scan activity terminal gate", TestScanActivityTerminalGateAsync),
@@ -1206,6 +1210,212 @@ internal static class Program
         return new ScrollTopResetScenario(result, wheelCount, clickCount, delays, traces);
     }
 
+    private static Task TestRowAdvanceEvidenceAsync()
+    {
+        var reproducedFailure = RowAdvanceEvaluator.Evaluate(
+            noMoveScore: 8,
+            oneRowScore: 40,
+            twoRowScore: 60,
+            movedDistance: 15);
+        AssertEqual(RowAdvanceDecision.NoMove, reproducedFailure.Decision);
+        AssertEqual(0, reproducedFailure.AcceptedRows ?? -1);
+        AssertTrue(reproducedFailure.Strong);
+
+        var oldOwnAccountEvidence = RowAdvanceEvaluator.Evaluate(
+            noMoveScore: 75,
+            oneRowScore: 69,
+            twoRowScore: 61,
+            movedDistance: 77);
+        AssertEqual(RowAdvanceDecision.Ambiguous, oldOwnAccountEvidence.Decision);
+        AssertTrue(oldOwnAccountEvidence.AcceptedRows is null);
+
+        AssertEqual(
+            RowAdvanceDecision.OneRow,
+            RowAdvanceEvaluator.Evaluate(70, 4, 65, 40).Decision);
+        AssertEqual(
+            RowAdvanceDecision.TwoRows,
+            RowAdvanceEvaluator.Evaluate(70, 65, 4, 40).Decision);
+        AssertEqual(
+            RowAdvanceDecision.NoMove,
+            RowAdvanceEvaluator.Evaluate(4, 60, 70, 90).Decision);
+        AssertEqual(
+            RowAdvanceDecision.Ambiguous,
+            RowAdvanceEvaluator.Evaluate(70, 4, 65, RowAdvanceEvaluator.MovementTolerance).Decision);
+        AssertEqual(
+            RowAdvanceDecision.Ambiguous,
+            RowAdvanceEvaluator.Evaluate(10, 15, 80, 40).Decision);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestRowStructuralSignaturesAsync()
+    {
+        using var baseline = CreateSyntheticRowViewport(startLogicalRow: 0);
+        using var noMove = CreateSyntheticRowViewport(startLogicalRow: 0, brightnessOffset: 24);
+        using var oneRow = CreateSyntheticRowViewport(startLogicalRow: 1, brightnessOffset: 24, hoverVisualRow: 2);
+        using var twoRows = CreateSyntheticRowViewport(startLogicalRow: 2, brightnessOffset: -12);
+        using var identicalBefore = CreateSyntheticRowViewport(startLogicalRow: 0, identicalRows: true);
+        using var identicalAfter = CreateSyntheticRowViewport(startLogicalRow: 1, identicalRows: true, brightnessOffset: 18);
+
+        AssertEqual(RowAdvanceDecision.NoMove, EvaluateSyntheticRowShift(baseline, noMove).Decision);
+        AssertEqual(RowAdvanceDecision.OneRow, EvaluateSyntheticRowShift(baseline, oneRow).Decision);
+        AssertEqual(RowAdvanceDecision.TwoRows, EvaluateSyntheticRowShift(baseline, twoRows).Decision);
+        AssertEqual(RowAdvanceDecision.Ambiguous, EvaluateSyntheticRowShift(identicalBefore, identicalAfter).Decision);
+        return Task.CompletedTask;
+    }
+
+    private static async Task TestRowScrollCoordinationAsync()
+    {
+        var noMove = RowAdvanceEvaluator.Evaluate(3, 60, 80, 20);
+        var oneRow = RowAdvanceEvaluator.Evaluate(70, 3, 80, 40);
+        var ambiguous = RowAdvanceEvaluator.Evaluate(20, 24, 80, 40);
+
+        var wheelCount = 0;
+        var traces = new List<RowScrollCoordinatorTrace>();
+        var recovered = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            (tick, _) =>
+            {
+                wheelCount++;
+                return Task.CompletedTask;
+            },
+            (tick, _, _) => Task.FromResult(tick == 1 ? noMove : oneRow),
+            traces.Add,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.Accepted, recovered.Outcome);
+        AssertEqual(2, recovered.Tick);
+        AssertEqual(1, recovered.Sample);
+        AssertEqual(2, wheelCount);
+        AssertTrue(traces.Any(trace => trace.Action == "next_tick"));
+
+        var safeSamples = 0;
+        var safe = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.Safe,
+            (_, _) => Task.CompletedTask,
+            (_, _, _) =>
+            {
+                safeSamples++;
+                return Task.FromResult(oneRow);
+            },
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.Accepted, safe.Outcome);
+        AssertEqual(2, safeSamples);
+
+        var ambiguousStop = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            (_, _) => Task.CompletedTask,
+            (_, _, _) => Task.FromResult(ambiguous),
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.AmbiguousStop, ambiguousStop.Outcome);
+        AssertEqual(RowScrollCoordinator.MaximumSamplesPerTick, ambiguousStop.Sample);
+        AssertEqual(1, ambiguousStop.Tick);
+
+        var noMovement = await RowScrollCoordinator.RunAsync(
+            maximumTicks: 3,
+            ScrollAcceptMode.EarlyOneRow,
+            (_, _) => Task.CompletedTask,
+            (_, _, _) => Task.FromResult(noMove),
+            trace: null,
+            CancellationToken.None);
+        AssertEqual(RowScrollCoordinatorOutcome.NoMovementStop, noMovement.Outcome);
+        AssertEqual(3, noMovement.Tick);
+    }
+
+    private static async Task TestRowScrollCoordinationCancellationAsync()
+    {
+        using var cancellation = new CancellationTokenSource();
+        await AssertCanceledAsync(RowScrollCoordinator.RunAsync(
+            maximumTicks: 6,
+            ScrollAcceptMode.EarlyOneRow,
+            (_, _) =>
+            {
+                cancellation.Cancel();
+                return Task.CompletedTask;
+            },
+            (_, _, _) => Task.FromResult(RowAdvanceEvaluator.Evaluate(70, 3, 80, 40)),
+            trace: null,
+            cancellation.Token));
+    }
+
+    private static RowAdvanceEvidence EvaluateSyntheticRowShift(Bitmap before, Bitmap after)
+    {
+        var beforeRows = CreateSyntheticRowSignatures(before);
+        var afterRows = CreateSyntheticRowSignatures(after);
+        int Score(params (int Before, int After)[] pairs) =>
+            (int)pairs.Average(pair => RowVisualSignatureExtractor.Distance(beforeRows[pair.Before], afterRows[pair.After]));
+        return RowAdvanceEvaluator.Evaluate(
+            Score((0, 0), (1, 1), (2, 2), (3, 3)),
+            Score((1, 0), (2, 1), (3, 2)),
+            Score((2, 0), (3, 1)),
+            movedDistance: 40);
+    }
+
+    private static RowVisualSignature[] CreateSyntheticRowSignatures(Bitmap image)
+    {
+        const int visibleRows = 4;
+        var rowHeight = image.Height / visibleRows;
+        return Enumerable.Range(0, visibleRows)
+            .Select(row => RowVisualSignatureExtractor.Create(
+                image,
+                new Rectangle(0, row * rowHeight, image.Width, rowHeight)))
+            .ToArray();
+    }
+
+    private static Bitmap CreateSyntheticRowViewport(
+        int startLogicalRow,
+        int brightnessOffset = 0,
+        bool identicalRows = false,
+        int hoverVisualRow = -1)
+    {
+        const int width = 480;
+        const int rowHeight = 80;
+        const int visibleRows = 4;
+        var image = new Bitmap(width, rowHeight * visibleRows);
+        using var graphics = Graphics.FromImage(image);
+        for (var visualRow = 0; visualRow < visibleRows; visualRow++)
+        {
+            var logicalRow = identicalRows ? 0 : startLogicalRow + visualRow;
+            var top = visualRow * rowHeight;
+            var dark = Math.Clamp(30 + brightnessOffset, 0, 255);
+            var light = Math.Clamp(190 + brightnessOffset, 0, 255);
+            using var darkBrush = new SolidBrush(Color.FromArgb(dark, dark, dark));
+            using var lightBrush = new SolidBrush(Color.FromArgb(light, light, light));
+            graphics.FillRectangle(darkBrush, 0, top, width, rowHeight);
+            for (var sampleRow = 0; sampleRow < RowVisualSignatureExtractor.Rows; sampleRow++)
+            {
+                for (var column = 0; column < RowVisualSignatureExtractor.Columns; column++)
+                {
+                    var marker = unchecked((logicalRow + 11) * 73856093 ^ (sampleRow + 7) * 19349663 ^ (column + 5) * 83492791);
+                    if ((marker & 7) < 3)
+                    {
+                        var left = column * width / RowVisualSignatureExtractor.Columns;
+                        var right = (column + 1) * width / RowVisualSignatureExtractor.Columns;
+                        var cellTop = top + sampleRow * rowHeight / RowVisualSignatureExtractor.Rows;
+                        var cellBottom = top + (sampleRow + 1) * rowHeight / RowVisualSignatureExtractor.Rows;
+                        graphics.FillRectangle(
+                            lightBrush,
+                            left,
+                            cellTop,
+                            Math.Max(1, right - left),
+                            Math.Max(1, cellBottom - cellTop));
+                    }
+                }
+            }
+        }
+
+        if (hoverVisualRow >= 0 && hoverVisualRow < visibleRows)
+        {
+            using var hoverBrush = new SolidBrush(Color.FromArgb(235, 235, 235));
+            graphics.FillRectangle(hoverBrush, 8, hoverVisualRow * rowHeight + 8, 18, 18);
+        }
+
+        return image;
+    }
+
     private static async Task TestScannerSupervisorLifecycleAsync()
     {
         var exitCount = 0;
@@ -1956,8 +2166,10 @@ internal static class Program
             [
                 "[2026-07-22T00:00:00.0000000Z] Start scan. OcrWorkers=1, OcrBatchSize=1, OcrQueueCapacity=4, OcrIntraOpThreads=1, MaxItems=0",
                 "[2026-07-22T00:00:00.0100000Z] Traversal: overlap-signature-page. totalRows=20",
+                "[2026-07-22T00:00:00.0200000Z] EVENT #1 ROW_SCROLL_NO_MOVE_CONFIRMED: tick=1/6, decision=NoMove, action=next_tick",
+                "[2026-07-22T00:00:00.0300000Z] EVENT #2 OVERLAP_SCROLL_ACCEPTED: rowsAdvanced=1, decision=OneRow",
                 "[2026-07-22T00:00:01.0000000Z] Progress visited=1, queued=1, completed=0, failed=0",
-                "[2026-07-22T00:00:02.0000000Z] EVENT #1 SCAN_TERMINAL: visited=2, queued=2, completed=1, failed=0, partial=True, terminationCode=non_level_15_stop, exportFile=export.partial.json"
+                "[2026-07-22T00:00:02.0000000Z] EVENT #3 SCAN_TERMINAL: visited=2, queued=2, completed=1, failed=0, partial=True, terminationCode=non_level_15_stop, exportFile=export.partial.json"
             ]);
             File.WriteAllText(
                 Path.Combine(scanDirectory, "export.partial.json"),
@@ -1985,8 +2197,30 @@ internal static class Program
             AssertTrue(output.Contains("current.termination_code=non_level_15_stop", StringComparison.Ordinal));
             AssertTrue(output.Contains("current.export_file=export.partial.json", StringComparison.Ordinal));
             AssertTrue(output.Contains("current.effective_full_scan_complete=true", StringComparison.Ordinal));
+            AssertTrue(output.Contains("current.row_scroll_no_move_count=1", StringComparison.Ordinal));
+            AssertTrue(output.Contains("current.row_scroll_false_advance_count=0", StringComparison.Ordinal));
             AssertTrue(output.Contains("acceptance.full_scan_complete=pass", StringComparison.Ordinal));
             AssertTrue(output.Contains("acceptance.overlap_no_missing_rows=skip", StringComparison.Ordinal));
+            AssertTrue(output.Contains("acceptance.no_false_scroll_advance=pass", StringComparison.Ordinal));
+
+            File.AppendAllLines(Path.Combine(scanDirectory, "scan.log"),
+            [
+                "[2026-07-22T00:00:02.1000000Z] EVENT #4 OVERLAP_SCROLL_ACCEPTED: rowsAdvanced=1, decision=NoMove"
+            ]);
+            using var falseAdvanceCapture = new StringWriter(CultureInfo.InvariantCulture);
+            try
+            {
+                Console.SetOut(falseAdvanceCapture);
+                AssertEqual(0, ScanBenchmark.Run(scanDirectory, baselineDirectory: null));
+            }
+            finally
+            {
+                Console.SetOut(originalOut);
+            }
+
+            var falseAdvanceOutput = falseAdvanceCapture.ToString();
+            AssertTrue(falseAdvanceOutput.Contains("current.row_scroll_false_advance_count=1", StringComparison.Ordinal));
+            AssertTrue(falseAdvanceOutput.Contains("acceptance.no_false_scroll_advance=fail", StringComparison.Ordinal));
         }
         finally
         {

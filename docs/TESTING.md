@@ -1,5 +1,25 @@
 # Testing
 
+## 2026-07-29 1.0.46 滚动状态确认候选
+
+已执行：
+
+```powershell
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
+dotnet publish ZZZ-Scanner.Next.csproj -c Release -r win-x64 --self-contained false
+dotnet publish ZZZ-Scanner.Next.csproj -c Release -r win-x64 --self-contained true
+```
+
+结果：
+
+- 原生回归 59 项全部通过；新增问题账号证据回放、旧弱证据拒绝、0/1/2 行合成图、全局亮度变化、局部高亮、相同行歧义、有界未移动后成功、持续歧义和取消测试。
+- 问题证据 `moved=15 / noMove=8 / oneRow=40 / twoRows=60` 稳定判为 `NoMove`；旧自有账号证据 `77 / 75 / 69 / 61` 判为 `Ambiguous`，均不会提交一行位移。
+- FDD 与自包含 Release 发布编译均为 0 warning / 0 error；两种目录的真实 PP-OCRv5 runtime smoke 均通过，模型 SHA-256 为 `70ca955eba4729651da42e7cbcc69aaf41a601939ee5ffaa7a90efdfcd13db6d`。
+- Benchmark 新增 `row_scroll_no_move_count`、`row_scroll_ambiguous_count`、`row_scroll_false_advance_count` 和 `acceptance.no_false_scroll_advance`，自动测试同时覆盖正常为 0 与伪造 `NoMove` 前进被拒绝。
+- 当前开发机缺少不低于 14.44.35211 的展开式 VC143 Redist layout，因此正式双 ZIP、manifest、大小和哈希由 Windows Release workflow 生成，本地未使用旧 VC runtime 冒充正式资产。
+- 实际游戏双账号全量扫描和三轮 120 件性能门禁由用户执行；在结果回传并通过前，不创建 `scanner-1.0.46` tag、不发布正式 Release，也不切换 Calculator 线上 manifest。
+
 ## 2026-07-22 1.0.43 / Helper 1.3.1 正式发布归档
 
 已执行：

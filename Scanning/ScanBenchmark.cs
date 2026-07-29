@@ -167,6 +167,9 @@ public static class ScanBenchmark
         Write("suite", "slot_fixed_value_violation_sum", reports.Sum(report => report.SlotFixedValueViolationCount));
         Write("suite", "incomplete_roi_sum", reports.Sum(report => report.IncompleteRoiCount));
         Write("suite", "row_scroll_overshot_sum", reports.Sum(report => report.RowScrollOvershotCount));
+        Write("suite", "row_scroll_no_move_sum", reports.Sum(report => report.RowScrollNoMoveCount));
+        Write("suite", "row_scroll_ambiguous_sum", reports.Sum(report => report.RowScrollAmbiguousCount));
+        Write("suite", "row_scroll_false_advance_sum", reports.Sum(report => report.RowScrollFalseAdvanceCount));
         Write("suite", "overlap_conflict_sum", reports.Sum(report => report.OverlapConflictCount));
         Write("suite", "overlap_conflict_recheck_sum", reports.Sum(report => report.OverlapConflictRecheckCount));
         Write("suite", "overlap_conflict_recovered_sum", reports.Sum(report => report.OverlapConflictRecoveredCount));
@@ -309,6 +312,13 @@ public static class ScanBenchmark
             RowScrollRecoveryAcceptedCount = events.Count(x => x.Kind == "ROW_SCROLL_RECOVERY_ACCEPTED"),
             RowScrollRecoveryFailCount = events.Count(x => x.Kind == "ROW_SCROLL_RECOVERY_FAIL"),
             RowScrollStrictStopCount = events.Count(x => x.Kind == "ROW_SCROLL_STRICT_STOP"),
+            RowScrollNoMoveCount = events.Count(x => x.Kind == "ROW_SCROLL_NO_MOVE_CONFIRMED"),
+            RowScrollAmbiguousCount = events.Count(x => x.Kind == "ROW_SCROLL_AMBIGUOUS_STOP"),
+            RowScrollFalseAdvanceCount = events.Count(x =>
+                x.Kind is "ROW_SCROLL_DONE" or "ROW_SCROLL_RECOVERED" or "OVERLAP_SCROLL_ACCEPTED"
+                && (x.Detail.Contains("decision=NoMove", StringComparison.OrdinalIgnoreCase)
+                    || x.Detail.Contains("decision=Ambiguous", StringComparison.OrdinalIgnoreCase)
+                    || x.Detail.Contains("rowsAdvanced=0", StringComparison.OrdinalIgnoreCase))),
             EdgeClickBlockedCount = events.Count(x => x.Kind == "EDGE_CLICK_BLOCKED"),
             MinVisibleRois = cellTimings.Count > 0 ? cellTimings.Min(x => x.VisibleRois) : null,
             IncompleteRoiCount = cellTimings.Count(x => x.VisibleRois < x.TotalRois),
@@ -387,7 +397,8 @@ public static class ScanBenchmark
                 && report.Non15FileCount > 0
                 && report.LastFailed == 0
                 && ExportMatchesCompleted(report) is not false
-                && report.OverlapHardStopCount == 0);
+                && report.OverlapHardStopCount == 0
+                && report.RowScrollFalseAdvanceCount == 0);
         report.QuickAcceptCount = cellTimings.Count(x => x.QuickAccept == true);
         report.QuickRejectCount = cellTimings.Count(x => x.QuickAccept == false);
         report.AcceptGateReasons = cellTimings
@@ -1162,6 +1173,9 @@ public static class ScanBenchmark
         Write(prefix, "row_scroll_recovery_accepted_count", report.RowScrollRecoveryAcceptedCount);
         Write(prefix, "row_scroll_recovery_fail_count", report.RowScrollRecoveryFailCount);
         Write(prefix, "row_scroll_strict_stop_count", report.RowScrollStrictStopCount);
+        Write(prefix, "row_scroll_no_move_count", report.RowScrollNoMoveCount);
+        Write(prefix, "row_scroll_ambiguous_count", report.RowScrollAmbiguousCount);
+        Write(prefix, "row_scroll_false_advance_count", report.RowScrollFalseAdvanceCount);
         Write(prefix, "edge_click_blocked_count", report.EdgeClickBlockedCount);
         Write(prefix, "min_visible_rois", report.MinVisibleRois);
         Write(prefix, "incomplete_roi_count", report.IncompleteRoiCount);
@@ -1303,6 +1317,7 @@ public static class ScanBenchmark
         Write("acceptance", "full_scan_complete", !report.FullScanExpected ? "skip" : report.EffectiveFullScanComplete ? "pass" : "fail");
         Write("acceptance", "strict_one_way_scroll", report.RowScrollOvershotCount == 0 && report.RowScrollRecoveryAcceptedCount == 0 && report.RowScrollStrictStopCount == 0 ? "pass" : "risk");
         Write("acceptance", "scroll_overshot_recovered", report.RowScrollRecoveryFailCount == 0 && report.RowScrollOvershotCount <= report.RowScrollRecoveryAcceptedCount ? "pass" : "risk");
+        Write("acceptance", "no_false_scroll_advance", report.RowScrollFalseAdvanceCount == 0 ? "pass" : "fail");
     }
 
     private static void WriteStats(string prefix, string name, Stats stats)
@@ -1488,6 +1503,7 @@ public static class ScanBenchmark
             && report.RowScrollRecoveryAcceptedCount == 0
             && report.RowScrollRecoveryFailCount == 0
             && report.RowScrollStrictStopCount == 0
+            && report.RowScrollFalseAdvanceCount == 0
             && report.UnsafeVisualRow2ClickCount == 0
             && exportMatchesCompleted != false;
     }
@@ -1606,6 +1622,9 @@ public static class ScanBenchmark
         public int RowScrollRecoveryAcceptedCount { get; set; }
         public int RowScrollRecoveryFailCount { get; set; }
         public int RowScrollStrictStopCount { get; set; }
+        public int RowScrollNoMoveCount { get; set; }
+        public int RowScrollAmbiguousCount { get; set; }
+        public int RowScrollFalseAdvanceCount { get; set; }
         public int EdgeClickBlockedCount { get; set; }
         public int? MinVisibleRois { get; set; }
         public int IncompleteRoiCount { get; set; }
