@@ -35,6 +35,7 @@ internal static class Program
             ("managed OCR preprocessing", TestManagedOcrPreprocessingAsync),
             ("OCR output equivalence", TestOcrOutputEquivalenceAsync),
             ("variable substat cleaning", TestVariableSubstatCleaningAsync),
+            ("drive disc name catalog", TestDriveDiscNameCatalogAsync),
             ("wind main-stat cleaning", TestWindMainStatCleaningAsync),
             ("main-stat value rule coverage", TestMainStatValueRuleCoverageAsync),
             ("fast OCR required label coverage", TestFastOcrRequiredLabelCoverageAsync),
@@ -740,6 +741,31 @@ internal static class Program
             AssertEqual(12, export.Level);
             AssertEqual(15, export.MaxLevel);
             AssertEqual(count, export.SubStats.Count);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static Task TestDriveDiscNameCatalogAsync()
+    {
+        var wikiData = WikiData.Load();
+        var cleaner = new DriveDiscCleaner(wikiData);
+
+        foreach (var name in new[] { "棘刺玫瑰", "谶羽之誓" })
+        {
+            AssertTrue(wikiData.DiscCatalog.Sets.Any(set => set.Name == name),
+                $"Expected the drive disc catalog to contain {name}.");
+
+            var export = cleaner.Clean(1, "S",
+            [
+                new OcrResult(1, $"{name}[1]"),
+                new OcrResult(1, "等级15/15"),
+                new OcrResult(1, "生命值"),
+                new OcrResult(1, "2200")
+            ]);
+
+            AssertEqual(name, export.Name);
+            AssertEqual(1, export.Slot);
         }
 
         return Task.CompletedTask;

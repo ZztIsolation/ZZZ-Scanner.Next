@@ -13,7 +13,7 @@ dotnet publish ZZZ-Scanner.Next.csproj -c Release -r win-x64 --self-contained tr
 
 结果：
 
-- 原生回归 59 项全部通过；新增问题账号证据回放、旧弱证据拒绝、0/1/2 行合成图、全局亮度变化、局部高亮、相同行歧义、有界未移动后成功、持续歧义和取消测试。
+- 原生回归 60 项全部通过；新增问题账号证据回放、旧弱证据拒绝、0/1/2 行合成图、全局亮度变化、局部高亮、相同行歧义、有界未移动后成功、持续歧义和取消测试，并验证“棘刺玫瑰”“谶羽之誓”的名称目录与清洗结果。
 - 问题证据 `moved=15 / noMove=8 / oneRow=40 / twoRows=60` 稳定判为 `NoMove`；旧自有账号证据 `77 / 75 / 69 / 61` 判为 `Ambiguous`，均不会提交一行位移。
 - FDD 与自包含 Release 发布编译均为 0 warning / 0 error；两种目录的真实 PP-OCRv5 runtime smoke 均通过，模型 SHA-256 为 `70ca955eba4729651da42e7cbcc69aaf41a601939ee5ffaa7a90efdfcd13db6d`。
 - Benchmark 新增 `row_scroll_no_move_count`、`row_scroll_ambiguous_count`、`row_scroll_false_advance_count` 和 `acceptance.no_false_scroll_advance`，自动测试同时覆盖正常为 0 与伪造 `NoMove` 前进被拒绝。

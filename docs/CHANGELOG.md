@@ -10,6 +10,7 @@
 - 向下滚动改为统一的 `NoMove`、`OneRow`、`TwoRows`、`Ambiguous` 四态判定。0 行位移现在是可以否决逻辑前进的正式证据，删除了会把 `noMove=8 / oneRow=40 / twoRows=60` 误判为一行的宽松估算和外层二次猜测。
 - 行签名升级为 `24x8` 中位亮度归一化结构采样，并剔除最高 10% 的局部异常差异；全局亮度变化和悬停高亮不再单独左右滚动结论。每个滚轮 tick 最多取证 3 帧，最多发送 6 个小 tick，持续歧义或持续未移动均返回 `scan_navigation_failed` 并保留部分导出。
 - 逻辑顶部改为事务式提交：只有统一协调器确认一行或两行位移后才能前进，删除最低前进一行的兜底。新增 `ROW_SCROLL_EVIDENCE`、`ROW_SCROLL_NO_MOVE_CONFIRMED`、`ROW_SCROLL_AMBIGUOUS_STOP`，Benchmark 增加未移动、歧义和错误前进计数及 `no_false_scroll_advance` 门禁。
+- 驱动盘 OCR 名称纠错目录新增“棘刺玫瑰”和“谶羽之誓”；名称仍由 PP-OCR 识别并经过统一目录纠错，不启用风险较高的 Fast OCR 名称模板。
 - Scanner 版本为 1.0.46；1.0.45 的首两件事务识别、仓库预检、协议 v4 和导出结构均保持不变，Helper 继续冻结为 1.3.1。
 
 ## 2026-07-22 1.0.45
