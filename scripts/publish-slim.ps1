@@ -74,6 +74,23 @@ $scannerSourceRevisionId = (& git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $scannerSourceRevisionId -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the Scanner source revision."
 }
+$sourceDateEpochText = $env:SOURCE_DATE_EPOCH
+if ([string]::IsNullOrWhiteSpace($sourceDateEpochText)) {
+    $sourceDateEpochText = (& git show -s --format=%ct $scannerSourceRevisionId).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to resolve the Scanner source timestamp."
+    }
+}
+try {
+    $sourceDateEpoch = [long]::Parse($sourceDateEpochText, [System.Globalization.CultureInfo]::InvariantCulture)
+}
+catch {
+    throw "SOURCE_DATE_EPOCH must be a non-negative Unix timestamp. Got: $sourceDateEpochText"
+}
+if ($sourceDateEpoch -lt 0) {
+    throw "SOURCE_DATE_EPOCH must be a non-negative Unix timestamp. Got: $sourceDateEpochText"
+}
+$reproducibleCreatedAt = [DateTimeOffset]::FromUnixTimeSeconds($sourceDateEpoch).ToUniversalTime().ToString("O")
 $immutableHelperSourceRevisions = @{
     "1.3.1" = "7f88ad9c0e8fbcf4baf0f9f39d51af4fa85b13f1"
 }
@@ -630,6 +647,7 @@ function Invoke-OcrRuntimeSmoke([string]$Directory, [string]$Label) {
             throw "$Label OCR runtime smoke reported failure: $stdout"
         }
         Write-Host "$Label OCR runtime smoke passed in $($result.elapsedMs) ms."
+        $result.PSObject.Properties.Remove("elapsedMs")
         return $result
     }
     finally {
@@ -815,7 +833,7 @@ $report = [ordered]@{
     scannerSourceRevisionId = $scannerSourceRevisionId
     helperReleaseTag = $HelperReleaseTag
     helperSourceRevisionId = $helperSourceRevisionId
-    createdAt = [DateTimeOffset]::Now.ToString("O")
+    createdAt = $reproducibleCreatedAt
     vcRuntimeSource = $vcRedist.Source
     vcRuntimePath = $vcRedist.Path
     vcRuntimeSelection = $vcRedist.Selection
