@@ -30,6 +30,9 @@ public sealed class ScanController
     private const int ConsecutiveIdenticalDuplicateThreshold = 3;
     private const int SignatureColumns = 8;
     private const int SignatureRows = 4;
+    private const int NativeEdgeClickTimeoutMilliseconds = 800;
+    private const int NativeEdgeClickNoMoveDecisionMilliseconds = 300;
+    private const int NativeEdgeClickStableFrames = 2;
 
     private readonly ScanProfileFile _profiles;
     private readonly WikiData _wikiData;
@@ -107,6 +110,13 @@ public sealed class ScanController
         var counters = new Counters();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var traversalMode = ResolveTraversalMode(options, profile);
+        var rowAdvanceMode = ResolveRowAdvanceMode(options, profile);
+        options.RowAdvanceMode = rowAdvanceMode;
+        if (rowAdvanceMode == RowAdvanceMode.NativeEdgeClick
+            && traversalMode != ScanTraversalMode.OverlapSignaturePage)
+        {
+            throw new ArgumentException("NativeEdgeClick row advance requires OverlapSignaturePage traversal.");
+        }
         var duplicateGuard = new DuplicateGuard(Math.Max(1, profile.DuplicateRowThreshold));
         var adaptiveTimingActive = options.AdaptiveTiming ?? requestedFastMode;
         var panelStability = new PanelStabilitySelector(options.PanelStabilityMode);
@@ -127,7 +137,7 @@ public sealed class ScanController
             EffectiveScrollTickDelay(profile, options.ScrollTickDelayOverrideMs));
 
         scanLog.Write($"AppVersion={AppInfo.Version}, AssemblyVersion={AppInfo.AssemblyVersion}, FileVersion={AppInfo.FileVersion}, ExecutablePath={AppInfo.ExecutablePath}, ExecutableLastWriteTime={AppInfo.ExecutableLastWriteTime?.ToString("O") ?? "unknown"}, RuntimeDirectory={AppInfo.BaseDirectory}");
-        scanLog.Write($"Start scan. Profile={profile.Name}, Traversal={traversalMode}, Process={options.ProcessName}, MaxItems={options.MaxItems}, Rarities={string.Join(",", options.Rarities)}, BringToFront={options.BringToFront}, StopAtNonLevel15={options.StopAtNonLevel15}, HighSpeedOcr={options.HighSpeedOcr}, OcrShadowDataset={options.OcrShadowDataset}, FastOcrShadow={options.FastOcrShadow}, FastOcrAssist={options.FastOcrAssist}, FastModeRequested={requestedFastMode}, FastModeActive={fastModeActive}, AdaptiveTimingRequested={options.AdaptiveTiming?.ToString() ?? "auto"}, AdaptiveTimingActive={adaptiveTimingActive}, PanelStabilityMode={options.PanelStabilityMode}, ScrollAcceptMode={options.ScrollAcceptMode}, PanelAcceptMode={options.PanelAcceptMode}, PostScrollPanelAcceptMode={options.PostScrollPanelAcceptMode}, PanelFloorMode={options.PanelFloorMode}, PanelMinAcceptFloorMs={Math.Clamp(options.PanelMinAcceptFloorMs, 90, 120)}, SameRowPanelMinAcceptFloorMs={Math.Clamp(options.SameRowPanelMinAcceptFloorMs, 100, 120)}, PostScrollPanelMinAcceptFloorMs={Math.Clamp(options.PostScrollPanelMinAcceptFloorMs, 100, 120)}, ScrollTickDelayOverrideMs={(options.ScrollTickDelayOverrideMs <= 0 ? 0 : Math.Clamp(options.ScrollTickDelayOverrideMs, 50, 80))}, EffectiveScrollTickDelayMs={runtimeState.EffectiveScrollTickDelayMs}, OverlapConflictMode={options.OverlapConflictMode}, CaptureModeRequested={options.CaptureMode}, CollectVisualProfile={options.CollectVisualProfile}, VisualProfileId={options.VisualProfileId}, VisualProfileClient={options.VisualProfileClient}, VisualQualityLabel={options.VisualQualityLabel}, ProfileRouting={options.ProfileRouting}, OcrWorkers={ocrWorkerCount}, OcrBatchSize={options.OcrBatchSize}, OcrQueueCapacity={queueCapacity}, OcrIntraOpThreads={ocrIntraOpThreads}");
+        scanLog.Write($"Start scan. Profile={profile.Name}, Traversal={traversalMode}, RowAdvanceMode={rowAdvanceMode}, Process={options.ProcessName}, MaxItems={options.MaxItems}, Rarities={string.Join(",", options.Rarities)}, BringToFront={options.BringToFront}, StopAtNonLevel15={options.StopAtNonLevel15}, HighSpeedOcr={options.HighSpeedOcr}, OcrShadowDataset={options.OcrShadowDataset}, FastOcrShadow={options.FastOcrShadow}, FastOcrAssist={options.FastOcrAssist}, FastModeRequested={requestedFastMode}, FastModeActive={fastModeActive}, AdaptiveTimingRequested={options.AdaptiveTiming?.ToString() ?? "auto"}, AdaptiveTimingActive={adaptiveTimingActive}, PanelStabilityMode={options.PanelStabilityMode}, ScrollAcceptMode={options.ScrollAcceptMode}, PanelAcceptMode={options.PanelAcceptMode}, PostScrollPanelAcceptMode={options.PostScrollPanelAcceptMode}, PanelFloorMode={options.PanelFloorMode}, PanelMinAcceptFloorMs={Math.Clamp(options.PanelMinAcceptFloorMs, 90, 120)}, SameRowPanelMinAcceptFloorMs={Math.Clamp(options.SameRowPanelMinAcceptFloorMs, 100, 120)}, PostScrollPanelMinAcceptFloorMs={Math.Clamp(options.PostScrollPanelMinAcceptFloorMs, 100, 120)}, ScrollTickDelayOverrideMs={(options.ScrollTickDelayOverrideMs <= 0 ? 0 : Math.Clamp(options.ScrollTickDelayOverrideMs, 50, 80))}, EffectiveScrollTickDelayMs={runtimeState.EffectiveScrollTickDelayMs}, OverlapConflictMode={options.OverlapConflictMode}, CaptureModeRequested={options.CaptureMode}, CollectVisualProfile={options.CollectVisualProfile}, VisualProfileId={options.VisualProfileId}, VisualProfileClient={options.VisualProfileClient}, VisualQualityLabel={options.VisualQualityLabel}, ProfileRouting={options.ProfileRouting}, OcrWorkers={ocrWorkerCount}, OcrBatchSize={options.OcrBatchSize}, OcrQueueCapacity={queueCapacity}, OcrIntraOpThreads={ocrIntraOpThreads}");
         if (options.CollectVisualProfile)
         {
             scanLog.Write($"VISUAL_PROFILE_COLLECTION_PROTOCOL client={options.VisualProfileClient}, requestedProfile={options.VisualProfileId}, quality={options.VisualQualityLabel}, capture={options.CaptureMode}, fastOcrAssist={options.FastOcrAssist}, panelAccept={options.PanelAcceptMode}, scrollAccept={options.ScrollAcceptMode}, maxItems={options.MaxItems}");
@@ -431,6 +441,136 @@ public sealed class ScanController
             TerminationCode = terminationCode,
             Diagnostics = sessionDiagnostics
         };
+    }
+
+    public async Task<EdgeScrollProbeResult> ProbeNativeEdgeScrollAsync(
+        ScanOptions options,
+        int runs,
+        CancellationToken token)
+    {
+        runs = Math.Clamp(runs, 1, 100);
+        var profile = _profiles.ResolveRequired(options.ProfileName);
+        var outputDir = AppPaths.CreateScanDirectory();
+        using var scanLog = new ScanLog(Path.Combine(outputDir, "scan.log"));
+        using var window = GameWindow.Find(options.ProcessName);
+        if (options.BringToFront)
+        {
+            window.BringToFront();
+        }
+
+        window.ConfigureCaptureMode(options.CaptureMode, scanLog.Write);
+        using var inventoryRecognizer = new PaddleOcrRecognizer(AppPaths.ModelFile, AppPaths.CharacterDictFile, 1);
+        var progress = new Progress<ScanProgress>(_ => { });
+        var counters = new Counters();
+        var preflight = await PrepareBackpackAsync(
+            window,
+            profile,
+            inventoryRecognizer,
+            "edge-scroll-probe",
+            progress,
+            counters,
+            scanLog,
+            token);
+        var warehousePolicy = (profile.VisualProbes ?? new VisualProbeOptions()).WarehousePreflight ?? new WarehousePreflightPolicy();
+        var contextGuard = new WarehouseContextGuard(
+            window,
+            preflight.MonitorPlan,
+            warehousePolicy,
+            inventoryRecognizer,
+            scanLog);
+        window.ConfigureInputGuard(contextGuard.EnsureHealthy);
+        window.LeftClick(window.ToScreenPoint(profile.Point("driveDiscTab")));
+        await Task.Delay(profile.ClickDelayMs, token);
+
+        var offset = profile.Point("driveDiscOffset");
+        var step = profile.Point("driveDiscStep");
+        var columns = Math.Max(1, profile.VisibleColumns);
+        var visibleRows = Math.Max(1, profile.VisibleRows);
+        var totalRows = preflight.InventoryCount is > 0
+            ? Math.Max(1, (int)Math.Ceiling(preflight.InventoryCount.Value / (double)columns))
+            : (int?)null;
+        var maxVisibleTop = totalRows.HasValue
+            ? Math.Max(1, totalRows.Value - visibleRows + 1)
+            : int.MaxValue;
+        var listGridRect = ProfileRectangleOrFallback(
+            window,
+            profile,
+            "listGridRect",
+            BuildListGridFallback(window, profile, visibleRows, columns));
+        var rowSignatureRects = BuildVisualRowSignatureRects(listGridRect, visibleRows);
+        var changedRuns = 0;
+        var bottomRuns = 0;
+        var failedRuns = 0;
+        scanLog.WriteEvent(
+            "EDGE_CLICK_PROBE_START",
+            $"runs={runs}, inventoryCount={preflight.InventoryCount?.ToString() ?? "unknown"}, totalRows={totalRows?.ToString() ?? "unknown"}, visibleRows={visibleRows}, columns={columns}, captureMode={window.ActiveCaptureMode}, client={window.ClientScreenRect.Width}x{window.ClientScreenRect.Height}, dpi={window.Dpi}");
+
+        for (var run = 1; run <= runs; run++)
+        {
+            token.ThrowIfCancellationRequested();
+            await ResetListToTopAsync(window, profile, progress, counters, scanLog, token);
+            await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
+            var armClientPoint = new PointF(
+                offset.X + step.X * columns,
+                offset.Y + step.Y * 3);
+            var armPoint = window.ToScreenPoint(armClientPoint);
+            window.MoveCursor(armPoint);
+            window.LeftClickCurrent();
+            await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
+            await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
+            scanLog.WriteEvent(
+                "EDGE_CLICK_PROBE_ARM",
+                $"run={run}/{runs}, visualRow=3, column={columns}, point={armPoint}, reason=match_scan_pre_advance_selection");
+            var result = await AdvanceNativeEdgeClickAsync(
+                window,
+                profile,
+                listGridRect,
+                rowSignatureRects,
+                offset,
+                step,
+                visibleTopLogicalRow: 1,
+                maxVisibleTop,
+                preflight.InventoryCount ?? 0,
+                scannedRows: 0,
+                scanLog,
+                token);
+            var decision = NativeEdgeClickPolicy.ResolveSettle(result);
+            if (decision == NativeEdgeClickDecision.AdvanceAssumedOne)
+            {
+                changedRuns++;
+            }
+            else if (decision == NativeEdgeClickDecision.HashFallback && totalRows is <= 4)
+            {
+                bottomRuns++;
+            }
+            else
+            {
+                failedRuns++;
+            }
+
+            scanLog.WriteEvent(
+                "EDGE_CLICK_PROBE_RESULT",
+                $"run={run}/{runs}, decision={decision}, settled={result.Settled}, changed={result.Changed}, movementDistance={result.MovementDistance}, stableFrames={result.StableFrames}, samples={result.Samples}, elapsedMs={result.ElapsedMilliseconds:F1}, expectedMovement={totalRows is > 4}, reason={result.Reason}");
+        }
+
+        var probeResult = new EdgeScrollProbeResult
+        {
+            Success = failedRuns == 0 && changedRuns + bottomRuns == runs,
+            OutputDirectory = outputDir,
+            RequestedRuns = runs,
+            ChangedRuns = changedRuns,
+            BottomRuns = bottomRuns,
+            FailedRuns = failedRuns,
+            InventoryCount = preflight.InventoryCount,
+            ClientWidth = window.ClientScreenRect.Width,
+            ClientHeight = window.ClientScreenRect.Height,
+            Dpi = window.Dpi,
+            CaptureMode = window.ActiveCaptureMode.ToString()
+        };
+        scanLog.WriteEvent(
+            "EDGE_CLICK_PROBE_DONE",
+            $"success={probeResult.Success}, runs={runs}, changed={changedRuns}, bottom={bottomRuns}, failed={failedRuns}");
+        return probeResult;
     }
 
     private static async Task<VisualPreflightResult> PrepareBackpackAsync(
@@ -818,6 +958,8 @@ public sealed class ScanController
         var scannedLogicalRows = new HashSet<int>();
         var pendingRowStartColumns = new Dictionary<int, int>();
         var deferredRowCounts = new Dictionary<int, int>();
+        var nativeEdgeClick = options.RowAdvanceMode == RowAdvanceMode.NativeEdgeClick;
+        string? lastNativeMiddleRowHash = null;
 
         scanLog.Write($"Traversal: overlap-signature-page. inventoryCount={inventoryCount}, totalRows={totalRows}, visibleRows={visibleRows}, columns={columns}, lastRowColumns={lastRowColumns}, maxVisibleTop={maxVisibleTop}, listGrid={listGridRect}, panelProbe={panelChangeProbeRect}, scrollTickDelta={profile.ScrollTickDelta}.");
         await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
@@ -846,6 +988,9 @@ public sealed class ScanController
                 scanLog.WriteEvent("OVERLAP_ROW_CANDIDATE", $"iteration={iteration}, logicalRow={logicalRow}, visualRow={visualRow}, visibleTopLogicalRow={visibleTopLogicalRow}, state={viewportState}, rowHash={currentRows[Math.Clamp(visualRow - 1, 0, currentRows.Length - 1)].Hash:X16}, maxColumns={maxColumns}, startColumn={startColumn}");
                 Report(progress, counters, $"重叠签名扫描：逻辑行 {logicalRow}/{totalRows}，视觉第 {visualRow} 行，{viewportState}。");
 
+                var rowFingerprint = nativeEdgeClick && visualRow == 3
+                    ? new RowDetailFingerprintBuilder()
+                    : null;
                 RowScanResult rowResult;
                 try
                 {
@@ -877,7 +1022,8 @@ public sealed class ScanController
                         maxVisibleTop: maxVisibleTop,
                         afterScroll: lastScrollChangedViewport,
                         postScrollFirstCell: lastScrollChangedViewport,
-                        startColumn: startColumn);
+                        startColumn: startColumn,
+                        rowFingerprint: rowFingerprint);
                 }
                 catch (PanelCellCaptureException ex) when (
                     options.OverlapConflictMode == OverlapConflictMode.Recover
@@ -905,6 +1051,16 @@ public sealed class ScanController
                 deferredRowCounts.Remove(logicalRow);
                 scannedThisViewport = true;
                 scanLog.WriteEvent("OVERLAP_ROW_SCANNED", $"iteration={iteration}, logicalRow={logicalRow}, visualRow={visualRow}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
+                if (rowFingerprint is not null)
+                {
+                    if (rowFingerprint.Count != maxColumns)
+                    {
+                        throw NavigationFailure($"原生底行点击模式无法建立完整的视觉第 3 行指纹：logicalRow={logicalRow}, captured={rowFingerprint.Count}, expected={maxColumns}。");
+                    }
+
+                    lastNativeMiddleRowHash = rowFingerprint.Complete();
+                    scanLog.WriteEvent("EDGE_CLICK_ROW_HASH", $"phase=baseline, iteration={iteration}, logicalRow={logicalRow}, visualRow={visualRow}, columns={rowFingerprint.Count}, rowHash={lastNativeMiddleRowHash}");
+                }
             }
 
             if (scannedLogicalRows.Count >= totalRows)
@@ -919,6 +1075,206 @@ public sealed class ScanController
             }
 
             var beforeTop = visibleTopLogicalRow;
+            if (nativeEdgeClick)
+            {
+                var edgeClick = await AdvanceNativeEdgeClickAsync(
+                    window,
+                    profile,
+                    listGridRect,
+                    rowSignatureRects,
+                    offset,
+                    step,
+                    visibleTopLogicalRow,
+                    maxVisibleTop,
+                    inventoryCount,
+                    scannedLogicalRows.Count,
+                    scanLog,
+                    token);
+                var edgeDecision = NativeEdgeClickPolicy.ResolveSettle(edgeClick);
+                if (edgeDecision == NativeEdgeClickDecision.AdvanceAssumedOne)
+                {
+                    visibleTopLogicalRow = Math.Min(maxVisibleTop, visibleTopLogicalRow + 1);
+                    await ArmNativeEdgeFollowupSelectionAsync(
+                        window,
+                        profile,
+                        listGridRect,
+                        offset,
+                        step,
+                        columns,
+                        visibleTopLogicalRow,
+                        scanLog,
+                        token);
+                    lastScrollChangedViewport = true;
+                    scanLog.WriteEvent("EDGE_CLICK_CHANGED", $"iteration={iteration}, fromTop={beforeTop}, toTop={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, assumedRows=1, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, samples={edgeClick.Samples}, elapsedMs={edgeClick.ElapsedMilliseconds:F1}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={lastNativeMiddleRowHash ?? "unknown"}, currentRowHash=unknown, inventoryCount={inventoryCount}, scannedRows={scannedLogicalRows.Count}/{totalRows}, reason=native_edge_click_changed_assume_one");
+                    scanLog.WriteEvent("OVERLAP_SCROLL_ACCEPTED", $"iteration={iteration}, fromTop={beforeTop}, toTop={visibleTopLogicalRow}, rowsAdvanced=1, decision=AssumedOne, reason=native_edge_click_changed_assume_one, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
+                    continue;
+                }
+
+                if (edgeDecision == NativeEdgeClickDecision.Stop)
+                {
+                    scanLog.WriteEvent("EDGE_CLICK_STOP", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, samples={edgeClick.Samples}, elapsedMs={edgeClick.ElapsedMilliseconds:F1}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={lastNativeMiddleRowHash ?? "unknown"}, currentRowHash=unknown, inventoryCount={inventoryCount}, scannedRows={scannedLogicalRows.Count}/{totalRows}, reason={edgeClick.Reason}");
+                    throw NavigationFailure($"底行点击后列表未在 {NativeEdgeClickTimeoutMilliseconds}ms 内稳定：{edgeClick.Reason}。");
+                }
+
+                if (string.IsNullOrWhiteSpace(lastNativeMiddleRowHash))
+                {
+                    scanLog.WriteEvent("EDGE_CLICK_STOP", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash=unknown, currentRowHash=unknown, inventoryCount={inventoryCount}, scannedRows={scannedLogicalRows.Count}/{totalRows}, reason=missing_previous_row_hash");
+                    throw NavigationFailure("底行点击未观察到列表变化，且缺少上一视觉第 3 行指纹，无法判断是否到底。");
+                }
+
+                await ArmNativeEdgeFollowupSelectionAsync(
+                    window,
+                    profile,
+                    listGridRect,
+                    offset,
+                    step,
+                    columns,
+                    visibleTopLogicalRow,
+                    scanLog,
+                    token);
+
+                using var bufferedRow = new BufferedRowCapture();
+                var fallbackFingerprint = new RowDetailFingerprintBuilder();
+                var fallbackLogicalRow = visibleTopLogicalRow + 3;
+                RowScanResult fallbackResult;
+                try
+                {
+                    fallbackResult = await ScanVisualRowAsync(
+                        window,
+                        profile,
+                        queue,
+                        options,
+                        runtimeState,
+                        counters,
+                        progress,
+                        scanLog,
+                        offset,
+                        step,
+                        panelRect,
+                        rois,
+                        statOffset,
+                        statRowBackground,
+                        pass: fallbackLogicalRow,
+                        row: 3,
+                        isBottom: false,
+                        maxColumns: columns,
+                        logicalRow: fallbackLogicalRow,
+                        treatBlankAsEnd: false,
+                        panelChangeProbeRect,
+                        token,
+                        enforceSafeBand: false,
+                        visibleTopLogicalRow: visibleTopLogicalRow + 1,
+                        maxVisibleTop: maxVisibleTop,
+                        afterScroll: true,
+                        postScrollFirstCell: true,
+                        rowFingerprint: fallbackFingerprint,
+                        bufferedRow: bufferedRow);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    var failureCode = ex is IScannerFailureException scannerFailure
+                        ? scannerFailure.Code
+                        : ex.GetType().Name;
+                    scanLog.WriteEvent("EDGE_CLICK_STOP", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={lastNativeMiddleRowHash}, currentRowHash=incomplete, inventoryCount={inventoryCount}, scannedRows={scannedLogicalRows.Count}/{totalRows}, reason=hash_fallback_capture_failed, failureCode={failureCode}");
+                    throw;
+                }
+                if (fallbackResult != RowScanResult.Completed || fallbackFingerprint.Count != columns)
+                {
+                    scanLog.WriteEvent("EDGE_CLICK_STOP", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={lastNativeMiddleRowHash}, currentRowHash=incomplete, inventoryCount={inventoryCount}, scannedRows={scannedLogicalRows.Count}/{totalRows}, reason=incomplete_hash_fallback, captured={fallbackFingerprint.Count}, expected={columns}");
+                    throw NavigationFailure("底行点击行哈希兜底未能捕获完整的视觉第 3 行。");
+                }
+
+                var fallbackHash = fallbackFingerprint.Complete();
+                var previousMiddleRowHash = lastNativeMiddleRowHash;
+                var fallbackDecision = NativeEdgeClickPolicy.ResolveFallback(previousMiddleRowHash, fallbackHash);
+                scanLog.WriteEvent("EDGE_CLICK_HASH_FALLBACK", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={previousMiddleRowHash}, currentRowHash={fallbackHash}, inventoryCount={inventoryCount}, scannedRows={scannedLogicalRows.Count}/{totalRows}, capturedColumns={fallbackFingerprint.Count}, decision={fallbackDecision}");
+                if (fallbackDecision == NativeEdgeClickDecision.AdvanceAssumedOne)
+                {
+                    visibleTopLogicalRow = Math.Min(maxVisibleTop, visibleTopLogicalRow + 1);
+                    var bufferedLogicalRow = visibleTopLogicalRow + 2;
+                    var commitResult = CommitBufferedRow(
+                        bufferedRow,
+                        queue,
+                        options,
+                        counters,
+                        progress,
+                        scanLog,
+                        bufferedLogicalRow,
+                        token);
+                    scannedLogicalRows.Add(bufferedLogicalRow);
+                    lastNativeMiddleRowHash = fallbackHash;
+                    lastScrollChangedViewport = false;
+                    scanLog.WriteEvent("EDGE_CLICK_CHANGED", $"iteration={iteration}, fromTop={beforeTop}, toTop={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, assumedRows=1, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={previousMiddleRowHash}, currentRowHash={fallbackHash}, inventoryCount={inventoryCount}, reason=native_edge_click_hash_changed_assume_one, bufferedLogicalRow={bufferedLogicalRow}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
+                    scanLog.WriteEvent("OVERLAP_SCROLL_ACCEPTED", $"iteration={iteration}, fromTop={beforeTop}, toTop={visibleTopLogicalRow}, rowsAdvanced=1, decision=AssumedOne, reason=native_edge_click_hash_changed_assume_one, scannedThisViewport=True, scannedRows={scannedLogicalRows.Count}/{totalRows}");
+                    if (commitResult == RowScanResult.Stop)
+                    {
+                        return;
+                    }
+
+                    continue;
+                }
+
+                if (fallbackDecision != NativeEdgeClickDecision.Bottom)
+                {
+                    scanLog.WriteEvent("EDGE_CLICK_STOP", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={previousMiddleRowHash}, currentRowHash={fallbackHash}, inventoryCount={inventoryCount}, scannedRows={scannedLogicalRows.Count}/{totalRows}, reason=invalid_hash_fallback");
+                    throw NavigationFailure("底行点击行哈希兜底没有得到可提交结论。");
+                }
+
+                scanLog.WriteEvent("EDGE_CLICK_BOTTOM_DETECTED", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={previousMiddleRowHash}, currentRowHash={fallbackHash}, inventoryCount={inventoryCount}, visited={counters.Visited}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
+                var observedBottomLogicalRow = visibleTopLogicalRow + 3;
+                RowScanResult bottomResult;
+                try
+                {
+                    bottomResult = await ScanVisualRowAsync(
+                        window,
+                        profile,
+                        queue,
+                        options,
+                        runtimeState,
+                        counters,
+                        progress,
+                        scanLog,
+                        offset,
+                        step,
+                        panelRect,
+                        rois,
+                        statOffset,
+                        statRowBackground,
+                        pass: observedBottomLogicalRow,
+                        row: 4,
+                        isBottom: true,
+                        maxColumns: columns,
+                        logicalRow: observedBottomLogicalRow,
+                        treatBlankAsEnd: true,
+                        panelChangeProbeRect,
+                        token,
+                        enforceSafeBand: false,
+                        visibleTopLogicalRow: visibleTopLogicalRow,
+                        maxVisibleTop: visibleTopLogicalRow,
+                        afterScroll: false,
+                        postScrollFirstCell: false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    var failureCode = ex is IScannerFailureException scannerFailure
+                        ? scannerFailure.Code
+                        : ex.GetType().Name;
+                    scanLog.WriteEvent("EDGE_CLICK_STOP", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={previousMiddleRowHash}, currentRowHash={fallbackHash}, inventoryCount={inventoryCount}, scannedRows={scannedLogicalRows.Count}/{totalRows}, reason=observed_bottom_capture_failed, failureCode={failureCode}");
+                    throw;
+                }
+                if ((options.MaxItems <= 0 || counters.Queued < options.MaxItems)
+                    && counters.Visited != inventoryCount)
+                {
+                    Interlocked.CompareExchange(
+                        ref counters.StopReason,
+                        "inventory_count_mismatch_at_observed_bottom",
+                        null);
+                    scanLog.WriteEvent("EDGE_CLICK_STOP", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={previousMiddleRowHash}, currentRowHash={fallbackHash}, reason=inventory_count_mismatch_at_observed_bottom, inventoryCount={inventoryCount}, scannedRows={scannedLogicalRows.Count}/{totalRows}, visited={counters.Visited}, queued={counters.Queued}, bottomResult={bottomResult}");
+                }
+
+                return;
+            }
+
             var scroll = await ScrollSafeBandOneRowWithRetryAsync(
                 window,
                 profile,
@@ -1283,7 +1639,9 @@ public sealed class ScanController
         int maxVisibleTop = 1,
         bool afterScroll = false,
         bool postScrollFirstCell = false,
-        int startColumn = 1)
+        int startColumn = 1,
+        RowDetailFingerprintBuilder? rowFingerprint = null,
+        BufferedRowCapture? bufferedRow = null)
     {
         var currentY = offset.Y + step.Y * row;
         ImageSignature[]? previousPanelSignatures = CaptureCurrentPanelSignatures(
@@ -1315,7 +1673,7 @@ public sealed class ScanController
                 continue;
             }
 
-            if (options.MaxItems > 0 && counters.Queued >= options.MaxItems)
+            if (bufferedRow is null && options.MaxItems > 0 && counters.Queued >= options.MaxItems)
             {
                 scanLog.Write($"End: max items reached. MaxItems={options.MaxItems}, queued={counters.Queued}.");
                 Report(progress, counters, $"已达到读取上限：{options.MaxItems}");
@@ -1345,6 +1703,9 @@ public sealed class ScanController
             var currentPostScrollFirstCell = postScrollFirstCellPending;
             var current = new PointF(offset.X + step.X * col, currentY);
             var clickPoint = window.ToScreenPoint(current);
+            var gridCellHash = rowFingerprint is null
+                ? 0UL
+                : CaptureGridCellFingerprint(window, clickPoint, step);
             var viewportKnown = logicalRow.HasValue && maxVisibleTop > 1;
             var visibleTopText = viewportKnown ? visibleTopLogicalRow.ToString() : "unknown";
             var viewportStateText = viewportKnown ? ViewportStateLabel(visibleTopLogicalRow, maxVisibleTop) : "unknown";
@@ -1377,16 +1738,30 @@ public sealed class ScanController
                 throw NavigationFailure($"预期存在驱动盘，但第 {logicalRow} 行第 {col} 列未检测到品质颜色。可能发生漏扫或列表未稳定。");
             }
 
-            counters.Visited++;
-            if (!options.Rarities.Contains(rarity))
+            if (bufferedRow is null)
             {
-                Report(progress, counters, $"跳过 {rarity} 级驱动盘。");
+                counters.Visited++;
+            }
+
+            var selectedForExport = options.Rarities.Contains(rarity);
+            if (!selectedForExport)
+            {
+                rowFingerprint?.AddGridCell(col, rarity, gridCellHash);
+                if (bufferedRow is null)
+                {
+                    Report(progress, counters, $"跳过 {rarity} 级驱动盘。");
+                }
+                else
+                {
+                    bufferedRow.AddSkipped(col, rarity);
+                }
+
                 continue;
             }
 
-            var firstQueuedItem = counters.Queued == 0;
+            var firstQueuedItem = bufferedRow is null && selectedForExport && counters.Queued == 0;
             var secondColumn = col + 1;
-            if (firstQueuedItem && secondColumn <= maxColumns)
+            if (bufferedRow is null && firstQueuedItem && secondColumn <= maxColumns)
             {
                 var secondClientPoint = new PointF(offset.X + step.X * secondColumn, currentY);
                 var secondClickPoint = window.ToScreenPoint(secondClientPoint);
@@ -1441,6 +1816,7 @@ public sealed class ScanController
                         ObserveAcceptedPanel(runtimeState, commit.Capture, scanLog, postScrollFirstCell: false);
                         var pairPanelImage = commit.Capture.TakeImage();
                         var pairCaptureRois = rois.Take(commit.Capture.VisibleRoiCount).ToArray();
+                        rowFingerprint?.AddDetailPanel(commit.Column, commit.Rarity, pairPanelImage, pairCaptureRois);
                         var pairDebugImage = options.ShowDebugImages ? (Bitmap)pairPanelImage.Clone() : null;
                         var pairItemIndex = Interlocked.Increment(ref counters.Queued);
                         var pairEnqueued = false;
@@ -1581,9 +1957,39 @@ public sealed class ScanController
                 selectionRoundTripReady);
             var panelImage = panelCapture.TakeImage();
             var captureRois = rois.Take(panelCapture.VisibleRoiCount).ToArray();
-            var debugImage = options.ShowDebugImages ? (Bitmap)panelImage.Clone() : null;
             previousPanelSignatures = panelCapture.ProbeSignatures;
             ObserveAcceptedPanel(runtimeState, panelCapture, scanLog, currentPostScrollFirstCell);
+            rowFingerprint?.AddDetailPanel(col, rarity, panelImage, captureRois);
+            if (!selectedForExport)
+            {
+                panelImage.Dispose();
+                if (bufferedRow is null)
+                {
+                    Report(progress, counters, $"跳过 {rarity} 级驱动盘。");
+                }
+                else
+                {
+                    bufferedRow.AddSkipped(col, rarity);
+                }
+
+                postScrollFirstCellPending = false;
+                continue;
+            }
+
+            if (bufferedRow is not null)
+            {
+                bufferedRow.AddCapture(
+                    col,
+                    rarity,
+                    panelImage,
+                    captureRois,
+                    panelCapture.TargetVerificationKind);
+                postScrollFirstCellPending = false;
+                scanLog.WriteEvent("EDGE_CLICK_BUFFERED_CELL", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}, rarity={rarity}, rowHashColumns={rowFingerprint?.Count ?? 0}");
+                continue;
+            }
+
+            var debugImage = options.ShowDebugImages ? (Bitmap)panelImage.Clone() : null;
             var ocrBacklogBeforeEnqueue = CurrentOcrBacklog(counters);
             var itemIndex = Interlocked.Increment(ref counters.Queued);
             var enqueueWait = Stopwatch.StartNew();
@@ -1623,6 +2029,60 @@ public sealed class ScanController
         return RowScanResult.Completed;
     }
 
+    private static RowScanResult CommitBufferedRow(
+        BufferedRowCapture bufferedRow,
+        BlockingCollection<DiscCapture> queue,
+        ScanOptions options,
+        Counters counters,
+        IProgress<ScanProgress> progress,
+        ScanLog scanLog,
+        int logicalRow,
+        CancellationToken token)
+    {
+        foreach (var cell in bufferedRow.Cells.OrderBy(cell => cell.Column))
+        {
+            token.ThrowIfCancellationRequested();
+            if (options.MaxItems > 0 && counters.Queued >= options.MaxItems)
+            {
+                scanLog.Write($"End: max items reached while committing buffered row. MaxItems={options.MaxItems}, queued={counters.Queued}.");
+                return RowScanResult.Stop;
+            }
+
+            Interlocked.Increment(ref counters.Visited);
+            if (!cell.HasCapture)
+            {
+                Report(progress, counters, $"跳过 {cell.Rarity} 级驱动盘。");
+                continue;
+            }
+
+            var image = cell.TakeImage();
+            var itemIndex = Interlocked.Increment(ref counters.Queued);
+            var enqueued = false;
+            try
+            {
+                queue.Add(new DiscCapture(
+                    itemIndex,
+                    cell.Rarity,
+                    image,
+                    cell.Rois,
+                    cell.TargetVerificationKind), token);
+                enqueued = true;
+            }
+            finally
+            {
+                if (!enqueued)
+                {
+                    image.Dispose();
+                }
+            }
+
+            scanLog.WriteEvent("EDGE_CLICK_BUFFER_COMMIT", $"logicalRow={logicalRow}, col={cell.Column}, index={itemIndex}, rarity={cell.Rarity}, queued={counters.Queued}, visited={counters.Visited}");
+            Report(progress, counters, options.ShowDebugImages ? $"缓冲行入队 #{itemIndex}。" : "");
+        }
+
+        return RowScanResult.Completed;
+    }
+
     private static ScanTraversalMode ResolveTraversalMode(ScanOptions options, ScanProfile profile)
     {
         if (options.TraversalMode != ScanTraversalMode.FromProfile)
@@ -1634,6 +2094,170 @@ public sealed class ScanController
             ? parsed
             : ScanTraversalMode.SafeBandViewport;
     }
+
+    private static RowAdvanceMode ResolveRowAdvanceMode(ScanOptions options, ScanProfile profile)
+    {
+        if (options.RowAdvanceMode.HasValue)
+        {
+            return options.RowAdvanceMode.Value;
+        }
+
+        var normalized = (profile.RowAdvanceMode ?? "").Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        return Enum.TryParse<RowAdvanceMode>(normalized, ignoreCase: true, out var parsed)
+            ? parsed
+            : RowAdvanceMode.WheelVerified;
+    }
+
+    private static async Task<NativeEdgeClickSettleResult> AdvanceNativeEdgeClickAsync(
+        GameWindow window,
+        ScanProfile profile,
+        Rectangle listGridRect,
+        IReadOnlyList<Rectangle> rowSignatureRects,
+        PointF offset,
+        PointF step,
+        int visibleTopLogicalRow,
+        int maxVisibleTop,
+        int inventoryCount,
+        int scannedRows,
+        ScanLog scanLog,
+        CancellationToken token)
+    {
+        if (rowSignatureRects.Count < 4)
+        {
+            return new NativeEdgeClickSettleResult(
+                false,
+                false,
+                0,
+                0,
+                0,
+                0,
+                "edge_row_geometry_missing",
+                Point.Empty,
+                "unknown",
+                "unknown");
+        }
+
+        var targetClientPoint = new PointF(offset.X + step.X, offset.Y + step.Y * 4);
+        var targetPoint = window.ToScreenPoint(targetClientPoint);
+        window.MoveCursor(targetPoint);
+        var rarity = DetectRarityAround(window, profile, targetPoint).Rarity;
+        if (rarity is null)
+        {
+            await Task.Delay(25, token);
+            rarity = DetectRarityAround(window, profile, targetPoint).Rarity;
+        }
+
+        if (rarity is null)
+        {
+            return new NativeEdgeClickSettleResult(
+                false,
+                false,
+                0,
+                0,
+                0,
+                0,
+                "edge_target_missing",
+                targetPoint,
+                "unknown",
+                "unknown");
+        }
+
+        var beforeRows = CaptureRowSignatures(window, rowSignatureRects);
+        var beforeListHash = FormatNativeEdgeListHash(beforeRows);
+        var previousRows = beforeRows;
+        var watch = Stopwatch.StartNew();
+        var samples = 0;
+        var stableFrames = 0;
+        var movementDistance = 0;
+        var sawMovement = false;
+        var pollMilliseconds = Math.Max(10, profile.LoadPollMs);
+        scanLog.WriteEvent(
+            "EDGE_CLICK_START",
+            $"visibleTopLogicalRow={visibleTopLogicalRow}, maxVisibleTop={maxVisibleTop}, targetVisualRow=4, targetColumn=1, targetPoint={targetPoint}, targetRarity={rarity}, stableFrames=0, movementDistance=0, beforeListHash={beforeListHash}, afterListHash=pending, previousRowHash=unknown, currentRowHash=unknown, inventoryCount={inventoryCount}, scannedRows={scannedRows}, timeoutMs={NativeEdgeClickTimeoutMilliseconds}");
+        window.LeftClickCurrent();
+
+        while (watch.ElapsedMilliseconds < NativeEdgeClickTimeoutMilliseconds)
+        {
+            token.ThrowIfCancellationRequested();
+            await Task.Delay(pollMilliseconds, token);
+            samples++;
+            var currentRows = CaptureRowSignatures(window, rowSignatureRects);
+            var currentMovementDistance = AverageSignatureDistance(
+                beforeRows,
+                currentRows,
+                [(0, 0), (1, 1), (2, 2)]);
+            movementDistance = Math.Max(movementDistance, currentMovementDistance);
+            var frameDistance = AverageSignatureDistance(
+                previousRows,
+                currentRows,
+                [(0, 0), (1, 1), (2, 2)]);
+            previousRows = currentRows;
+            sawMovement |= currentMovementDistance > ListMovementTolerance;
+            stableFrames = frameDistance <= ListStableTolerance
+                ? stableFrames + 1
+                : 0;
+            var mayDecideNoMove = watch.ElapsedMilliseconds >= NativeEdgeClickNoMoveDecisionMilliseconds;
+            if (stableFrames >= NativeEdgeClickStableFrames && (sawMovement || mayDecideNoMove))
+            {
+                watch.Stop();
+                var result = new NativeEdgeClickSettleResult(
+                    true,
+                    sawMovement,
+                    movementDistance,
+                    stableFrames,
+                    samples,
+                    watch.Elapsed.TotalMilliseconds,
+                    sawMovement ? "native_edge_click_changed_assume_one" : "native_edge_click_stable_unchanged",
+                    targetPoint,
+                    beforeListHash,
+                    FormatNativeEdgeListHash(currentRows));
+                scanLog.WriteEvent(
+                    "EDGE_CLICK_SETTLED",
+                    $"visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={targetPoint}, settled=True, changed={result.Changed}, movementDistance={result.MovementDistance}, frameDistance={frameDistance}, stableFrames={result.StableFrames}, samples={result.Samples}, elapsedMs={result.ElapsedMilliseconds:F1}, beforeListHash={result.BeforeListHash}, afterListHash={result.AfterListHash}, previousRowHash=unknown, currentRowHash=unknown, inventoryCount={inventoryCount}, scannedRows={scannedRows}, reason={result.Reason}");
+                return result;
+            }
+        }
+
+        watch.Stop();
+        return new NativeEdgeClickSettleResult(
+            false,
+            sawMovement,
+            movementDistance,
+            stableFrames,
+            samples,
+            watch.Elapsed.TotalMilliseconds,
+            "native_edge_click_settle_timeout",
+            targetPoint,
+            beforeListHash,
+            FormatNativeEdgeListHash(previousRows));
+    }
+
+    private static async Task ArmNativeEdgeFollowupSelectionAsync(
+        GameWindow window,
+        ScanProfile profile,
+        Rectangle listGridRect,
+        PointF offset,
+        PointF step,
+        int columns,
+        int visibleTopLogicalRow,
+        ScanLog scanLog,
+        CancellationToken token)
+    {
+        var armClientPoint = new PointF(
+            offset.X + step.X * Math.Max(1, columns),
+            offset.Y + step.Y * 2);
+        var armPoint = window.ToScreenPoint(armClientPoint);
+        window.MoveCursor(armPoint);
+        window.LeftClickCurrent();
+        await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
+        await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
+        scanLog.WriteEvent(
+            "EDGE_CLICK_SELECTION_ARMED",
+            $"visibleTopLogicalRow={visibleTopLogicalRow}, visualRow=2, column={columns}, point={armPoint}, reason=move_selection_away_from_advanced_row");
+    }
+
+    private static string FormatNativeEdgeListHash(IEnumerable<RowVisualSignature> signatures) =>
+        string.Join("-", signatures.Take(3).Select(signature => signature.Hash.ToString("X16")));
 
     private static int ResolveOcrWorkerCount(ScanOptions options)
     {
@@ -1810,7 +2434,9 @@ public sealed class ScanController
     {
         var atTop = visibleTopLogicalRow == 1;
         var atBottom = visibleTopLogicalRow == maxVisibleTop;
-        var preferredVisualRows = atTop
+        var preferredVisualRows = atTop && atBottom
+            ? new[] { 1, 2, 3, 4 }
+            : atTop
             ? new[] { 1, 2, 3 }
             : atBottom
                 ? new[] { 2, 3, 4 }
@@ -2874,6 +3500,24 @@ public sealed class ScanController
     {
         using var image = window.CaptureFrame(rect);
         return CreateSignature(image, new Rectangle(System.Drawing.Point.Empty, image.Size));
+    }
+
+    private static ulong CaptureGridCellFingerprint(GameWindow window, Point clickPoint, PointF step)
+    {
+        var bounds = window.ClientScreenRect;
+        var halfWidth = Math.Clamp((int)Math.Round(Math.Abs(step.X) * 0.22), 16, 32);
+        var halfHeight = Math.Clamp((int)Math.Round(Math.Abs(step.Y) * 0.22), 20, 40);
+        var rect = Rectangle.Intersect(
+            Rectangle.FromLTRB(
+                clickPoint.X - halfWidth,
+                clickPoint.Y - halfHeight,
+                clickPoint.X + halfWidth,
+                clickPoint.Y + halfHeight),
+            bounds);
+        using var image = window.CaptureFrame(rect);
+        return RowVisualSignatureExtractor.Create(
+            image,
+            new Rectangle(Point.Empty, image.Size)).Hash;
     }
 
     private static ImageSignature CaptureScreenSignature(Rectangle rect)

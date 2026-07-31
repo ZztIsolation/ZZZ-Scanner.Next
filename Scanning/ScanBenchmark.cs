@@ -40,6 +40,10 @@ public static class ScanBenchmark
         @"Start scan\..*?MaxItems=(?<max>\d+)",
         RegexOptions.Compiled);
 
+    private static readonly Regex RowAdvanceModeRegex = new(
+        @"Start scan\..*?RowAdvanceMode=(?<mode>[a-zA-Z0-9_-]+)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex TraversalRegex = new(
         @"Traversal:\s*(?<mode>[a-zA-Z0-9_-]+)",
         RegexOptions.Compiled);
@@ -183,6 +187,11 @@ public static class ScanBenchmark
         Write("suite", "overlap_confirmed_two_row_accept_sum", reports.Sum(report => report.OverlapConfirmedTwoRowAcceptCount));
         Write("suite", "overlap_hard_stop_sum", reports.Sum(report => report.OverlapHardStopCount));
         Write("suite", "missing_logical_rows_sum", reports.Sum(report => report.OverlapMissingLogicalRowsCount));
+        Write("suite", "edge_click_changed_sum", reports.Sum(report => report.NativeEdgeClickChangedCount));
+        Write("suite", "edge_click_hash_fallback_sum", reports.Sum(report => report.NativeEdgeClickHashFallbackCount));
+        Write("suite", "edge_click_bottom_sum", reports.Sum(report => report.NativeEdgeClickBottomCount));
+        Write("suite", "edge_click_stop_sum", reports.Sum(report => report.NativeEdgeClickStopCount));
+        Write("suite", "native_edge_wheel_tick_conflict_sum", reports.Sum(report => report.NativeEdgeWheelTickConflictCount));
         Write("suite", "full_scan_complete_count", reports.Count(report => report.FullScanComplete));
         Write("suite", "quick_accept_sum", reports.Sum(report => report.QuickAcceptCount));
         Write("suite", "fallback_sum", reports.Sum(report => report.EffectiveFallbackCount));
@@ -297,6 +306,7 @@ public static class ScanBenchmark
             CanonicalCropFallbackCount = CountBool(fastAssistRows, "canonical_crop_fallback", expected: true),
             CanonicalCropDecisionCount = CountRowsWithColumn(fastAssistRows, "canonical_crop_fallback"),
             Traversal = traversal,
+            RowAdvanceMode = ParseRowAdvanceMode(lines),
             ExportItemCount = exportStats.ItemCount,
             ExportDuplicateGroupCount = exportStats.DuplicateGroupCount,
             ExportDuplicateItemCount = exportStats.DuplicateItemCount,
@@ -362,6 +372,16 @@ public static class ScanBenchmark
             OcrDrainRemainingCount = SumEventInt(events, "OCR_DRAIN_DONE", "remaining"),
             OcrDrainDiscardedCount = SumEventInt(events, "OCR_DRAIN_DONE", "discarded"),
             EdgeClickBlockedCount = events.Count(x => x.Kind == "EDGE_CLICK_BLOCKED"),
+            NativeEdgeClickStartCount = events.Count(x => x.Kind == "EDGE_CLICK_START"),
+            NativeEdgeClickSettledCount = events.Count(x => x.Kind == "EDGE_CLICK_SETTLED"),
+            NativeEdgeClickChangedCount = events.Count(x => x.Kind == "EDGE_CLICK_CHANGED"),
+            NativeEdgeClickHashFallbackCount = events.Count(x => x.Kind == "EDGE_CLICK_HASH_FALLBACK"),
+            NativeEdgeClickBottomCount = events.Count(x => x.Kind == "EDGE_CLICK_BOTTOM_DETECTED"),
+            NativeEdgeClickStopCount = events.Count(x => x.Kind == "EDGE_CLICK_STOP"),
+            NativeEdgeClickBufferCommitCount = events.Count(x => x.Kind == "EDGE_CLICK_BUFFER_COMMIT"),
+            NativeEdgeWheelTickConflictCount = string.Equals(ParseRowAdvanceMode(lines), "NativeEdgeClick", StringComparison.OrdinalIgnoreCase)
+                ? events.Count(x => x.Kind == "ROW_SCROLL_TICK")
+                : 0,
             MinVisibleRois = cellTimings.Count > 0 ? cellTimings.Min(x => x.VisibleRois) : null,
             IncompleteRoiCount = cellTimings.Count(x => !IsCompleteVariableRoiLayout(x.VisibleRois, x.TotalRois))
                 + invalidRoiTimeoutCount,
@@ -505,6 +525,20 @@ public static class ScanBenchmark
             .Select(item => regex.Match(item.Detail))
             .Where(match => match.Success)
             .Sum(match => ParseInt(match.Groups["value"].Value));
+    }
+
+    private static string ParseRowAdvanceMode(IEnumerable<string> lines)
+    {
+        foreach (var line in lines)
+        {
+            var match = RowAdvanceModeRegex.Match(line);
+            if (match.Success)
+            {
+                return match.Groups["mode"].Value;
+            }
+        }
+
+        return "unknown";
     }
 
     private static bool TryReadEventInt(ScanEvent item, string key, out int value)
@@ -1206,6 +1240,7 @@ public static class ScanBenchmark
         Write(prefix, "termination_code", report.TerminationCode);
         Write(prefix, "export_file", report.ExportFileName);
         Write(prefix, "traversal", report.Traversal);
+        Write(prefix, "row_advance_mode", report.RowAdvanceMode);
         Write(prefix, "ocr_workers", report.OcrWorkers);
         Write(prefix, "ocr_batch_setting", report.OcrBatchSizeSetting);
         Write(prefix, "ocr_queue_capacity", report.OcrQueueCapacity);
@@ -1298,6 +1333,14 @@ public static class ScanBenchmark
         Write(prefix, "ocr_drain_remaining_count", report.OcrDrainRemainingCount);
         Write(prefix, "ocr_drain_discarded_count", report.OcrDrainDiscardedCount);
         Write(prefix, "edge_click_blocked_count", report.EdgeClickBlockedCount);
+        Write(prefix, "native_edge_click_start_count", report.NativeEdgeClickStartCount);
+        Write(prefix, "native_edge_click_settled_count", report.NativeEdgeClickSettledCount);
+        Write(prefix, "native_edge_click_changed_count", report.NativeEdgeClickChangedCount);
+        Write(prefix, "native_edge_click_hash_fallback_count", report.NativeEdgeClickHashFallbackCount);
+        Write(prefix, "native_edge_click_bottom_count", report.NativeEdgeClickBottomCount);
+        Write(prefix, "native_edge_click_stop_count", report.NativeEdgeClickStopCount);
+        Write(prefix, "native_edge_click_buffer_commit_count", report.NativeEdgeClickBufferCommitCount);
+        Write(prefix, "native_edge_wheel_tick_conflict_count", report.NativeEdgeWheelTickConflictCount);
         Write(prefix, "min_visible_rois", report.MinVisibleRois);
         Write(prefix, "incomplete_roi_count", report.IncompleteRoiCount);
 
@@ -1435,6 +1478,9 @@ public static class ScanBenchmark
         Write("acceptance", "no_unsafe_visual_row2", report.UnsafeVisualRow2ClickCount == 0 ? "pass" : "fail");
         Write("acceptance", "overlap_rows_complete", string.Equals(report.Traversal, "overlap-signature-page", StringComparison.OrdinalIgnoreCase) && report.OverlapRowScannedCount > 0 && report.LastQueued == report.ExportItemCount ? "pass" : "skip");
         Write("acceptance", "overlap_no_hard_stop", report.OverlapHardStopCount == 0 ? "pass" : "fail");
+        var nativeEdgeActive = string.Equals(report.RowAdvanceMode, "NativeEdgeClick", StringComparison.OrdinalIgnoreCase);
+        Write("acceptance", "native_edge_no_stop", !nativeEdgeActive ? "skip" : report.NativeEdgeClickStopCount == 0 ? "pass" : "fail");
+        Write("acceptance", "native_edge_no_wheel_tick", !nativeEdgeActive ? "skip" : report.NativeEdgeWheelTickConflictCount == 0 ? "pass" : "fail");
         var validNonLevel15Stop = report.EffectiveFullScanComplete
             && string.Equals(report.TerminationCode, "non_level_15_stop", StringComparison.OrdinalIgnoreCase);
         Write("acceptance", "overlap_no_missing_rows", !report.FullScanExpected || validNonLevel15Stop ? "skip" : report.OverlapMissingLogicalRowsCount == 0 ? "pass" : "fail");
@@ -1644,6 +1690,8 @@ public static class ScanBenchmark
             && report.TargetVerificationConsistent
             && report.PanelMinimumFloorPass
             && report.OcrDrainConsistent
+            && report.NativeEdgeClickStopCount == 0
+            && report.NativeEdgeWheelTickConflictCount == 0
             && report.UnsafeVisualRow2ClickCount == 0
             && report.OverlapHardStopCount == 0
             && (report.Partial != true || validNonLevel15Stop)
@@ -1699,6 +1747,7 @@ public static class ScanBenchmark
         public string TerminationCode { get; set; } = "";
         public string ExportFileName { get; set; } = "";
         public string Traversal { get; set; } = "unknown";
+        public string RowAdvanceMode { get; set; } = "unknown";
         public int? OcrWorkers { get; set; }
         public int? OcrBatchSizeSetting { get; set; }
         public int? OcrQueueCapacity { get; set; }
@@ -1795,6 +1844,14 @@ public static class ScanBenchmark
                 && OcrDrainRemainingCount == 0
                 && OcrDrainDiscardedCount == 0);
         public int EdgeClickBlockedCount { get; set; }
+        public int NativeEdgeClickStartCount { get; set; }
+        public int NativeEdgeClickSettledCount { get; set; }
+        public int NativeEdgeClickChangedCount { get; set; }
+        public int NativeEdgeClickHashFallbackCount { get; set; }
+        public int NativeEdgeClickBottomCount { get; set; }
+        public int NativeEdgeClickStopCount { get; set; }
+        public int NativeEdgeClickBufferCommitCount { get; set; }
+        public int NativeEdgeWheelTickConflictCount { get; set; }
         public int? MinVisibleRois { get; set; }
         public int IncompleteRoiCount { get; set; }
         public int? LastVisited { get; set; }

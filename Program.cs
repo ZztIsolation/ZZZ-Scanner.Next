@@ -197,6 +197,12 @@ static class Program
             return true;
         }
 
+        if (string.Equals(args[0], "--edge-scroll-probe", StringComparison.OrdinalIgnoreCase))
+        {
+            exitCode = RunEdgeScrollProbe(args);
+            return true;
+        }
+
         if (string.Equals(args[0], "--ws", StringComparison.OrdinalIgnoreCase))
         {
             var port = args.Length > 1 && int.TryParse(args[1], out var parsedPort) ? parsedPort : 22350;
@@ -500,6 +506,67 @@ static class Program
         }
     }
 
+    private static int RunEdgeScrollProbe(string[] args)
+    {
+        NativeMethods.TryEnablePerMonitorDpiAwareness();
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        ApplicationConfiguration.Initialize();
+
+        var scanMutexAcquired = false;
+        using var scanMutex = new Mutex(false, @"Local\ZZZScannerNext.ScanOnce");
+        try
+        {
+            scanMutexAcquired = scanMutex.WaitOne(0);
+            if (!scanMutexAcquired)
+            {
+                Console.Error.WriteLine("Another scan is already running. Refusing to start the edge-scroll probe.");
+                return 73;
+            }
+
+            var command = ParseScanRunCommand(args);
+            var options = BuildScanOptions(command);
+            options.RowAdvanceMode = RowAdvanceMode.NativeEdgeClick;
+            var runs = TryReadIntOption(args, "--runs", out var configuredRuns)
+                ? Math.Clamp(configuredRuns, 1, 100)
+                : 30;
+            using var cts = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, e) =>
+            {
+                e.Cancel = true;
+                cts.Cancel();
+            };
+
+            var controller = new ScanController(ScanProfileFile.Load(), WikiData.Load());
+            var result = controller.ProbeNativeEdgeScrollAsync(options, runs, cts.Token).GetAwaiter().GetResult();
+            var resultFile = Path.Combine(result.OutputDirectory, "edge-scroll-probe-result.json");
+            File.WriteAllText(resultFile, JsonSerializer.Serialize(result, JsonDefaults.Write));
+            Console.WriteLine($"output_dir={result.OutputDirectory}");
+            Console.WriteLine($"probe_runs={result.RequestedRuns}");
+            Console.WriteLine($"changed_runs={result.ChangedRuns}");
+            Console.WriteLine($"bottom_runs={result.BottomRuns}");
+            Console.WriteLine($"failed_runs={result.FailedRuns}");
+            Console.WriteLine($"result_file={resultFile}");
+            return result.Success ? 0 : 1;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.Error.WriteLine("Edge-scroll probe canceled.");
+            return 130;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(ex);
+            return 1;
+        }
+        finally
+        {
+            if (scanMutexAcquired)
+            {
+                scanMutex.ReleaseMutex();
+            }
+        }
+    }
+
     private static ScanRunCommand ParseScanRunCommand(string[] args)
     {
         var configPath = ReadOption(args, "--config");
@@ -554,6 +621,19 @@ static class Program
             else
             {
                 throw new ArgumentException($"Unknown capture mode: {captureMode}. Expected gdi or dxgi.");
+            }
+        }
+
+        var rowAdvanceMode = ReadOption(args, "--row-advance-mode");
+        if (!string.IsNullOrWhiteSpace(rowAdvanceMode))
+        {
+            if (TryParseRowAdvanceMode(rowAdvanceMode, out var parsedRowAdvanceMode))
+            {
+                command.RowAdvanceMode = parsedRowAdvanceMode;
+            }
+            else
+            {
+                throw new ArgumentException($"Unknown row advance mode: {rowAdvanceMode}. Expected wheel or native-edge-click.");
             }
         }
 
@@ -829,6 +909,7 @@ static class Program
             ProcessName = command.ProcessName,
             ProfileName = command.ProfileName,
             TraversalMode = command.TraversalMode,
+            RowAdvanceMode = command.RowAdvanceMode,
             MaxItems = Math.Max(0, command.MaxItems),
             BringToFront = command.BringToFront,
             StopAtNonLevel15 = command.StopAtNonLevel15,
@@ -945,6 +1026,24 @@ static class Program
         }
 
         mode = ScrollAcceptMode.Safe;
+        return false;
+    }
+
+    private static bool TryParseRowAdvanceMode(string value, out RowAdvanceMode mode)
+    {
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        if (string.Equals(normalized, "wheel", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = RowAdvanceMode.WheelVerified;
+            return true;
+        }
+
+        if (Enum.TryParse<RowAdvanceMode>(normalized, ignoreCase: true, out mode))
+        {
+            return true;
+        }
+
+        mode = RowAdvanceMode.WheelVerified;
         return false;
     }
 
