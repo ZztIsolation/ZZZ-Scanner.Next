@@ -49,6 +49,9 @@ internal static class Program
             ("bounded scrollbar top reset", TestBoundedScrollbarTopResetAsync),
             ("scrollbar top reset cancellation", TestScrollbarTopResetCancellationAsync),
             ("row advance evidence", TestRowAdvanceEvidenceAsync),
+            ("native edge click policy", TestNativeEdgeClickPolicyAsync),
+            ("native edge detail fingerprint", TestNativeEdgeDetailFingerprintAsync),
+            ("native edge buffered row ownership", TestNativeEdgeBufferedRowOwnershipAsync),
             ("normalized row structural signatures", TestRowStructuralSignaturesAsync),
             ("bounded row scroll coordination", TestRowScrollCoordinationAsync),
             ("row scroll coordination cancellation", TestRowScrollCoordinationCancellationAsync),
@@ -697,6 +700,7 @@ internal static class Program
         AssertEqual(2, profiles.Profiles.Count);
         foreach (var profile in profiles.Profiles)
         {
+            AssertEqual("NativeEdgeClick", profile.RowAdvanceMode);
             AssertEqual(ScrollTopResetCoordinator.MaximumWheelTicks, profile.ResetToTopWheelTicks);
             AssertEqual(50, profile.ResetToTopWheelDelayMs);
             AssertEqual(26, profile.ColorTolerance);
@@ -1387,6 +1391,128 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task TestNativeEdgeClickPolicyAsync()
+    {
+        AssertEqual(
+            NativeEdgeClickDecision.AdvanceAssumedOne,
+            NativeEdgeClickPolicy.ResolveSettle(new NativeEdgeClickSettleResult(
+                Settled: true,
+                Changed: true,
+                MovementDistance: 18,
+                StableFrames: 2,
+                Samples: 4,
+                ElapsedMilliseconds: 160,
+                Reason: "changed",
+                TargetPoint: Point.Empty,
+                BeforeListHash: "BEFORE",
+                AfterListHash: "AFTER")));
+        AssertEqual(
+            NativeEdgeClickDecision.HashFallback,
+            NativeEdgeClickPolicy.ResolveSettle(new NativeEdgeClickSettleResult(
+                Settled: true,
+                Changed: false,
+                MovementDistance: 2,
+                StableFrames: 2,
+                Samples: 8,
+                ElapsedMilliseconds: 320,
+                Reason: "unchanged",
+                TargetPoint: Point.Empty,
+                BeforeListHash: "SAME",
+                AfterListHash: "SAME")));
+        AssertEqual(
+            NativeEdgeClickDecision.Stop,
+            NativeEdgeClickPolicy.ResolveSettle(new NativeEdgeClickSettleResult(
+                Settled: false,
+                Changed: true,
+                MovementDistance: 12,
+                StableFrames: 0,
+                Samples: 20,
+                ElapsedMilliseconds: 800,
+                Reason: "timeout",
+                TargetPoint: Point.Empty,
+                BeforeListHash: "BEFORE",
+                AfterListHash: "AFTER")));
+        AssertEqual(
+            NativeEdgeClickDecision.AdvanceAssumedOne,
+            NativeEdgeClickPolicy.ResolveFallback("OLD", "NEW"));
+        AssertEqual(
+            NativeEdgeClickDecision.Bottom,
+            NativeEdgeClickPolicy.ResolveFallback("SAME", "SAME"));
+        AssertEqual(
+            NativeEdgeClickDecision.Stop,
+            NativeEdgeClickPolicy.ResolveFallback("", "CURRENT"));
+        return Task.CompletedTask;
+    }
+
+    private static Task TestNativeEdgeDetailFingerprintAsync()
+    {
+        var rois = new[]
+        {
+            new Rectangle(4, 4, 24, 12),
+            new Rectangle(4, 20, 24, 12),
+            new Rectangle(4, 36, 24, 20)
+        };
+        using var baseline = new Bitmap(64, 64);
+        using (var graphics = Graphics.FromImage(baseline))
+        {
+            graphics.Clear(Color.FromArgb(20, 30, 40));
+            graphics.FillRectangle(Brushes.White, rois[0]);
+            graphics.FillRectangle(Brushes.Gray, rois[1]);
+            graphics.FillRectangle(Brushes.LightBlue, rois[2]);
+        }
+
+        using var identical = (Bitmap)baseline.Clone();
+        using var changedInsideRoi = (Bitmap)baseline.Clone();
+        using (var graphics = Graphics.FromImage(changedInsideRoi))
+        {
+            graphics.FillRectangle(Brushes.Black, rois[1]);
+        }
+
+        using var changedOutsideRoi = (Bitmap)baseline.Clone();
+        changedOutsideRoi.SetPixel(60, 60, Color.Magenta);
+        var baselineHash = DetailPanelFingerprint.Compute(baseline, rois);
+        AssertEqual(baselineHash, DetailPanelFingerprint.Compute(identical, rois));
+        AssertEqual(baselineHash, DetailPanelFingerprint.Compute(changedOutsideRoi, rois));
+        AssertTrue(!string.Equals(
+            baselineHash,
+            DetailPanelFingerprint.Compute(changedInsideRoi, rois),
+            StringComparison.Ordinal));
+
+        var ordered = new RowDetailFingerprintBuilder();
+        ordered.AddDetailPanel(2, "A", changedInsideRoi, rois);
+        ordered.AddDetailPanel(1, "S", baseline, rois);
+        ordered.AddGridCell(3, "B", 0x1234UL);
+        var reverseInsertion = new RowDetailFingerprintBuilder();
+        reverseInsertion.AddGridCell(3, "B", 0x1234UL);
+        reverseInsertion.AddDetailPanel(1, "S", baseline, rois);
+        reverseInsertion.AddDetailPanel(2, "A", changedInsideRoi, rois);
+        AssertEqual(ordered.Complete(), reverseInsertion.Complete());
+        AssertEqual(3, ordered.Count);
+        return Task.CompletedTask;
+    }
+
+    private static Task TestNativeEdgeBufferedRowOwnershipAsync()
+    {
+        var transferredImage = new Bitmap(8, 8);
+        var discardedImage = new Bitmap(8, 8);
+        var row = new BufferedRowCapture();
+        row.AddSkipped(1, "A");
+        row.AddCapture(2, "S", transferredImage, [new Rectangle(0, 0, 8, 8)], TargetVerificationKind.ChangedText);
+        row.AddCapture(3, "S", discardedImage, [new Rectangle(0, 0, 8, 8)], TargetVerificationKind.ChangedText);
+        AssertEqual(3, row.Cells.Count);
+        AssertTrue(!row.Cells[0].HasCapture);
+        AssertTrue(row.Cells[1].HasCapture);
+
+        var taken = row.Cells[1].TakeImage();
+        row.Dispose();
+        AssertTrue(row.Cells.All(cell => cell.Disposed));
+        AssertTrue(row.Cells[1].ImageTransferred);
+        AssertEqual(8, taken.Width);
+        taken.Dispose();
+        AssertThrows<ArgumentException>(() => _ = discardedImage.Width);
+        return Task.CompletedTask;
+    }
+
     private static Task TestRowStructuralSignaturesAsync()
     {
         using var baseline = CreateSyntheticRowViewport(startLogicalRow: 0);
@@ -1996,6 +2122,23 @@ internal static class Program
         AssertEqual(24, runResult.Items);
         AssertEqual(27, runResult.Queued);
         AssertEqual(24, runResult.Completed);
+
+        var elevationFailure = new ScannerElevationRequiredException(
+            "游戏进程 ZenlessZoneZero 的权限高于当前扫描器，普通权限无法可靠截图或发送输入。");
+        var wrappedElevation = new ScanSessionDiagnosticException(
+            elevationFailure,
+            diagnostics: null,
+            terminal with { Items = 0, Visited = 0, Queued = 0, Completed = 0 });
+        AssertEqual("elevation_required", wrappedElevation.Code);
+        AssertEqual("需要管理员权限", wrappedElevation.Title);
+        AssertTrue(wrappedElevation.Remedy.Contains("UAC", StringComparison.Ordinal));
+        AssertTrue(wrappedElevation.Retryable);
+
+        var elevationActions = JsonSerializer.Serialize(
+            WebSocketHost.ScanFailureActions(wrappedElevation.Code),
+            JsonDefaults.Wire);
+        AssertTrue(elevationActions.Contains("restart_elevated", StringComparison.Ordinal));
+        AssertTrue(!elevationActions.Contains("retry_scan", StringComparison.Ordinal));
         return Task.CompletedTask;
     }
 

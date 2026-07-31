@@ -1,5 +1,41 @@
 # Testing
 
+## 2026-08-01 1.0.49 NativeEdgeClick
+
+实现门禁：
+
+```powershell
+dotnet run --project Tests\ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+dotnet build ZZZ-Scanner.Next.csproj -c Release -p:NuGetAudit=false
+ZZZ-Scanner.Next.exe --edge-scroll-probe --runs 30 --capture-mode gdi
+ZZZ-Scanner.Next.exe --edge-scroll-probe --runs 30 --capture-mode dxgi
+```
+
+- 自动测试覆盖稳定变化直接提交、稳定未变化进入行哈希、相同/不同详情哈希、ROI 外像素不影响哈希、列顺序稳定，以及缓冲截图提交和丢弃的所有权。筛选跳过品质只写格子结构 token，不进入详情捕获或 OCR 队列。
+- 两个内置 16:9 profile 在 1.0.49 默认使用 `NativeEdgeClick`；`WheelVerified` 至少保留一个正式版本并可通过 CLI 显式回退，扫描中禁止混用。
+- 真机门禁要求每个分辨率和截图后端 30/30 稳定变化或正确到底、无 `ROW_SCROLL_TICK`、无 `EDGE_CLICK_STOP`、无提前计数。当前机器只能验证实际打开的游戏分辨率，其余分辨率需在对应窗口尺寸复测。
+- 完整扫描还需覆盖 S/A 分界：底行点击把 A 级物件带到新视觉第 3 行时，必须先记录 `EDGE_CLICK_SELECTION_ARMED`，随后按筛选跳过，不能因高亮品质误判进入详情捕获。
+
+本机实测（`1920x1080`、库存 OCR `806`）：
+
+- Release 回归 `66/66` 通过；Release 构建 `0 warning / 0 error`。
+- GDI 探针目录：`bin/Release/net8.0-windows/Scans/2026-08-01-01-16-24-962-pbaf4-9d61`，首次底行点击重复 `30/30` 稳定变化，`ROW_SCROLL_TICK=0`、失败 `0`。
+- DXGI 探针目录：`bin/Release/net8.0-windows/Scans/2026-08-01-01-17-55-985-pa5a4-2119`，首次底行点击重复 `30/30` 稳定变化，使用 `dxgi-raw` 且无 GDI fallback，`ROW_SCROLL_TICK=0`、失败 `0`。
+- DXGI 完整扫描目录：`bin/Release/net8.0-windows/Scans/2026-08-01-01-47-20-384-p5784-6011`，`806/806` 访问，S 级 `766/766` 入队、完成并导出，A 级筛选跳过 `40`，逻辑行 `90/90`，缺失、重复、失败、partial、`EDGE_CLICK_STOP` 和 `ROW_SCROLL_TICK` 均为 `0`；86 次原生推进均记录列表稳定变化和选择态重置。
+
+本机实测（`1280x720`、DPI 96、库存 OCR `806`）：
+
+- GDI 探针目录：`bin/Release/net8.0-windows/Scans/2026-08-01-02-09-31-811-p834-9b57`，首次底行点击重复 `30/30` 稳定变化，失败、`ROW_SCROLL_TICK` 和 `EDGE_CLICK_STOP` 均为 `0`。
+- DXGI 探针目录：`bin/Release/net8.0-windows/Scans/2026-08-01-02-11-03-537-p7364-e9cf`，首次底行点击重复 `30/30` 稳定变化，使用 `dxgi-raw` 且无 GDI fallback，失败、`ROW_SCROLL_TICK` 和 `EDGE_CLICK_STOP` 均为 `0`。
+- DXGI 完整扫描目录：`bin/Release/net8.0-windows/Scans/2026-08-01-02-12-33-880-p4ae4-b41c`，访问 `806/806`，S 级 `766/766` 入队、完成并导出，A 级筛选跳过 `40`；最后逻辑行 `90` 位于视觉第 4 行且 5 格全部访问，逻辑行 `90/90`。缺失、重复、失败、partial、`EDGE_CLICK_STOP` 和 `ROW_SCROLL_TICK` 均为 `0`，correctness gate 通过；OCR 队列饱和只记录为性能 risk，不影响结果一致性。
+- 1.0.49 的默认切换以 `1280x720` 与 `1920x1080` 的双后端 30 次探针及各一轮 806 件完整扫描为发布证据。`1600x900` 与 1800+ 件账号仍列为后续扩展验证项，不影响 `wheel` 显式回退可用性。
+
+## 2026-07-30 1.0.48 UAC 提权回归修复
+
+- 原生回归 63 项全部通过；新增断言确认权限异常经过 `ScanSessionDiagnosticException` 后仍保留 `elevation_required`，错误动作包含 `restart_elevated` 且不包含 `retry_scan`。
+- Scanner 与 Helper Release 构建均为 0 warning / 0 error；Scanner 编译产物 `FileVersion=1.0.48.0`，Helper 保持 `FileVersion=1.3.1.0`。
+- 本轮未修改 Helper、协议、扫描、OCR 或导出行为；真实 UAC 对话框需在游戏进程以管理员权限运行的交互环境中最终确认。
+
 ## 2026-07-30 1.0.47 安全单行与高速扫描候选
 
 已执行：

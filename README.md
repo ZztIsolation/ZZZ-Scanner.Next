@@ -299,6 +299,9 @@ Leave these at defaults for the first scan.
   safe fallback.
 - **GDI** is conservative. **DXGI** can be faster and falls back to GDI if
   initialization, frame acquisition, or monitor matching fails.
+- Scanner 1.0.49 advances rows by clicking the fourth visible row and accepting
+  a stable list change as one native game row. Use `--row-advance-mode wheel`
+  only when explicitly diagnosing the retained legacy fallback.
 - Debug screenshots and OCR shadow datasets can create many local files and are
   intended for diagnosis or model work.
 - Worker, batch, queue, and IntraOp values affect OCR throughput. Aggressive

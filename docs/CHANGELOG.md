@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 2026-08-01 1.0.49
+
+- 新增 `WheelVerified` 与 `NativeEdgeClick` 两种行推进模式，以及 CLI `--row-advance-mode wheel|native-edge-click`。两个内置 16:9 profile 默认使用 `NativeEdgeClick`，`wheel` 保留为显式回退。
+- `NativeEdgeClick` 采用 Adepti 式底行点击：视觉第 4 行点击后，列表稳定变化即按游戏原生行为提交一行，不再证明 `rowsAdvanced == 1`；稳定未变化时使用视觉第 3 行指纹区分签名碰撞与列表底部。选中品质使用详情 ROI 的灰度量化 SHA-256，筛选跳过的品质使用格子中心结构哈希且不打开详情捕获。
+- 行哈希兜底使用缓冲提交，判定前不增加计数或进入 OCR 队列；重复行会释放并丢弃。观察到底但计数与库存 OCR 不一致时，扫描可见末行后以 `inventory_count_mismatch_at_observed_bottom` 输出 partial。
+- 底行点击完成判定后先把选择态移到已扫描的视觉第 2 行，再读取新的视觉第 3 行，避免被推进点击带入新行的高亮物件无法产生详情变化，或使 A 级高亮被品质探针误判为 S 级。
+- 新增 `--edge-scroll-probe --runs 30`、`EDGE_CLICK_*` 诊断和 benchmark 计数；原生点击推进过程中不产生 `ROW_SCROLL_TICK`，也不会自动切回滚轮模式。
+- `1920x1080` 与 `1280x720` 均完成 GDI/DXGI 各 30 次首次推进门禁；两个分辨率的 806 件 DXGI 完整扫描均达到访问 `806/806`、S 级导出 `766/766`、逻辑行 `90/90`，失败、partial、重复和缺失均为 0。
+
+## 2026-07-30 1.0.48
+
+- 修复 1.0.47 将权限异常附加扫描终态时降级为 `scan_failed` 的回归；即使异常经过会话诊断包装，仍会返回 `elevation_required` 和 `restart_elevated`，Helper 可再次按需触发 Scanner 的一次性 UAC 提权重启。
+- Helper 继续冻结为 1.3.1，浏览器与 Helper 协议继续使用 v4；扫描、OCR 和导出行为不变。
+
 ## 2026-07-30 1.0.47
 
 - 正式版本由未发布的 1.0.46 本地候选提升为 1.0.47；Helper 继续冻结为 1.3.1，浏览器与 Helper 协议继续使用 v4。

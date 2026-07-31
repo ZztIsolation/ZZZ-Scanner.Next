@@ -4,6 +4,7 @@
     {
       "name": "ZZZ背包驱动盘-16比9",
       "traversalMode": "OverlapSignaturePage",
+      "rowAdvanceMode": "NativeEdgeClick",
       "standardScreen": [1920, 1080],
       "visibleRows": 4,
       "visibleColumns": 9,
@@ -113,6 +114,7 @@
     {
       "name": "ZZZ背包驱动盘-16比9-fast",
       "traversalMode": "OverlapSignaturePage",
+      "rowAdvanceMode": "NativeEdgeClick",
       "standardScreen": [1920, 1080],
       "visibleRows": 4,
       "visibleColumns": 9,

@@ -250,10 +250,17 @@ public sealed class GameWindow : IDisposable
     private readonly record struct ClientMetrics(Rectangle ScreenRect, float Scale);
 }
 
-public sealed class ScannerElevationRequiredException : InvalidOperationException
+public sealed class ScannerElevationRequiredException : InvalidOperationException, IScannerFailureException
 {
     public ScannerElevationRequiredException(string message)
         : base(message)
     {
     }
+
+    public string Code => "elevation_required";
+    public string Title => "需要管理员权限";
+    public string Remedy => "请以管理员权限重启扫描器；只有这一次启动会请求 UAC。";
+    public bool Retryable => true;
+    public IReadOnlyDictionary<string, object?> DiagnosticDetails { get; } =
+        new Dictionary<string, object?>();
 }

@@ -40,6 +40,7 @@ public sealed class ScanProfile
 {
     public string Name { get; set; } = "";
     public string TraversalMode { get; set; } = "SafeBandViewport";
+    public string RowAdvanceMode { get; set; } = "WheelVerified";
     public int[] StandardScreen { get; set; } = [1920, 1080];
     public int VisibleRows { get; set; } = 4;
     public int VisibleColumns { get; set; } = 9;

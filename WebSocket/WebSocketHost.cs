@@ -342,17 +342,13 @@ public sealed class WebSocketHost : IDisposable
         {
             await SendAsync(socket, sendGate, "scan_error", new
             {
-                code = "elevation_required",
+                code = ex.Code,
                 phase = "scan",
-                title = "需要管理员权限",
+                title = ex.Title,
                 message = ex.Message,
-                remedy = "请以管理员权限重启扫描器；只有这一次启动会请求 UAC。",
-                retryable = true,
-                actions = new[]
-                {
-                    new { kind = "restart_elevated", label = "以管理员权限重启" },
-                    new { kind = "open_logs", label = "打开日志目录" }
-                },
+                remedy = ex.Remedy,
+                retryable = ex.Retryable,
+                actions = ScanFailureActions(ex.Code),
                 scanner = AppInfo.DiagnosticPayload()
             }, CancellationToken.None);
         }
@@ -382,11 +378,7 @@ public sealed class WebSocketHost : IDisposable
                 message = exception.Message,
                 remedy = ex.Remedy,
                 retryable = ex.Retryable,
-                actions = new[]
-                {
-                    new { kind = "retry_scan", label = "重新扫描" },
-                    new { kind = "open_logs", label = "打开日志目录" }
-                },
+                actions = ScanFailureActions(ex.Code),
                 details = ex.DiagnosticDetails,
                 scanner = AppInfo.DiagnosticPayload()
             }, CancellationToken.None);
@@ -428,6 +420,7 @@ public sealed class WebSocketHost : IDisposable
             AdaptiveTiming = payload.AdaptiveTiming,
             FastOcrTemplateIndexFile = payload.FastOcrTemplateIndexFile,
             CaptureMode = ParseCaptureMode(payload.CaptureMode),
+            RowAdvanceMode = ParseRowAdvanceMode(payload.RowAdvanceMode),
             PanelStabilityMode = ParsePanelStabilityMode(payload.PanelStabilityMode, payload.FastMode),
             ScrollAcceptMode = string.IsNullOrWhiteSpace(payload.ScrollAcceptMode) && payload.FastMode
                 ? ScanModeDefaults.ScrollAccept(true)
@@ -524,6 +517,24 @@ public sealed class WebSocketHost : IDisposable
         return Enum.TryParse<ScrollAcceptMode>(normalized, ignoreCase: true, out var mode)
             ? mode
             : ScrollAcceptMode.Safe;
+    }
+
+    private static RowAdvanceMode? ParseRowAdvanceMode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        if (string.Equals(normalized, "wheel", StringComparison.OrdinalIgnoreCase))
+        {
+            return RowAdvanceMode.WheelVerified;
+        }
+
+        return Enum.TryParse<RowAdvanceMode>(normalized, ignoreCase: true, out var mode)
+            ? mode
+            : null;
     }
 
     private static PanelAcceptMode ParsePanelAcceptMode(string? value)
@@ -736,6 +747,24 @@ public sealed class WebSocketHost : IDisposable
             || origin.Equals("https://jahooyoung.github.io", StringComparison.OrdinalIgnoreCase);
     }
 
+    internal static object[] ScanFailureActions(string code)
+    {
+        if (string.Equals(code, "elevation_required", StringComparison.Ordinal))
+        {
+            return
+            [
+                new { kind = "restart_elevated", label = "以管理员权限重启" },
+                new { kind = "open_logs", label = "打开日志目录" }
+            ];
+        }
+
+        return
+        [
+            new { kind = "retry_scan", label = "重新扫描" },
+            new { kind = "open_logs", label = "打开日志目录" }
+        ];
+    }
+
     private static void AddCorsHeaders(HttpListenerResponse response, string? origin)
     {
         if (IsAllowedBrowserOrigin(origin))
@@ -810,6 +839,7 @@ public sealed class WebSocketHost : IDisposable
         public string ProfileName { get; set; } = "";
         public string ProcessName { get; set; } = "";
         public string CaptureMode { get; set; } = "gdi";
+        public string RowAdvanceMode { get; set; } = "";
         public string PanelStabilityMode { get; set; } = "";
         public string ScrollAcceptMode { get; set; } = "";
         public string PanelAcceptMode { get; set; } = "";

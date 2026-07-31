@@ -15,6 +15,12 @@ public enum CaptureMode
     Dxgi
 }
 
+public enum RowAdvanceMode
+{
+    WheelVerified,
+    NativeEdgeClick
+}
+
 public enum PanelStabilityMode
 {
     Panel,
@@ -115,6 +121,7 @@ public sealed class ScanOptions
     public string ProcessName { get; set; } = "ZenlessZoneZero";
     public string ProfileName { get; set; } = DefaultProfileName;
     public ScanTraversalMode TraversalMode { get; set; } = ScanTraversalMode.FromProfile;
+    public RowAdvanceMode? RowAdvanceMode { get; set; }
     public int MaxItems { get; set; } = 0;
     public HashSet<string> Rarities { get; } = new(StringComparer.OrdinalIgnoreCase) { "S" };
     public bool BringToFront { get; set; } = true;
@@ -179,6 +186,7 @@ public sealed class ScanRunCommand
     public string ProcessName { get; set; } = "ZenlessZoneZero";
     public string ProfileName { get; set; } = ScanOptions.DefaultProfileName;
     public ScanTraversalMode TraversalMode { get; set; } = ScanTraversalMode.FromProfile;
+    public RowAdvanceMode? RowAdvanceMode { get; set; }
     public int MaxItems { get; set; } = 120;
     public bool BringToFront { get; set; } = true;
     public bool StopAtNonLevel15 { get; set; } = true;
@@ -224,6 +232,21 @@ public sealed class ScanRunResult
     public int Completed { get; set; }
     public int Failed { get; set; }
     public string Error { get; set; } = "";
+}
+
+public sealed class EdgeScrollProbeResult
+{
+    public bool Success { get; set; }
+    public string OutputDirectory { get; set; } = "";
+    public int RequestedRuns { get; set; }
+    public int ChangedRuns { get; set; }
+    public int BottomRuns { get; set; }
+    public int FailedRuns { get; set; }
+    public int? InventoryCount { get; set; }
+    public int ClientWidth { get; set; }
+    public int ClientHeight { get; set; }
+    public int Dpi { get; set; }
+    public string CaptureMode { get; set; } = "";
 }
 
 internal enum ScanEarlyStopDisposition
