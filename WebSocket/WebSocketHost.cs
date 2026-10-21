@@ -412,6 +412,7 @@ public sealed class WebSocketHost : IDisposable
         var options = new ScanOptions
         {
             MaxItems = Math.Max(0, payload.MaxItems),
+            OpenInventoryFromWorld = payload.OpenInventoryFromWorld,
             StopAtNonLevel15 = payload.StopAtNonLevel15,
             OcrShadowDataset = payload.OcrShadowDataset,
             FastOcrShadow = payload.FastOcrShadow,
@@ -826,6 +827,7 @@ public sealed class WebSocketHost : IDisposable
 
     private sealed class ScanRequestPayload
     {
+        public bool OpenInventoryFromWorld { get; set; }
         public int MaxItems { get; set; }
         public string[] Rarities { get; set; } = ["S"];
         public string ResultDelivery { get; set; } = "";

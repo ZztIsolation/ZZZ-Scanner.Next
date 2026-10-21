@@ -1,0 +1,9 @@
+Microsoft Visual C++ Runtime - app-local deployment
+Version: 14.44.35211.0 (x64)
+Source: existing ZZZ-Scanner.Next scanner-1.0.49 release, which packages the
+Visual Studio redistributable layout under scripts/publish-slim.ps1.
+Source archive: https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases/download/scanner-1.0.49/ZZZ-Scanner.Next-win-x64-fdd.zip
+Each DLL's Microsoft Authenticode signature and exact file version are checked
+before packaging. SHA-256 hashes are recorded in package-info.json and SHA256SUMS.txt.
+The runtime files are redistributed under the applicable Microsoft Visual Studio license.
+No system runtime installation or modification is performed by this tool.

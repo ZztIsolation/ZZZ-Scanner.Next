@@ -9,6 +9,7 @@ public sealed class GameWindow : IDisposable
     private readonly IntPtr _handle;
     private readonly CaptureSourceCoordinator _captureSource = new(new GdiCaptureSource());
     private Action? _inputGuard;
+    internal Gamepad.IDiscSelectionInput? DiscSelectionInput { get; set; }
     private Rectangle _clientScreenRect;
     private float _coordinateScale = 1f;
     private bool _disposed;
@@ -27,7 +28,7 @@ public sealed class GameWindow : IDisposable
     public string ActiveCaptureMode => _captureSource.Name;
     public string ActiveFrameBackend => _captureSource.FrameBackendName;
 
-    public static GameWindow Find(string processName)
+    public static GameWindow Find(string processName, bool requiresMouseInput = true)
     {
         NativeMethods.TryEnablePerMonitorDpiAwareness();
 
@@ -52,7 +53,8 @@ public sealed class GameWindow : IDisposable
 
         using (process)
         {
-            if (NativeMethods.RequiresElevationForProcess(process.Id))
+            // Desktop capture and ViGEm reports do not use injected mouse input.
+            if (requiresMouseInput && NativeMethods.RequiresElevationForProcess(process.Id))
             {
                 throw new ScannerElevationRequiredException(
                     $"游戏进程 {processName} 的权限高于当前扫描器，普通权限无法可靠截图或发送输入。");
@@ -102,6 +104,22 @@ public sealed class GameWindow : IDisposable
         SendLeftClick(durationMs);
     }
 
+    internal async Task OpenBackpackKeyAsync(CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        EnsureGamepadTarget();
+        try
+        {
+            NativeMethods.SendBackpackKey(true);
+            for (var i = 0; i < 8; i++)
+            {
+                await Task.Delay(10, token);
+                EnsureGamepadTarget();
+            }
+        }
+        finally { NativeMethods.SendBackpackKey(false); }
+    }
+
     public void LeftClickCurrent(int durationMs = 0)
     {
         EnsureInputAllowed();
@@ -144,8 +162,24 @@ public sealed class GameWindow : IDisposable
 
     public void MoveCursor(Point point)
     {
+        if (DiscSelectionInput is not null) return;
         NativeMethods.SetCursorPos(point.X, point.Y);
     }
+
+    internal Task SelectDiscAsync(Point point, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (DiscSelectionInput is null)
+        {
+            LeftClickCurrent();
+            return Task.CompletedTask;
+        }
+        EnsureInputAllowed();
+        return DiscSelectionInput.SelectAsync(point, token);
+    }
+
+    internal Task ResynchronizeDiscSelectionAsync(CancellationToken token) =>
+        DiscSelectionInput?.ResynchronizeAsync(token) ?? Task.CompletedTask;
 
     public Bitmap Capture(Rectangle screenRect)
     {
@@ -175,6 +209,16 @@ public sealed class GameWindow : IDisposable
     internal void ConfigureInputGuard(Action? inputGuard)
     {
         _inputGuard = inputGuard;
+    }
+
+    internal void EnsureGamepadTarget()
+    {
+        if (NativeMethods.GetForegroundWindow() != _handle)
+            throw new InvalidOperationException("游戏已失去前台焦点，已停止手柄输入。");
+        if (GetClientMetrics(_handle).ScreenRect != _clientScreenRect)
+            throw new InvalidOperationException("游戏窗口位置或分辨率发生变化，请重新开始扫描。");
+        if (!SystemInformation.VirtualScreen.Contains(_clientScreenRect))
+            throw new InvalidOperationException("游戏客户区未完整显示在屏幕内。");
     }
 
     private void EnsureInputAllowed()

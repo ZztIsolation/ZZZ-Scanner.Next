@@ -6,7 +6,8 @@ public enum ScanTraversalMode
     OverlapSignaturePage,
     SafeBandViewport,
     CalibratedPage,
-    LegacyThirdRow
+    LegacyThirdRow,
+    Gamepad
 }
 
 public enum CaptureMode
@@ -125,6 +126,8 @@ public sealed class ScanOptions
     public int MaxItems { get; set; } = 0;
     public HashSet<string> Rarities { get; } = new(StringComparer.OrdinalIgnoreCase) { "S" };
     public bool BringToFront { get; set; } = true;
+    public bool OpenInventoryFromWorld { get; set; }
+    public int GamepadHoldMilliseconds { get; set; } = 60;
     public bool ShowDebugImages { get; set; }
     public bool StopAtNonLevel15 { get; set; } = true;
     public bool HighSpeedOcr { get; set; } = true;
@@ -189,6 +192,8 @@ public sealed class ScanRunCommand
     public RowAdvanceMode? RowAdvanceMode { get; set; }
     public int MaxItems { get; set; } = 120;
     public bool BringToFront { get; set; } = true;
+    public bool OpenInventoryFromWorld { get; set; }
+    public int GamepadHoldMilliseconds { get; set; } = 60;
     public bool StopAtNonLevel15 { get; set; } = true;
     public bool HighSpeedOcr { get; set; } = true;
     public bool OcrShadowDataset { get; set; }
