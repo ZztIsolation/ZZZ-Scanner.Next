@@ -10,6 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\Experiments\GamepadProbe\GridChecks.cs" Link="GridChecks.cs" />
     <ProjectReference Include="..\ZZZ-Scanner.Next.csproj" />
     <ProjectReference Include="..\Launcher\ZZZ-Scanner.Helper.csproj" />
     <None Update="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />

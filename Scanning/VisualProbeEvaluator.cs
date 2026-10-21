@@ -176,7 +176,7 @@ internal static class PanelCaptureTimingPolicy
     }
 }
 
-internal sealed class PanelTargetEvidenceGate
+internal sealed class PanelTargetEvidenceGate(bool verifiedPosition = false)
 {
     public const int RequiredStableFrames = 2;
     public const double MinimumReliableChangeMilliseconds = 25.0;
@@ -184,7 +184,7 @@ internal sealed class PanelTargetEvidenceGate
     public bool Changed { get; private set; }
     public int StableFrames { get; private set; }
     public double? ChangeMilliseconds { get; private set; }
-    public bool Stable => Changed && StableFrames >= RequiredStableFrames;
+    public bool Stable => verifiedPosition || (Changed && StableFrames >= RequiredStableFrames);
 
     public bool Observe(bool changedFromBaseline, bool stableWithPreviousFrame, double elapsedMilliseconds)
     {
@@ -208,7 +208,9 @@ internal sealed class PanelTargetEvidenceGate
         bool selectionRoundTripReady,
         out string blockedReason)
     {
-        if (!Stable)
+        // A verified grid position does not prove a detail change or an
+        // identical-neighbor round trip. Only observed selection change can.
+        if (!Changed || StableFrames < RequiredStableFrames)
         {
             blockedReason = Changed ? "selection_change_not_stable" : "no_selection_change";
             return false;

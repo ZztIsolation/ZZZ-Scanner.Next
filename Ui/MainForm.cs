@@ -17,6 +17,7 @@ public sealed class MainForm : Form
     private readonly NumericUpDown _maxItems = new();
     private readonly CheckBox _onlyLevel15 = new();
     private readonly CheckBox _bringToFront = new();
+    private readonly CheckBox _openInventoryFromWorld = new();
     private readonly CheckBox _showDebugImages = new();
     private readonly CheckBox _highSpeedOcr = new();
     private readonly CheckBox _ocrShadowDataset = new();
@@ -181,8 +182,24 @@ public sealed class MainForm : Form
 
         AddLabel(advanced, "遍历模式");
         _traversalModeCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+        _traversalModeCombo.SelectedIndexChanged += (_, _) =>
+        {
+            // Both input modes use the original panel capture and timing policy.
+            _scrollAcceptModeCombo.Enabled = _traversalModeCombo.SelectedIndex > 0;
+        };
         ConfigureSingleLine(_traversalModeCombo);
         advanced.Controls.Add(_traversalModeCombo);
+        _openInventoryFromWorld.Text = "从游戏主场景按 B 进入背包（首次进入用键鼠）";
+        _openInventoryFromWorld.AutoSize = true;
+        advanced.Controls.Add(_openInventoryFromWorld);
+        var driverGuide = new Button { Text = "ViGEmBus 检测 / 安装引导", AutoSize = true };
+        driverGuide.Click += (_, _) =>
+        {
+            using var guide = new Scanning.Gamepad.DriverGuideForm(Scanning.Gamepad.DriverSetup.Inspect());
+            guide.ShowDialog(this);
+        };
+        advanced.Controls.Add(driverGuide);
+        advanced.Controls.Add(new Label { Text = "手柄扫描：先选中背包第一个盘；切出游戏停止。", AutoSize = true });
 
         _highSpeedOcr.Text = "高速 OCR";
         _highSpeedOcr.AutoSize = true;
@@ -289,7 +306,7 @@ public sealed class MainForm : Form
         _fastMode.CheckedChanged += (_, _) => SyncFastModeDefaults();
 
         _traversalModeCombo.Items.AddRange([
-            "按配置（默认重叠签名）",
+            "手柄动态网格（默认）",
             "重叠签名扫描",
             "安全带扫描",
             "校准翻页",
@@ -328,6 +345,16 @@ public sealed class MainForm : Form
     private async Task StartScanAsync()
     {
         var options = ReadOptions();
+        if (options.TraversalMode is ScanTraversalMode.FromProfile or ScanTraversalMode.Gamepad)
+        {
+            var driver = Scanning.Gamepad.DriverSetup.Inspect();
+            if (!driver.CanConnect)
+            {
+                using var guide = new Scanning.Gamepad.DriverGuideForm(driver);
+                guide.ShowDialog(this);
+                return;
+            }
+        }
         if (options.Rarities.Count == 0)
         {
             MessageBox.Show("至少选择一个品质。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -378,6 +405,7 @@ public sealed class MainForm : Form
             TraversalMode = SelectedTraversalMode(),
             MaxItems = (int)_maxItems.Value,
             BringToFront = _bringToFront.Checked,
+            OpenInventoryFromWorld = _openInventoryFromWorld.Checked,
             ShowDebugImages = _showDebugImages.Checked,
             StopAtNonLevel15 = _onlyLevel15.Checked,
             HighSpeedOcr = _highSpeedOcr.Checked,

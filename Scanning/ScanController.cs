@@ -12,7 +12,7 @@ using OcrBatchInput = ZZZScannerNext.Ocr.PaddleOcrRecognizer.OcrBatchInput;
 
 namespace ZZZScannerNext.Scanning;
 
-public sealed class ScanController
+public sealed partial class ScanController
 {
     private const int PanelChangeTolerance = 8;
     private const int PanelStrongChangeTolerance = PanelChangeTolerance * 2;
@@ -105,14 +105,15 @@ public sealed class ScanController
         {
             queueCapacity = Math.Min(queueCapacity, Math.Max(ocrWorkerCount * Math.Max(1, options.OcrBatchSize) * 2, requestedQueueCapacity));
         }
-        var queue = new BlockingCollection<DiscCapture>(boundedCapacity: queueCapacity);
-        var ocrResults = new BlockingCollection<OcrWorkResult>(boundedCapacity: queueCapacity);
+        using var queue = new BlockingCollection<DiscCapture>(boundedCapacity: queueCapacity);
+        using var ocrResults = new BlockingCollection<OcrWorkResult>(boundedCapacity: queueCapacity);
         var counters = new Counters();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var traversalMode = ResolveTraversalMode(options, profile);
         var rowAdvanceMode = ResolveRowAdvanceMode(options, profile);
         options.RowAdvanceMode = rowAdvanceMode;
         if (rowAdvanceMode == RowAdvanceMode.NativeEdgeClick
+            && traversalMode != ScanTraversalMode.Gamepad
             && traversalMode != ScanTraversalMode.OverlapSignaturePage)
         {
             throw new ArgumentException("NativeEdgeClick row advance requires OverlapSignaturePage traversal.");
@@ -188,7 +189,8 @@ public sealed class ScanController
         try
         {
             Report(progress, counters, $"加载窗口：{options.ProcessName}");
-            using var window = GameWindow.Find(options.ProcessName);
+            using var window = GameWindow.Find(options.ProcessName,
+                requiresMouseInput: traversalMode != ScanTraversalMode.Gamepad || options.OpenInventoryFromWorld);
             if (options.BringToFront)
             {
                 window.BringToFront();
@@ -215,12 +217,16 @@ public sealed class ScanController
             }
 
             using var inventoryRecognizer = new PaddleOcrRecognizer(AppPaths.ModelFile, AppPaths.CharacterDictFile, ocrIntraOpThreads);
+            if (options.OpenInventoryFromWorld)
+                await OpenInventoryFromWorldAsync(window, profile, inventoryRecognizer, outputDir, scanLog, linked.Token);
             Task[] ocrWorkers = [];
             var resultConsumer = Task.CompletedTask;
             var captureCompleted = false;
+            using var gamepad = traversalMode == ScanTraversalMode.Gamepad ? ConnectGamepad(scanLog) : null;
 
             try
             {
+                if (gamepad is not null) window.EnsureGamepadTarget();
                 var preflight = await PrepareBackpackAsync(
                     window,
                     profile,
@@ -292,15 +298,36 @@ public sealed class ScanController
                     warehousePolicy,
                     inventoryRecognizer,
                     scanLog);
-                window.ConfigureInputGuard(contextGuard.EnsureHealthy);
-                window.LeftClick(window.ToScreenPoint(profile.Point("driveDiscTab")));
-                await Task.Delay(profile.ClickDelayMs, linked.Token);
-                await ResetListToTopAsync(window, profile, progress, counters, scanLog, linked.Token);
-                Report(progress, counters, "已定位到驱动盘列表顶部。");
+                window.ConfigureInputGuard(() =>
+                {
+                    if (options.OpenInventoryFromWorld) { linked.Token.ThrowIfCancellationRequested(); window.EnsureGamepadTarget(); }
+                    contextGuard.EnsureHealthy();
+                });
+                if (gamepad is null)
+                {
+                    window.LeftClick(window.ToScreenPoint(profile.Point("driveDiscTab")));
+                    await Task.Delay(profile.ClickDelayMs, linked.Token);
+                    await ResetListToTopAsync(window, profile, progress, counters, scanLog, linked.Token);
+                    Report(progress, counters, "已定位到驱动盘列表顶部。");
+                }
+                else
+                {
+                    if (options.OpenInventoryFromWorld)
+                        await SelectFirstDiscForGamepadAsync(window, profile, outputDir, progress, counters, scanLog, linked.Token);
+                    Report(progress, counters, "手柄扫描：确认背包首盘后开始，切出游戏即可停止输入。");
+                }
 
-                ocrWorkers = StartOcrWorkers(queue, ocrResults, outputDir, options, scanLog, ocrWorkerCount, ocrIntraOpThreads, counters, ocrDiagnostics, ocrShadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder, shiftedVisualEnvironment);
-                resultConsumer = Task.Run(() => ConsumeOcrResults(ocrResults, results, counters, outputDir, progress, scanLog, duplicateGuard, options, linked));
-                await ProduceCapturesAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog, preflight.InventoryCount, traversalMode, linked.Token);
+                ocrWorkers = StartOcrWorkers(queue, ocrResults, outputDir, options, scanLog, ocrWorkerCount, ocrIntraOpThreads, counters, ocrDiagnostics, ocrShadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder, shiftedVisualEnvironment, linked);
+                resultConsumer = Task.Run(() =>
+                {
+                    try { ConsumeOcrResults(ocrResults, results, counters, outputDir, progress, scanLog, duplicateGuard, options, linked); }
+                    catch { linked.Cancel(); throw; }
+                });
+                if (gamepad is not null)
+                    await ProduceGamepadCapturesAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog,
+                        preflight.InventoryCount, gamepad, contextGuard.EnsureHealthy, outputDir, linked.Token);
+                else
+                    await ProduceCapturesAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog, preflight.InventoryCount, traversalMode, linked.Token);
                 captureCompleted = true;
                 Report(progress, counters, "截图采集完成，后台 OCR 正在收尾。");
             }
@@ -362,6 +389,8 @@ public sealed class ScanController
             finally
             {
                 ocrResults.CompleteAdding();
+                // Workers can terminate before consuming the remaining bitmaps.
+                DisposeQueuedCaptures(queue);
             }
 
             await resultConsumer;
@@ -1641,10 +1670,12 @@ public sealed class ScanController
         bool postScrollFirstCell = false,
         int startColumn = 1,
         RowDetailFingerprintBuilder? rowFingerprint = null,
-        BufferedRowCapture? bufferedRow = null)
+        BufferedRowCapture? bufferedRow = null,
+        ImageSignature[]? initialPanelSignatures = null,
+        bool firstCellHasNeighborBaseline = false)
     {
         var currentY = offset.Y + step.Y * row;
-        ImageSignature[]? previousPanelSignatures = CaptureCurrentPanelSignatures(
+        ImageSignature[]? previousPanelSignatures = initialPanelSignatures ?? CaptureCurrentPanelSignatures(
             window,
             panelRect,
             panelChangeProbeRect,
@@ -1657,7 +1688,7 @@ public sealed class ScanController
             var refreshPoint = window.ToScreenPoint(refresh);
             scanLog.WriteEvent("ROW_RESUME_SELECTION_REFRESH", $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, startColumn={startColumn}, refreshColumn={refreshColumn}, point={refreshPoint}, visibleTopLogicalRow={visibleTopLogicalRow}, state={ViewportStateLabel(visibleTopLogicalRow, maxVisibleTop)}");
             window.MoveCursor(refreshPoint);
-            window.LeftClickCurrent();
+            await window.SelectDiscAsync(refreshPoint, token);
             await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
             previousPanelSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
         }
@@ -1760,8 +1791,14 @@ public sealed class ScanController
             }
 
             var firstQueuedItem = bufferedRow is null && selectedForExport && counters.Queued == 0;
+            // The gamepad startup already selected the neighbor and supplied its
+            // panel baseline. Returning to cell 1 still uses all original change,
+            // selection and stable-ROI gates; no synthetic acceptance is granted.
+            var preparedFirstCell = firstQueuedItem && col == 1 && logicalRow == 1
+                && firstCellHasNeighborBaseline && initialPanelSignatures is not null
+                && window.DiscSelectionInput is not null;
             var secondColumn = col + 1;
-            if (bufferedRow is null && firstQueuedItem && secondColumn <= maxColumns)
+            if (bufferedRow is null && firstQueuedItem && !preparedFirstCell && secondColumn <= maxColumns)
             {
                 var secondClientPoint = new PointF(offset.X + step.X * secondColumn, currentY);
                 var secondClickPoint = window.ToScreenPoint(secondClientPoint);
@@ -1867,7 +1904,13 @@ public sealed class ScanController
             var selectionProbeWatch = Stopwatch.StartNew();
             var beforeSelectionSignature = CaptureSelectionSignature(selectionProbeRect);
             selectionProbeWatch.Stop();
-            window.LeftClickCurrent();
+            await window.SelectDiscAsync(clickPoint, token);
+            var verifiedRowStart = col == 1 && logicalRow is > 1
+                && previousPanelSignatures is not null
+                && window.DiscSelectionInput is Gamepad.DiscSelectionInput gamepadSelection
+                && gamepadSelection.ConsumeVerifiedRowStart(clickPoint);
+            if (verifiedRowStart)
+                scanLog.WriteEvent("GAMEPAD_ROW_START_EVIDENCE", $"logicalRow={logicalRow}, col={col}, source=verified_down, scope=initial_capture_only, detailGate=unchanged");
             var selectionRoundTripReady = false;
             var sceneAdaptivePanelFloorEligible = !afterScroll && !currentPostScrollFirstCell && row != 2;
             System.Drawing.Point? selectionRefreshPoint = null;
@@ -1902,7 +1945,7 @@ public sealed class ScanController
                 }
             }
 
-            if (PanelCaptureGate.RequiresFirstCellNeighborRoundTrip(firstQueuedItem))
+            if (!preparedFirstCell && PanelCaptureGate.RequiresFirstCellNeighborRoundTrip(firstQueuedItem))
             {
                 scanLog.WriteEvent("FIRST_CELL_REFRESH_REQUIRED", $"attempt=preflight, reason=deterministic_neighbor_round_trip, pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={row}, col={col}/{maxColumns}");
                 await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
@@ -1954,7 +1997,8 @@ public sealed class ScanController
                 currentPostScrollFirstCell,
                 sceneAdaptivePanelFloorEligible,
                 firstQueuedItem,
-                selectionRoundTripReady);
+                selectionRoundTripReady,
+                initialVerifiedRowStart: verifiedRowStart);
             var panelImage = panelCapture.TakeImage();
             var captureRois = rois.Take(panelCapture.VisibleRoiCount).ToArray();
             previousPanelSignatures = panelCapture.ProbeSignatures;
@@ -2083,16 +2127,16 @@ public sealed class ScanController
         return RowScanResult.Completed;
     }
 
-    private static ScanTraversalMode ResolveTraversalMode(ScanOptions options, ScanProfile profile)
+    internal static ScanTraversalMode ResolveTraversalMode(ScanOptions options, ScanProfile profile)
     {
         if (options.TraversalMode != ScanTraversalMode.FromProfile)
         {
             return options.TraversalMode;
         }
 
-        return Enum.TryParse<ScanTraversalMode>(profile.TraversalMode, ignoreCase: true, out var parsed) && parsed != ScanTraversalMode.FromProfile
-            ? parsed
-            : ScanTraversalMode.SafeBandViewport;
+        // Existing UI/API requests using FromProfile now enter controller navigation.
+        // Legacy algorithms remain explicitly selectable for regression comparison.
+        return ScanTraversalMode.Gamepad;
     }
 
     private static RowAdvanceMode ResolveRowAdvanceMode(ScanOptions options, ScanProfile profile)
@@ -3846,7 +3890,7 @@ public sealed class ScanController
             $"pass={pass}, logicalRow={logicalRow?.ToString() ?? "unknown"}, visualRow={visualRow}, firstCol={firstColumn}, secondCol={secondColumn}, timeoutMs={timeoutMs}, visibleTopLogicalRow={visibleTopText}, state={viewportStateText}");
 
         window.MoveCursor(firstPoint);
-        window.LeftClickCurrent();
+        await window.SelectDiscAsync(firstPoint, token);
         await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
         var provisionalFirstSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
 
@@ -3893,6 +3937,7 @@ public sealed class ScanController
         catch (TimeoutException ex)
         {
             scanLog.WriteEvent("FIRST_PAIR_RECOVERED", $"phase=direct_pair, reason={SanitizeLogValue(ex.Message)}, action=search_witness");
+            await window.ResynchronizeDiscSelectionAsync(token);
         }
         finally
         {
@@ -3953,6 +3998,7 @@ public sealed class ScanController
             catch (TimeoutException ex)
             {
                 scanLog.WriteEvent("FIRST_PAIR_WITNESS_SKIPPED", $"attempt={witnessAttempts}, visualRow={candidate.VisualRow}, col={candidate.Column}, reason={SanitizeLogValue(ex.Message)}");
+                await window.ResynchronizeDiscSelectionAsync(token);
             }
             finally
             {
@@ -3992,7 +4038,7 @@ public sealed class ScanController
         var selectionProbeRect = SelectionProbeRect(window, clickPoint);
         var beforeSelectionSignature = CaptureSelectionSignature(selectionProbeRect);
         window.MoveCursor(clickPoint);
-        window.LeftClickCurrent();
+        await window.SelectDiscAsync(clickPoint, token);
         var capture = await CaptureStablePanelAsync(
             window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect,
             previousPanelSignatures, selectionProbeRect, beforeSelectionSignature, runtimeState, scanLog, token,
@@ -4030,6 +4076,7 @@ public sealed class ScanController
                 window.ToScreenPoint(new PointF(
                     offset.X + step.X * candidate.Column,
                     offset.Y + step.Y * candidate.VisualRow))))
+            .Where(candidate => window.DiscSelectionInput?.Contains(candidate.Point) ?? true)
             .ToArray();
     }
 
@@ -4059,7 +4106,8 @@ public sealed class ScanController
         bool postScrollFirstCell,
         bool sceneAdaptivePanelFloorEligible,
         bool firstQueuedItem,
-        bool initialSelectionRoundTripReady)
+        bool initialSelectionRoundTripReady,
+        bool initialVerifiedRowStart = false)
     {
         const int maxAttempts = 2;
         var activePreviousPanelSignatures = previousPanelSignatures;
@@ -4071,7 +4119,7 @@ public sealed class ScanController
             try
             {
                 var allowSelectionEvidence = selectionRoundTripReady;
-                return await CaptureStablePanelAsync(window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect, activePreviousPanelSignatures, activeSelectionProbeRect, activeBeforeSelectionSignature, runtimeState, scanLog, token, postScrollFirstCell, sceneAdaptivePanelFloorEligible && attempt == 1, allowSelectionEvidence, selectionRoundTripReady);
+                return await CaptureStablePanelAsync(window, profile, panelRect, rois, statOffset, statRowBackground, panelChangeProbeRect, activePreviousPanelSignatures, activeSelectionProbeRect, activeBeforeSelectionSignature, runtimeState, scanLog, token, postScrollFirstCell, sceneAdaptivePanelFloorEligible && attempt == 1, allowSelectionEvidence, selectionRoundTripReady, verifiedRowStart: initialVerifiedRowStart && attempt == 1);
             }
             catch (StalePanelException) when (attempt < maxAttempts && !selectionRoundTripReady)
             {
@@ -4148,6 +4196,7 @@ public sealed class ScanController
         CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
+        await window.ResynchronizeDiscSelectionAsync(token);
         var targetPanelSignatures = CaptureCurrentPanelSignatures(window, panelRect, panelChangeProbeRect, rois);
         ImageSignature[] refreshedPanelSignatures = targetPanelSignatures;
         var refreshReady = false;
@@ -4159,7 +4208,7 @@ public sealed class ScanController
             window.MoveCursor(refreshPoint);
             await Task.Delay(Math.Max((int)PanelTargetEvidenceGate.MinimumReliableChangeMilliseconds, profile.LoadPollMs), token);
             var targetSelectedSignature = CaptureSelectionSignature(targetSelectionProbeRect);
-            window.LeftClickCurrent();
+            await window.SelectDiscAsync(refreshPoint, token);
 
             var maximumWaitMs = SelectionRefreshTiming.ResolveMaximumWaitMilliseconds(profile.LoadTimeoutMs);
             var pollMs = Math.Max(5, profile.LoadPollMs);
@@ -4210,7 +4259,7 @@ public sealed class ScanController
         window.MoveCursor(clickPoint);
         await Task.Delay(Math.Max((int)PanelTargetEvidenceGate.MinimumReliableChangeMilliseconds, profile.LoadPollMs), token);
         var refreshedSelectionSignature = CaptureSelectionSignature(refreshedSelectionProbeRect);
-        window.LeftClickCurrent();
+        await window.SelectDiscAsync(clickPoint, token);
         return new SelectionRefreshCapture(
             refreshedPanelSignatures,
             refreshedSelectionProbeRect,
@@ -4277,7 +4326,8 @@ public sealed class ScanController
         bool sceneAdaptivePanelFloorEligible,
         bool allowSelectionOnlyFallback,
         bool selectionRoundTripReady,
-        int? timeoutOverrideMs = null)
+        int? timeoutOverrideMs = null,
+        bool verifiedRowStart = false)
     {
         var timeout = TimeSpan.FromMilliseconds(Math.Clamp(timeoutOverrideMs ?? profile.LoadTimeoutMs, 1, profile.LoadTimeoutMs));
         var interval = TimeSpan.FromMilliseconds(PanelCaptureTimingPolicy.ResolvePollDelayMilliseconds(
@@ -4332,7 +4382,7 @@ public sealed class ScanController
         var panelChangedFromBaseline = false;
         var selectionChanged = initialGate.SelectionChanged;
         var selectionAttestedPanel = false;
-        var selectionEvidenceGate = new PanelTargetEvidenceGate();
+        var selectionEvidenceGate = new PanelTargetEvidenceGate(verifiedRowStart);
         ImageSignature? previousSelectionSignature = null;
         var selectionObservedFrame = -1;
         var selectionStableForObservedFrame = false;
@@ -4921,10 +4971,16 @@ public sealed class ScanController
         FastOcrShadowRecorder? fastOcrShadow,
         FastOcrAssistEngine? fastOcrAssist,
         FastOcrAssistRecorder? fastOcrAssistRecorder,
-        bool normalizedRetryEnabled)
+        bool normalizedRetryEnabled,
+        CancellationTokenSource linked)
     {
         return Enumerable.Range(1, workerCount)
-            .Select(workerId => Task.Run(() => ConsumeOcrWorker(queue, ocrResults, outputDir, options, scanLog, workerId, ocrIntraOpThreads, counters, diagnostics, shadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder, normalizedRetryEnabled)))
+            .Select(workerId => Task.Run(() =>
+            {
+                try { ConsumeOcrWorker(queue, ocrResults, outputDir, options, scanLog, workerId, ocrIntraOpThreads, counters, diagnostics, shadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder, normalizedRetryEnabled, linked.Token); }
+                catch (OperationCanceledException) when (linked.IsCancellationRequested) { }
+                catch { linked.Cancel(); throw; }
+            }))
             .ToArray();
     }
 
@@ -4956,7 +5012,8 @@ public sealed class ScanController
         FastOcrShadowRecorder? fastOcrShadow,
         FastOcrAssistEngine? fastOcrAssist,
         FastOcrAssistRecorder? fastOcrAssistRecorder,
-        bool normalizedRetryEnabled)
+        bool normalizedRetryEnabled,
+        CancellationToken pipelineToken)
     {
         using var recognizer = new PaddleOcrRecognizer(AppPaths.ModelFile, AppPaths.CharacterDictFile, ocrIntraOpThreads);
         var cleaner = new DriveDiscCleaner(_wikiData);
@@ -5019,9 +5076,9 @@ public sealed class ScanController
                             capture.Index,
                             export,
                             capture.TargetVerificationKind,
-                            BuildOcrDetail(capture, ocr)));
+                            BuildOcrDetail(capture, ocr)), pipelineToken);
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (!pipelineToken.IsCancellationRequested)
                     {
                         if (normalizedRetryEnabled && NeedsNormalizedOcrRetry(ocr))
                         {
@@ -5037,10 +5094,10 @@ public sealed class ScanController
                                     capture.Index,
                                     retryExport,
                                     capture.TargetVerificationKind,
-                                    BuildOcrDetail(capture, retryOcr)));
+                                    BuildOcrDetail(capture, retryOcr)), pipelineToken);
                                 continue;
                             }
-                            catch (Exception retryException)
+                            catch (Exception retryException) when (!pipelineToken.IsCancellationRequested)
                             {
                                 scanLog.WriteEvent("OCR_LUMINANCE_RETRY_REJECTED", $"index={capture.Index}, originalError={SanitizeLogValue(ex.Message)}, retryError={SanitizeLogValue(retryException.Message)}");
                             }
@@ -5051,7 +5108,7 @@ public sealed class ScanController
                             capture.Index,
                             capture.TargetVerificationKind,
                             detail,
-                            ex.Message));
+                            ex.Message), pipelineToken);
                     }
                 }
                 cleanSw.Stop();
@@ -5069,7 +5126,7 @@ public sealed class ScanController
                     fastRejectedCount,
                     recognition.Diagnostics.RoiCount);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!pipelineToken.IsCancellationRequested)
             {
                 foreach (var capture in batch)
                 {
@@ -5077,7 +5134,7 @@ public sealed class ScanController
                         capture.Index,
                         capture.TargetVerificationKind,
                         BuildBatchErrorDetail(capture, ex),
-                        ex.Message));
+                        ex.Message), pipelineToken);
                 }
 
                 scanLog.Write($"OCR worker {workerId} batch failed: {ex}");
@@ -5094,7 +5151,7 @@ public sealed class ScanController
         scanLog.Write($"OCR worker {workerId} stopped.");
     }
 
-    private static void ConsumeOcrResults(
+    internal static void ConsumeOcrResults(
         BlockingCollection<OcrWorkResult> ocrResults,
         ConcurrentBag<DriveDiscExport> results,
         Counters counters,
@@ -6014,7 +6071,7 @@ public sealed class ScanController
         public bool Retryable => true;
     }
 
-    private sealed record OcrWorkResult(
+    internal sealed record OcrWorkResult(
         int Index,
         DriveDiscExport? Export,
         TargetVerificationKind TargetVerificationKind,
@@ -6040,7 +6097,7 @@ public sealed class ScanController
         }
     }
 
-    private sealed class Counters
+    internal sealed class Counters
     {
         public int Visited;
         public int Queued;
@@ -6067,7 +6124,7 @@ public sealed class ScanController
         int Margin,
         bool FullScan);
 
-    private sealed class ScanLog : IDisposable
+    internal sealed class ScanLog : IDisposable
     {
         private readonly object _sync = new();
         private readonly StreamWriter _writer;
@@ -6107,7 +6164,7 @@ public sealed class ScanController
         }
     }
 
-    private sealed class DuplicateGuard
+    internal sealed class DuplicateGuard
     {
         private readonly int _threshold;
         private readonly HashSet<string> _seen = new(StringComparer.Ordinal);

@@ -17,8 +17,18 @@ namespace ZZZScannerNext.RegressionTests;
 
 internal static class Program
 {
-    private static async Task<int> Main()
+    private static async Task<int> Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "--gamepad-navigation-check")
+        {
+            GamepadInputChecks.CheckSavedNavigation(args[1]);
+            return 0;
+        }
+        if (args.Length > 1 && args[0] == "--gamepad-frame-check")
+        {
+            GamepadInputChecks.CheckSavedFrames(args.Skip(1));
+            return 0;
+        }
         var tests = new List<(string Name, Func<Task> Run)>
         {
             ("trusted download URIs", TestTrustedDownloadUrisAsync),
@@ -81,6 +91,17 @@ internal static class Program
             ("first-cell panel change gate", TestFirstCellPanelChangeGateAsync),
             ("panel target evidence gate", TestPanelTargetEvidenceGateAsync),
             ("target verification policy", TestTargetVerificationPolicyAsync),
+            ("gamepad production ordering and item failure", GamepadPipelineChecks.OrderingAsync),
+            ("gamepad input-only selection and recovery", GamepadInputChecks.SelectionAsync),
+            ("gamepad merged startup capture order", GamepadInputChecks.PreparedStartAsync),
+            ("gamepad combined row observation and focus-independent evidence", GamepadInputChecks.CombinedRowAsync),
+            ("gamepad one-shot verified row-start evidence", GamepadInputChecks.VerifiedRowEvidenceAsync),
+            ("gamepad input release on cancellation and failure", GamepadInputChecks.ReleaseAsync),
+            ("gamepad input coordinates reuse original row capture", GamepadInputChecks.CoordinatesAsync),
+            ("gamepad production level stop", GamepadPipelineChecks.LevelStopAsync),
+            ("standalone probe queued navigation and backpressure cancellation", GamepadPipelineChecks.NavigationAsync),
+            ("gamepad dynamic grid policies", () => { ZZZ.GamepadProbe.GridChecks.Run(); return Task.CompletedTask; }),
+            ("inventory entry header gate", TestInventoryEntryHeaderAsync),
             ("first-pair witness planning", TestFirstPairWitnessPlanningAsync),
             ("selection refresh wait", TestSelectionRefreshWaitAsync),
             ("partial full-scan benchmark terminal", TestPartialFullScanBenchmarkTerminalAsync),
@@ -2600,6 +2621,15 @@ internal static class Program
         AssertTrue(!unstable.Observe(true, false, 45));
         AssertTrue(!unstable.CanPromote(true, false, false, out var unstableBlocked));
         AssertEqual("selection_change_not_stable", unstableBlocked);
+
+        var verifiedRow = new PanelTargetEvidenceGate(verifiedPosition: true);
+        AssertTrue(verifiedRow.Stable, "A verified Down position needs no second highlight transition.");
+        AssertTrue(!verifiedRow.Changed, "Position evidence must not fabricate a detail/selection change.");
+        AssertTrue(!verifiedRow.CanPromote(true, true, true, out var verifiedBlocked),
+            "A verified position alone must never promote unchanged or identical detail.");
+        AssertEqual("no_selection_change", verifiedBlocked);
+        AssertTrue(!new PanelTargetEvidenceGate().Stable,
+            "A fresh retry without the one-shot evidence must observe normal selection change.");
         return Task.CompletedTask;
     }
 
@@ -2607,6 +2637,19 @@ internal static class Program
     {
         AssertTrue(!TargetVerificationPolicy.AllowsAdjacentIdentical(TargetVerificationKind.ChangedText));
         AssertTrue(TargetVerificationPolicy.AllowsAdjacentIdentical(TargetVerificationKind.IdenticalNeighborRoundTrip));
+        return Task.CompletedTask;
+    }
+
+    private static Task TestInventoryEntryHeaderAsync()
+    {
+        AssertTrue(ScanController.IsInventoryEntryHeader("驱动仓库941/2000", .96f));
+        AssertTrue(ScanController.IsInventoryEntryHeader("道具仓库", .93f));
+        AssertTrue(ScanController.IsInventoryEntryHeader("背包", .9f));
+        AssertTrue(!ScanController.IsInventoryEntryHeader("驱动仓库", .3f));
+        AssertTrue(!ScanController.IsInventoryEntryHeader("等级15/15", .98f));
+        AssertTrue(!ScanController.IsInventoryEntryHeader("", 1f));
+        AssertTrue(!new ScanOptions().OpenInventoryFromWorld);
+        AssertTrue(!new ScanRunCommand().OpenInventoryFromWorld);
         return Task.CompletedTask;
     }
 

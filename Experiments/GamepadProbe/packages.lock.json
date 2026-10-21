@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net8.0-windows7.0": {
+      "Microsoft.ML.OnnxRuntime": {
+        "type": "Direct",
+        "requested": "[1.23.1, 1.23.1]",
+        "resolved": "1.23.1",
+        "contentHash": "K4tCbI9VP3Z6ecWnqsGNkkUcVL8GHdhImcwSTDIXkfLqRTPc4xXoBIykIgYqTK+iYKXtn7WJMchx48ImJe/M8g==",
+        "dependencies": {
+          "Microsoft.ML.OnnxRuntime.Managed": "1.23.1"
+        }
+      },
+      "Nefarius.ViGEm.Client": {
+        "type": "Direct",
+        "requested": "[1.21.256, 1.21.256]",
+        "resolved": "1.21.256",
+        "contentHash": "VJMO6hkalOZ7YdXTwcR881aTgPZlN7thEs3x6CWE/kEu7SdE5bY7QuDXkR2eqXfPAee4NrxInIAqa45PorpTsA=="
+      },
+      "Microsoft.ML.OnnxRuntime.Managed": {
+        "type": "Transitive",
+        "resolved": "1.23.1",
+        "contentHash": "7lcdyCY6pkynuFMnO+iJtCBOvATA2kWAPWVB6DwrVpZJGacdW2mE5ragLChX5s5sFalyqJ2geo1UjRaV2w/gNg==",
+        "dependencies": {
+          "System.Memory": "4.5.5",
+          "System.Numerics.Tensors": "9.0.0"
+        }
+      },
+      "System.Memory": {
+        "type": "Transitive",
+        "resolved": "4.5.5",
+        "contentHash": "XIWiDvKPXaTveaB7HVganDlOCRoj03l+jrwNvcge/t8vhGYKvqV+dMv6G4SAX2NoNmN0wZfVPTAlFwZcZvVOUw=="
+      },
+      "System.Numerics.Tensors": {
+        "type": "Transitive",
+        "resolved": "9.0.0",
+        "contentHash": "hyJB4UlpAi19Xr9AXzu2NuagKC4lPfHObNMEAA0HmqFz2rX7wKgzeYzO/jM/eBHDhnUGFFEjk5cOoJaxqg5J4A=="
+      }
+    },
+    "net8.0-windows7.0/win-x64": {
+      "Microsoft.ML.OnnxRuntime": {
+        "type": "Direct",
+        "requested": "[1.23.1, 1.23.1]",
+        "resolved": "1.23.1",
+        "contentHash": "K4tCbI9VP3Z6ecWnqsGNkkUcVL8GHdhImcwSTDIXkfLqRTPc4xXoBIykIgYqTK+iYKXtn7WJMchx48ImJe/M8g==",
+        "dependencies": {
+          "Microsoft.ML.OnnxRuntime.Managed": "1.23.1"
+        }
+      }
+    }
+  }
+}

@@ -38,6 +38,9 @@ internal static class NativeMethods
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetClientRect(IntPtr hWnd, out NativeRect lpRect);
 
@@ -55,6 +58,34 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern void mouse_event(uint dwFlags, uint dx, uint dy, int dwData, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint count, Input[] inputs, int size);
+
+    // Fixed shortcut for the opt-in world -> inventory workflow. Always send
+    // key-up from the caller's finally block, including cancellation/focus loss.
+    internal static void SendBackpackKey(bool down)
+    {
+        var input = new Input { Type = 1, Data = new InputUnion
+        {
+            Keyboard = new KeyboardInput { Scan = 0x30, Flags = 0x0008u | (down ? 0u : 0x0002u) }
+        }};
+        if (SendInput(1, [input], Marshal.SizeOf<Input>()) != 1)
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "无法发送背包快捷键 B。");
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Input { public uint Type; public InputUnion Data; }
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputUnion
+    {
+        [FieldOffset(0)] public KeyboardInput Keyboard;
+        [FieldOffset(0)] public MouseInput Mouse;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KeyboardInput { public ushort VirtualKey, Scan; public uint Flags, Time; public UIntPtr ExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput { public int X, Y; public uint MouseData, Flags, Time; public UIntPtr ExtraInfo; }
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

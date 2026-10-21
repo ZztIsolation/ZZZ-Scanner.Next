@@ -579,6 +579,14 @@ static class Program
             command.MaxItems = Math.Max(0, maxItems);
         }
 
+        var gamepadHold = ReadOption(args, "--gamepad-hold-ms");
+        if (gamepadHold is not null)
+        {
+            if (!int.TryParse(gamepadHold, out var hold) || hold is < 20 or > 100)
+                throw new ArgumentException("--gamepad-hold-ms must be an integer between 20 and 100.");
+            command.GamepadHoldMilliseconds = hold;
+        }
+
         if (TryReadIntOption(args, "--ocr-workers", out var ocrWorkers))
         {
             command.OcrWorkerCount = Math.Clamp(ocrWorkers, 0, 4);
@@ -771,6 +779,9 @@ static class Program
             command.StopAtNonLevel15 = false;
         }
 
+        if (args.Any(arg => string.Equals(arg, "--open-inventory", StringComparison.OrdinalIgnoreCase)))
+            command.OpenInventoryFromWorld = true;
+
         if (args.Any(arg => string.Equals(arg, "--no-bring-to-front", StringComparison.OrdinalIgnoreCase)))
         {
             command.BringToFront = false;
@@ -912,6 +923,8 @@ static class Program
             RowAdvanceMode = command.RowAdvanceMode,
             MaxItems = Math.Max(0, command.MaxItems),
             BringToFront = command.BringToFront,
+            OpenInventoryFromWorld = command.OpenInventoryFromWorld,
+            GamepadHoldMilliseconds = command.GamepadHoldMilliseconds,
             StopAtNonLevel15 = command.StopAtNonLevel15,
             HighSpeedOcr = command.HighSpeedOcr,
             OcrShadowDataset = command.OcrShadowDataset,

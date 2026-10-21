@@ -4,9 +4,20 @@ English | [简体中文](README.zh-CN.md)
 
 ZZZ Scanner Next is a Windows scanner and exporter for the Drive Disc inventory
 in *Zenless Zone Zero*. It reads the visible game UI by bringing the game window
-forward, clicking cells, scrolling the list, taking screenshots, and running
+forward, navigating with a virtual Xbox controller, taking screenshots, and running
 PP-OCRv5 locally. It does not read game memory, inject code, install a game
 plug-in, or hook the game process.
+
+The working tree now replaces selection input while reusing the original per-item
+capture, stability checks, OCR queues, validation, ordered results and export. The
+new input adapter passes 77 regression groups. A local 3840×2160 run using 50 ms
+controller pulses exported 364 level-15 discs with no OCR failures in 149.68 seconds;
+all 4,368 OCR fields matched the previous run. All-level and multi-PC validation
+remain pending. The default pulse duration remains 60 ms.
+ViGEmBus is required; start at
+the first disc in the inventory. This integration is undergoing local validation.
+See the [integration record](docs/GAMEPAD_SCANNER.md) for scope and limitations;
+the released mouse workflow described below is retained as historical reference.
 
 The project contains:
 

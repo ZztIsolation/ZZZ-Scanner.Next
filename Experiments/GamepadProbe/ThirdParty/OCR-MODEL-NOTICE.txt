@@ -1,0 +1,12 @@
+PP-OCRv5 mobile recognition model and character dictionary
+
+This prototype reuses the scanner's existing model and preprocessing code.
+Model asset: https://github.com/ZztIsolation/ZZZ-Scanner.Next/releases/download/ocr-model-ppocrv5/PP-OCRv5_mobile_rec_infer.onnx
+SHA-256: 70ca955eba4729651da42e7cbcc69aaf41a601939ee5ffaa7a90efdfcd13db6d
+The hash is also pinned in the scanner's .github/workflows/ci.yml.
+Upstream: https://github.com/PaddlePaddle/PaddleOCR
+Upstream license: PaddleOCR-LICENSE.txt (Apache License 2.0).
+Inference: Microsoft.ML.OnnxRuntime 1.23.1. See ONNX-Runtime-LICENSE.txt
+and ONNX-Runtime-ThirdPartyNotices.txt.
+
+The model is not retrained or modified by the gamepad prototype.
