@@ -10,7 +10,7 @@ ZZZ Scanner Next 是旧版命令行扫描器的独立重写版，目标是做成
 - 快速扫描：扫描线程负责点击和截图，多个 OCR worker 异步消费队列。
 - 数据驱动：驱动盘名称、词条候选、词条数值、扫描点位都在 `Data/*.json`。
 - 重叠签名稳定遍历：默认使用 `OverlapSignaturePage`，以逻辑行集合记录已扫行，首屏扫描 1/2/3 行；1.0.51 使用 `WheelVerified + verify`，每次滚轮后以选中框行号变化和稳定释放帧确认恰好一行。
-- 同属性盘保留：不同的已验证格子可导出完全相同的属性；同一格子重复读取仍然拦截。缺少可靠位置时保留既有目标验证保护。
+- 同属性盘保留：不同的已验证格子可导出完全相同的属性；相邻两件完全相同时仍须邻格往返证据；同一格子重复读取仍然拦截。缺少可靠位置时保留既有目标验证保护。
 - 回顶确认：滑块接近顶部只作粗判，随后至少两次向上输入均无锚点位移、行内容稳定且顶部标记成立，才开始采集。
 - 可设置读取范围：支持只读前 N 个、`0=不限制`、S 级任意等级与 0-4 条连续副词条、临时显示调试截图。
 
@@ -55,8 +55,8 @@ ZZZ Scanner Next 是旧版命令行扫描器的独立重写版，目标是做成
 
 `--fast-mode` 会启用 fast profile 和 Fast OCR assist；模板索引不是 v3+ 或没有启用字段时会自动回退普通模式并写日志。
 
-- 原生底行点击：
-  `ZZZ-Scanner.Next.exe --scan-once --max-items 0 --row-advance-mode native-edge-click`
+- 默认全量扫描（1.0.51：滚轮 + 选中框锚点验证）：
+  `ZZZ-Scanner.Next.exe --scan-once --max-items 0`
 
 `--row-advance-mode` 支持 `wheel` 和 `native-edge-click`，优先级为命令行、配置文件、profile。1.0.51 两个内置 profile 默认 `wheel`；旧底行点击仅用于 CLI 对照，网页传入旧值时改用 wheel 并记录覆盖事件。
 
@@ -66,10 +66,11 @@ ZZZ Scanner Next 是旧版命令行扫描器的独立重写版，目标是做成
 - 滚轮探针：`--wheel-anchor-probe --runs 30 --selection-anchor verify --capture-mode dxgi`；加 `--continuous` 验证连续深列表推进。
 - 主动锚点与到底诊断：`--anchor-force-active`、`--debug-inventory-count-delta 9`。后者预期保留真实库存并返回数量不一致的 partial，不视作正常全量完成。
 
-- 原生底行点击重复探针：
+- 旧原生底行点击（仅历史对照，**当前游戏中不可用**）：
+  `ZZZ-Scanner.Next.exe --scan-once --max-items 0 --row-advance-mode native-edge-click`
   `ZZZ-Scanner.Next.exe --edge-scroll-probe --runs 30 --capture-mode gdi`
 
-探针只重复“回顶、点击视觉第 4 行第 1 列、等待列表稳定、记录变化”，不执行驱动盘 OCR 导出。可将 `gdi` 改为 `dxgi` 复测另一截图后端；结果写入扫描输出目录的 `edge-scroll-probe-result.json` 和 `scan.log`。
+2026-11 游戏更新后点击视觉第 4 行不再滚动列表。1.0.51 本机对照中，旧模式在 visited=38 时触发重复保护，只导出 35 件 partial。这两条命令只用于复现旧行为，不要用于实际扫描；启动时会记录 `EDGE_CLICK_GAME_BEHAVIOR_WARNING`。
 
 - 截图后端实验：
   `ZZZ-Scanner.Next.exe --scan-once --max-items 120 --fast-mode --capture-mode dxgi`

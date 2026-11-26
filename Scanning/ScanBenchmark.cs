@@ -1081,13 +1081,15 @@ public static class ScanBenchmark
                 var alreadySeen = fingerprints.ContainsKey(fingerprint);
                 if (alreadySeen)
                 {
-                    var verifiedAdjacent = string.Equals(previousFingerprint, fingerprint, StringComparison.Ordinal)
-                        && verifiedIdenticalNeighborIndices.Contains(itemCount);
+                    var adjacent = string.Equals(previousFingerprint, fingerprint, StringComparison.Ordinal);
+                    var verifiedAdjacent = adjacent && verifiedIdenticalNeighborIndices.Contains(itemCount);
                     if (verifiedAdjacent)
                     {
                         verifiedAdjacentDuplicates++;
                     }
-                    else if (verifiedPositions.TryGetValue(itemCount, out var position)
+                    // Adjacent identical items need neighbor round-trip evidence even with a verified position.
+                    else if (!adjacent
+                        && verifiedPositions.TryGetValue(itemCount, out var position)
                         && verifiedPositions.TryGetValue(firstIndices[fingerprint], out var firstPosition)
                         && position != firstPosition)
                     {

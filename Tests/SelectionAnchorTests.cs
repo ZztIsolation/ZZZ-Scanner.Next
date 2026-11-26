@@ -259,17 +259,23 @@ internal static partial class Program
                 "[2026-11-25T00:00:00Z] SelectionAnchorMode=Verify",
                 "[2026-11-25T00:00:00Z] Traversal: overlap-signature-page. totalRows=4"
             };
-            for (var i = 1; i <= 3; i++)
+            int RunFirstPair(string repeatKind)
             {
-                firstPairLines.Add($"[2026-11-25T00:00:01Z] EVENT #{i * 2} ITEM_TARGET_VERIFICATION: index={i}, kind=ChangedText");
-                firstPairLines.Add($"[2026-11-25T00:00:01Z] EVENT #{i * 2 + 1} ITEM_POSITION_VERIFIED: index={i}, logicalRow=1, column={i}");
+                var lines = new List<string>(firstPairLines);
+                for (var i = 1; i <= 3; i++)
+                {
+                    lines.Add($"[2026-11-25T00:00:01Z] EVENT #{i * 2} ITEM_TARGET_VERIFICATION: index={i}, kind={(i == 1 ? "ChangedText" : repeatKind)}");
+                    lines.Add($"[2026-11-25T00:00:01Z] EVENT #{i * 2 + 1} ITEM_POSITION_VERIFIED: index={i}, logicalRow=1, column={i}");
+                }
+                lines.Add("[2026-11-25T00:00:02Z] EVENT #9 SCAN_TERMINAL: visited=3, queued=3, completed=3, failed=0, partial=False, terminationCode=, exportFile=export.json");
+                File.WriteAllLines(Path.Combine(directory, "scan.log"), lines);
+                var originalOutput = Console.Out;
+                using var firstPairOutput = new StringWriter(CultureInfo.InvariantCulture);
+                try { Console.SetOut(firstPairOutput); return ScanBenchmark.Run(directory, null); }
+                finally { Console.SetOut(originalOutput); }
             }
-            firstPairLines.Add("[2026-11-25T00:00:02Z] EVENT #9 SCAN_TERMINAL: visited=3, queued=3, completed=3, failed=0, partial=False, terminationCode=, exportFile=export.json");
-            File.WriteAllLines(Path.Combine(directory, "scan.log"), firstPairLines);
-            var originalOutput = Console.Out;
-            using var firstPairOutput = new StringWriter(CultureInfo.InvariantCulture);
-            try { Console.SetOut(firstPairOutput); AssertEqual(0, ScanBenchmark.Run(directory, null)); }
-            finally { Console.SetOut(originalOutput); }
+            AssertEqual(0, RunFirstPair("IdenticalNeighborRoundTrip"));
+            AssertEqual(1, RunFirstPair("ChangedText"));
         }
         finally { Directory.Delete(directory, true); }
         return Task.CompletedTask;
@@ -280,9 +286,11 @@ internal static partial class Program
         var traversal = new VerifiedInventoryTraversal(9);
         var guard = new ScanController.DuplicateGuard(9);
         var identical = new DriveDiscExport { Name = "同属性测试盘", Slot = 3, Level = 0 };
-        // Multiple consecutive identical rows must retain every distinct verified inventory cell.
+        // Multiple consecutive identical rows must retain every distinct verified inventory cell,
+        // provided each adjacent repeat carries neighbor round-trip evidence.
         for (var row = 1; row <= 3; row++) for (var col = 1; col <= 9; col++)
-            AssertTrue(guard.Observe(identical, TargetVerificationKind.ChangedText, out _, traversal.Capture(row, row, col)));
+            AssertTrue(guard.Observe(identical, row == 1 && col == 1 ? TargetVerificationKind.ChangedText : TargetVerificationKind.IdenticalNeighborRoundTrip,
+                out _, traversal.Capture(row, row, col)));
         var beforeScroll = traversal.Capture(3, 3, 9);
         traversal.Advance(1, 1, true);
         AssertEqual(new VerifiedInventoryPosition(3, 9), beforeScroll!.Value); // OCR snapshot does not move.
@@ -295,6 +303,18 @@ internal static partial class Program
         AssertTrue(traversal.Capture(5, 3, 1) is null, "fallback invalidates later absolute positions");
         traversal.Advance(3, 1, true);
         AssertTrue(traversal.Capture(6, 3, 1) is null, "a later successful step does not restore lost provenance");
+        var adjacentGuard = new ScanController.DuplicateGuard(9);
+        var adjacentTraversal = new VerifiedInventoryTraversal(9);
+        var other = new DriveDiscExport { Name = "另一件盘", Slot = 3, Level = 0 };
+        var repeated = new DriveDiscExport { Name = "同属性测试盘", Slot = 3, Level = 0 };
+        AssertTrue(adjacentGuard.Observe(repeated, TargetVerificationKind.ChangedText, out _, adjacentTraversal.Capture(1, 1, 1)));
+        AssertTrue(!adjacentGuard.Observe(repeated, TargetVerificationKind.ChangedText, out _, adjacentTraversal.Capture(1, 1, 2)),
+            "a verified position does not prove the detail panel refreshed for an adjacent identical item");
+        var spacedGuard = new ScanController.DuplicateGuard(9);
+        AssertTrue(spacedGuard.Observe(repeated, TargetVerificationKind.ChangedText, out _, adjacentTraversal.Capture(1, 1, 1)));
+        AssertTrue(spacedGuard.Observe(other, TargetVerificationKind.ChangedText, out _, adjacentTraversal.Capture(1, 1, 2)));
+        AssertTrue(spacedGuard.Observe(repeated, TargetVerificationKind.ChangedText, out _, adjacentTraversal.Capture(1, 1, 3)),
+            "non-adjacent identical items at distinct verified cells are kept");
         var legacy = new ScanController.DuplicateGuard(9);
         AssertTrue(legacy.Observe(identical, TargetVerificationKind.ChangedText, out _));
         AssertTrue(!legacy.Observe(identical, TargetVerificationKind.ChangedText, out _), "unverified repeated content remains guarded");

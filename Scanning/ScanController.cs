@@ -6304,11 +6304,23 @@ public sealed partial class ScanController
                     reason = "目标切换或格子位置证据无效。";
                     return false;
                 }
-                if (!_seenPositions.Add(verified))
+                if (_seenPositions.Contains(verified))
                 {
                     reason = $"同一已验证格子被重复读取：逻辑行 {verified.Row}，列 {verified.Column}。";
                     return false;
                 }
+
+                // A verified position proves which cell was clicked, not that the detail panel
+                // refreshed to it. Adjacent identical content still needs the neighbor round-trip.
+                if (_previousFingerprint is not null
+                    && string.Equals(_previousFingerprint, fingerprint, StringComparison.Ordinal)
+                    && !TargetVerificationPolicy.AllowsAdjacentIdentical(targetVerificationKind))
+                {
+                    reason = "相邻驱动盘指纹完全相同，但目标格没有邻格往返验证证据，已拒绝继续扫描。";
+                    return false;
+                }
+
+                _seenPositions.Add(verified);
                 _previousFingerprint = fingerprint;
                 _seen.Add(fingerprint);
                 _consecutiveIdenticalCount = 0;

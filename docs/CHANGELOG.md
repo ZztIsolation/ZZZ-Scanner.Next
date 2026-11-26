@@ -1,17 +1,15 @@
 # Changelog
 
-## Unreleased
+## 2026-11-26 1.0.51 选中框锚点验证的滚轮推进
 
-### 1.0.51 — selection anchor verified wheel navigation (candidate)
-
-- Base: Scanner 1.0.49. The unpublished 1.0.50 phase experiment remains separate.
-- Default navigation uses wheel input and tracks the selected item's screen row. Cursor-release confirmation requires two stable frames; conflicting movement and two-row overshoots stop safely.
-- The anchor detector uses both vertical frame edges and uniqueness, sharing the viewport capture. Structural cross-checks use the actual row pitch; the legacy fallback keeps its original signatures.
-- Adds `--selection-anchor off|shadow|verify|strict`, `--selection-anchor-capture`, `--selection-anchor-eval`, and `--wheel-anchor-probe`. Environment override: `ZZZ_SCANNER_SELECTION_ANCHOR`.
-- Anchor acceptance accounting participates in benchmark correctness and exit codes. Zero movement alone never proves the bottom; independent track-end confirmation is required.
-- Identical attributes are allowed for distinct verified inventory cells, including consecutive identical rows. Immutable capture positions survive asynchronous OCR; repeating the same verified cell still stops. Benchmark separately reports identical-content groups, verified distinct-position duplicates, and unverified duplicates.
-- Verify/strict allow at most two bounded reset-to-top attempts after a failed deep-list reset and require a tighter top-edge match. No scan items are produced before top confirmation.
-- Legacy browser `native-edge-click` requests use wheel navigation with an override event; CLI retains the legacy mode for diagnostics. Helper 1.3.1 and protocol v4 remain unchanged.
+- 基于 Scanner 1.0.49 开发；未发布的 1.0.50 相位探针实验保留在独立分支，未合并。
+- 游戏更新后点击最后一行不再滚动列表，两个内置 profile 默认改回 `WheelVerified`，并启用选中框锚点 `verify`：每次滚轮后追踪选中盘的屏幕行号，光标移开后连续两帧一致且网格稳定才提交一行；两行越界和可靠的结构冲突都会安全停止。
+- 选中框通过左右竖边几何与唯一性识别，复用同一张外扩网格帧。结构复核改用真实行距的卡片内部区域；旧的四等分行签名只保留给 `off` 和回退事务。有可靠锚点时，滑块微小位移不再决定行数。
+- 新增 `--selection-anchor off|shadow|verify|strict`、`--selection-anchor-capture`、`--selection-anchor-eval`、`--wheel-anchor-probe`，环境变量 `ZZZ_SCANNER_SELECTION_ANCHOR` 优先级最高。
+- 锚点推进的对账门禁计入 benchmark correctness 与退出码。零位移本身不能证明到底，还需要滑块到达轨道末端的独立双帧证据；到底后扫描可见末行，数量不一致时以 `inventory_count_mismatch_at_observed_bottom` 输出 partial。
+- 不同的已验证格子允许导出完全相同的属性；相邻两件完全相同时仍须有邻格往返证据（位置证据不证明详情面板已刷新）。格子位置随截图以不可变值传入异步 OCR，同一格子被读两次仍会停止。Benchmark 分别统计同内容组、已验证不同位置的重复和未验证重复。
+- verify/strict 下回顶改为“滑块粗判 + 第二行锚点独立确认”，深列表粗恢复最多两轮；确认前不产生扫描结果。
+- 网页传入旧的 `native-edge-click` 时改用滚轮并记录覆盖事件；CLI 保留旧模式仅供对照。Helper 1.3.1 与协议 v4 不变。
 
 ## 2026-08-01 1.0.49
 
