@@ -45,3 +45,6 @@ Data/ocr_fast_templates*.json
 
 # Large OCR model is bundled in release archives.
 Resources/models/*.onnx
+
+# Local navigation evidence and diagnostic projects.
+Experiments/

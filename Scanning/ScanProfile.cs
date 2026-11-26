@@ -41,6 +41,7 @@ public sealed class ScanProfile
     public string Name { get; set; } = "";
     public string TraversalMode { get; set; } = "SafeBandViewport";
     public string RowAdvanceMode { get; set; } = "WheelVerified";
+    public string SelectionAnchorMode { get; set; } = "";
     public int[] StandardScreen { get; set; } = [1920, 1080];
     public int VisibleRows { get; set; } = 4;
     public int VisibleColumns { get; set; } = 9;
@@ -141,6 +142,7 @@ public sealed class ScanProfile
 
 public sealed class VisualProbeOptions
 {
+    public SelectionAnchorPolicy SelectionAnchor { get; set; } = new();
     // Kept for backward-compatible profile deserialization. Warehouse readiness no longer uses a signal vote.
     public int RequiredSignals { get; set; } = 2;
     public int RequiredStableFrames { get; set; } = 2;

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### 1.0.51 — selection anchor verified wheel navigation (candidate)
+
+- Base: Scanner 1.0.49. The unpublished 1.0.50 phase experiment remains separate.
+- Default navigation uses wheel input and tracks the selected item's screen row. Cursor-release confirmation requires two stable frames; conflicting movement and two-row overshoots stop safely.
+- The anchor detector uses both vertical frame edges and uniqueness, sharing the viewport capture. Structural cross-checks use the actual row pitch; the legacy fallback keeps its original signatures.
+- Adds `--selection-anchor off|shadow|verify|strict`, `--selection-anchor-capture`, `--selection-anchor-eval`, and `--wheel-anchor-probe`. Environment override: `ZZZ_SCANNER_SELECTION_ANCHOR`.
+- Anchor acceptance accounting participates in benchmark correctness and exit codes. Zero movement alone never proves the bottom; independent track-end confirmation is required.
+- Identical attributes are allowed for distinct verified inventory cells, including consecutive identical rows. Immutable capture positions survive asynchronous OCR; repeating the same verified cell still stops. Benchmark separately reports identical-content groups, verified distinct-position duplicates, and unverified duplicates.
+- Verify/strict allow at most two bounded reset-to-top attempts after a failed deep-list reset and require a tighter top-edge match. No scan items are produced before top confirmation.
+- Legacy browser `native-edge-click` requests use wheel navigation with an override event; CLI retains the legacy mode for diagnostics. Helper 1.3.1 and protocol v4 remain unchanged.
+
 ## 2026-08-01 1.0.49
 
 - 新增 `WheelVerified` 与 `NativeEdgeClick` 两种行推进模式，以及 CLI `--row-advance-mode wheel|native-edge-click`。两个内置 16:9 profile 默认使用 `NativeEdgeClick`，`wheel` 保留为显式回退。

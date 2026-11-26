@@ -15,12 +15,21 @@ using ZZZScannerNext.WebSocket;
 
 namespace ZZZScannerNext.RegressionTests;
 
-internal static class Program
+internal static partial class Program
 {
     private static async Task<int> Main()
     {
         var tests = new List<(string Name, Func<Task> Run)>
         {
+            ("selection anchor synthetic geometry", TestSelectionAnchorSyntheticAsync),
+            ("selection anchor real frames and transforms", TestSelectionAnchorFixturesAsync),
+            ("selection anchor actual row pitch", TestSelectionAnchorPitchAsync),
+            ("selection anchor evidence and configuration", TestSelectionAnchorPolicyAsync),
+            ("selection anchor release and observed bottom", TestSelectionAnchorReleaseAsync),
+            ("selection anchor benchmark exit gates", TestSelectionAnchorBenchmarkAsync),
+            ("selection anchor duplicate position evidence", TestSelectionAnchorDuplicatePositionsAsync),
+            ("selection anchor runtime identical items", TestSelectionAnchorIdenticalItemsAsync),
+            ("selection anchor top confirmation", TestSelectionAnchorTopAsync),
             ("trusted download URIs", TestTrustedDownloadUrisAsync),
             ("manifest validation", TestManifestValidationAsync),
             ("manifest v2 package selection", TestManifestV2PackageSelectionAsync),
@@ -700,7 +709,9 @@ internal static class Program
         AssertEqual(2, profiles.Profiles.Count);
         foreach (var profile in profiles.Profiles)
         {
-            AssertEqual("NativeEdgeClick", profile.RowAdvanceMode);
+            AssertEqual("WheelVerified", profile.RowAdvanceMode);
+            AssertEqual("verify", profile.SelectionAnchorMode);
+            AssertTrue(profile.VisualProbes.SelectionAnchor.Validate());
             AssertEqual(ScrollTopResetCoordinator.MaximumWheelTicks, profile.ResetToTopWheelTicks);
             AssertEqual(50, profile.ResetToTopWheelDelayMs);
             AssertEqual(26, profile.ColorTolerance);

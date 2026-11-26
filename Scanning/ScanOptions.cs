@@ -115,6 +115,10 @@ public static class ScanModeDefaults
 
 public sealed class ScanOptions
 {
+    internal bool LegacyWebRowAdvanceOverridden { get; set; }
+    public SelectionAnchorMode? SelectionAnchorMode { get; set; }
+    public bool AnchorForceActive { get; set; }
+    public int DebugInventoryCountDelta { get; set; }
     public const string DefaultProfileName = "ZZZ背包驱动盘-16比9";
     public const string FastProfileName = "ZZZ背包驱动盘-16比9-fast";
 
@@ -183,6 +187,9 @@ public sealed class ScanSessionResult
 
 public sealed class ScanRunCommand
 {
+    public SelectionAnchorMode? SelectionAnchorMode { get; set; }
+    public bool AnchorForceActive { get; set; }
+    public int DebugInventoryCountDelta { get; set; }
     public string ProcessName { get; set; } = "ZenlessZoneZero";
     public string ProfileName { get; set; } = ScanOptions.DefaultProfileName;
     public ScanTraversalMode TraversalMode { get; set; } = ScanTraversalMode.FromProfile;

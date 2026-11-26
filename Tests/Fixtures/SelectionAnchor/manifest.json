@@ -1,0 +1,58 @@
+{
+  "source": "Live local ZZZ warehouse, 2026-11-25, GDI, 1920x1080, DPI 96; cropped to inventory grid only",
+  "clientWidth": 1920,
+  "clientHeight": 1080,
+  "cropX": 80,
+  "cropY": 192,
+  "samples": [
+    {
+      "file": "selected-r3-c9.png",
+      "expectedRow": 3,
+      "expectedColumn": 9
+    },
+    {
+      "file": "hover-other-cell.png",
+      "expectedRow": 3,
+      "expectedColumn": 9
+    },
+    {
+      "file": "selected-and-hovered.png",
+      "expectedRow": 3,
+      "expectedColumn": 1
+    },
+    {
+      "file": "wheel-after.png",
+      "expectedRow": 2,
+      "expectedColumn": 9
+    },
+    {
+      "file": "click-r4-after.png",
+      "expectedRow": 4,
+      "expectedColumn": 1
+    },
+    {
+      "file": "wheel-motion-002.png",
+      "note": "Animation frame, Weak/None; no row ground truth asserted"
+    }
+  ],
+  "pitchRegression": {
+    "before": "run-002-before.png",
+    "after": "run-002-after.png",
+    "cropX": 96,
+    "cropY": 208,
+    "observedRowsAdvanced": 1,
+    "note": "Manually checked same items move up one row. Legacy equal-quarter signatures incorrectly claimed strong NoMove.",
+    "captureMode": "dxgi"
+  },
+  "pitchRegression900": {
+    "before": "900p-run-005-before.png",
+    "after": "900p-run-005-after.png",
+    "clientWidth": 1600,
+    "clientHeight": 900,
+    "cropX": 80,
+    "cropY": 173,
+    "captureMode": "dxgi",
+    "observedRowsAdvanced": 1,
+    "note": "Live fractional-pitch raster regression, 2026-11-26; validated by selected frame and item correspondence."
+  }
+}

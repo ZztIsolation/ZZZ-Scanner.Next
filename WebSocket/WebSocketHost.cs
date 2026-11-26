@@ -421,6 +421,7 @@ public sealed class WebSocketHost : IDisposable
             FastOcrTemplateIndexFile = payload.FastOcrTemplateIndexFile,
             CaptureMode = ParseCaptureMode(payload.CaptureMode),
             RowAdvanceMode = ParseRowAdvanceMode(payload.RowAdvanceMode),
+            LegacyWebRowAdvanceOverridden = string.Equals(payload.RowAdvanceMode?.Trim().Replace("-", ""), "NativeEdgeClick", StringComparison.OrdinalIgnoreCase),
             PanelStabilityMode = ParsePanelStabilityMode(payload.PanelStabilityMode, payload.FastMode),
             ScrollAcceptMode = string.IsNullOrWhiteSpace(payload.ScrollAcceptMode) && payload.FastMode
                 ? ScanModeDefaults.ScrollAccept(true)
@@ -526,8 +527,9 @@ public sealed class WebSocketHost : IDisposable
             return null;
         }
 
-        var normalized = value.Replace("-", "", StringComparison.OrdinalIgnoreCase);
-        if (string.Equals(normalized, "wheel", StringComparison.OrdinalIgnoreCase))
+        var normalized = value.Trim().Replace("-", "", StringComparison.OrdinalIgnoreCase);
+        if (string.Equals(normalized, "wheel", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalized, "NativeEdgeClick", StringComparison.OrdinalIgnoreCase))
         {
             return RowAdvanceMode.WheelVerified;
         }

@@ -551,6 +551,23 @@ internal static class RowVisualSignatureExtractor
     public static RowVisualSignature Create(CapturedFrame image, Rectangle rect) =>
         Create(image.Width, image.Height, image.GetPixel, rect);
 
+    public static RowVisualSignature CreateAveraged(CapturedFrame image, Rectangle rect)
+    {
+        // Fractional row pitches at 720p/900p round neighboring rows to different pixel phases.
+        // Average a local footprint so a one-pixel raster offset cannot create a strong conflict.
+        Color Pixel(int x, int y)
+        {
+            var red = 0; var green = 0; var blue = 0;
+            for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++)
+            {
+                var color = image.GetPixel(Math.Clamp(x + dx, 0, image.Width - 1), Math.Clamp(y + dy, 0, image.Height - 1));
+                red += color.R; green += color.G; blue += color.B;
+            }
+            return Color.FromArgb(red / 9, green / 9, blue / 9);
+        }
+        return Create(image.Width, image.Height, Pixel, rect);
+    }
+
     public static int Distance(RowVisualSignature left, RowVisualSignature right)
     {
         var leftSamples = left.NormalizedLuminance;
@@ -853,13 +870,14 @@ internal enum RowScrollPhase
 internal readonly record struct RowScrollObservation(
     RowAdvanceEvidence Evidence,
     int FrameDistance,
-    int? ScrollbarPixelDelta = null)
+    int? ScrollbarPixelDelta = null,
+    int? AnchorRowsAdvanced = null)
 {
     public bool Stable => FrameDistance <= RowScrollCoordinator.StableFrameTolerance;
     public bool ConfirmedZeroMovement => Stable
         && Evidence.Decision == RowAdvanceDecision.NoMove
         && Evidence.MovedDistance <= RowAdvanceEvaluator.MovementTolerance
-        && ScrollbarPixelDelta == 0;
+        && (ScrollbarPixelDelta == 0 || AnchorRowsAdvanced == 0);
 }
 
 internal readonly record struct RowScrollCoordinatorTrace(

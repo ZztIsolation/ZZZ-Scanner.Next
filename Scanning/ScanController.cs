@@ -12,7 +12,7 @@ using OcrBatchInput = ZZZScannerNext.Ocr.PaddleOcrRecognizer.OcrBatchInput;
 
 namespace ZZZScannerNext.Scanning;
 
-public sealed class ScanController
+public sealed partial class ScanController
 {
     private const int PanelChangeTolerance = 8;
     private const int PanelStrongChangeTolerance = PanelChangeTolerance * 2;
@@ -135,6 +135,17 @@ public sealed class ScanController
             Math.Clamp(options.SameRowPanelMinAcceptFloorMs, 100, 120),
             Math.Clamp(options.PostScrollPanelMinAcceptFloorMs, 100, 120),
             EffectiveScrollTickDelay(profile, options.ScrollTickDelayOverrideMs));
+        runtimeState.Anchor = ResolveSelectionAnchor(options, profile, scanLog);
+        if (rowAdvanceMode != RowAdvanceMode.WheelVerified && runtimeState.Anchor.Enabled)
+        {
+            scanLog.WriteEvent("SELECTION_ANCHOR_IGNORED", "reason=row_advance_mode_not_wheel");
+            runtimeState.Anchor = runtimeState.Anchor with { Mode = SelectionAnchorMode.Off };
+        }
+        if (options.LegacyWebRowAdvanceOverridden)
+            scanLog.WriteEvent("ROW_ADVANCE_MODE_OVERRIDDEN", "from=NativeEdgeClick, to=WheelVerified, reason=game_behavior_changed");
+        if (rowAdvanceMode == RowAdvanceMode.NativeEdgeClick)
+            scanLog.WriteEvent("EDGE_CLICK_GAME_BEHAVIOR_WARNING", "reason=last_row_click_no_longer_scrolls_since_2026_11");
+        scanLog.Write($"SelectionAnchorMode={runtimeState.Anchor.Mode}, SelectionAnchorSource={runtimeState.Anchor.Source}");
 
         scanLog.Write($"AppVersion={AppInfo.Version}, AssemblyVersion={AppInfo.AssemblyVersion}, FileVersion={AppInfo.FileVersion}, ExecutablePath={AppInfo.ExecutablePath}, ExecutableLastWriteTime={AppInfo.ExecutableLastWriteTime?.ToString("O") ?? "unknown"}, RuntimeDirectory={AppInfo.BaseDirectory}");
         scanLog.Write($"Start scan. Profile={profile.Name}, Traversal={traversalMode}, RowAdvanceMode={rowAdvanceMode}, Process={options.ProcessName}, MaxItems={options.MaxItems}, Rarities={string.Join(",", options.Rarities)}, BringToFront={options.BringToFront}, StopAtNonLevel15={options.StopAtNonLevel15}, HighSpeedOcr={options.HighSpeedOcr}, OcrShadowDataset={options.OcrShadowDataset}, FastOcrShadow={options.FastOcrShadow}, FastOcrAssist={options.FastOcrAssist}, FastModeRequested={requestedFastMode}, FastModeActive={fastModeActive}, AdaptiveTimingRequested={options.AdaptiveTiming?.ToString() ?? "auto"}, AdaptiveTimingActive={adaptiveTimingActive}, PanelStabilityMode={options.PanelStabilityMode}, ScrollAcceptMode={options.ScrollAcceptMode}, PanelAcceptMode={options.PanelAcceptMode}, PostScrollPanelAcceptMode={options.PostScrollPanelAcceptMode}, PanelFloorMode={options.PanelFloorMode}, PanelMinAcceptFloorMs={Math.Clamp(options.PanelMinAcceptFloorMs, 90, 120)}, SameRowPanelMinAcceptFloorMs={Math.Clamp(options.SameRowPanelMinAcceptFloorMs, 100, 120)}, PostScrollPanelMinAcceptFloorMs={Math.Clamp(options.PostScrollPanelMinAcceptFloorMs, 100, 120)}, ScrollTickDelayOverrideMs={(options.ScrollTickDelayOverrideMs <= 0 ? 0 : Math.Clamp(options.ScrollTickDelayOverrideMs, 50, 80))}, EffectiveScrollTickDelayMs={runtimeState.EffectiveScrollTickDelayMs}, OverlapConflictMode={options.OverlapConflictMode}, CaptureModeRequested={options.CaptureMode}, CollectVisualProfile={options.CollectVisualProfile}, VisualProfileId={options.VisualProfileId}, VisualProfileClient={options.VisualProfileClient}, VisualQualityLabel={options.VisualQualityLabel}, ProfileRouting={options.ProfileRouting}, OcrWorkers={ocrWorkerCount}, OcrBatchSize={options.OcrBatchSize}, OcrQueueCapacity={queueCapacity}, OcrIntraOpThreads={ocrIntraOpThreads}");
@@ -295,12 +306,17 @@ public sealed class ScanController
                 window.ConfigureInputGuard(contextGuard.EnsureHealthy);
                 window.LeftClick(window.ToScreenPoint(profile.Point("driveDiscTab")));
                 await Task.Delay(profile.ClickDelayMs, linked.Token);
-                await ResetListToTopAsync(window, profile, progress, counters, scanLog, linked.Token);
+                await ResetListToTopAsync(window, profile, progress, counters, scanLog, linked.Token, runtimeState.Anchor.Verify, preflight.InventoryCount);
+                if (runtimeState.Anchor.Verify && rowAdvanceMode == RowAdvanceMode.WheelVerified
+                    && traversalMode == ScanTraversalMode.OverlapSignaturePage)
+                    runtimeState.Positions = new VerifiedInventoryTraversal(profile.VisibleColumns);
                 Report(progress, counters, "已定位到驱动盘列表顶部。");
 
                 ocrWorkers = StartOcrWorkers(queue, ocrResults, outputDir, options, scanLog, ocrWorkerCount, ocrIntraOpThreads, counters, ocrDiagnostics, ocrShadowDataset, fastOcrShadow, fastOcrAssist, fastOcrAssistRecorder, shiftedVisualEnvironment);
                 resultConsumer = Task.Run(() => ConsumeOcrResults(ocrResults, results, counters, outputDir, progress, scanLog, duplicateGuard, options, linked));
-                await ProduceCapturesAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog, preflight.InventoryCount, traversalMode, linked.Token);
+                if (options.DebugInventoryCountDelta > 0) scanLog.WriteEvent("DEBUG_INVENTORY_COUNT_DELTA", $"delta={options.DebugInventoryCountDelta}, actual={preflight.InventoryCount}");
+                await ProduceCapturesAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog,
+                    preflight.InventoryCount + options.DebugInventoryCountDelta, traversalMode, linked.Token);
                 captureCompleted = true;
                 Report(progress, counters, "截图采集完成，后台 OCR 正在收尾。");
             }
@@ -747,9 +763,16 @@ public sealed class ScanController
         IProgress<ScanProgress> progress,
         Counters counters,
         ScanLog scanLog,
-        CancellationToken token)
+        CancellationToken token,
+        bool verifyAnchorStart = false,
+        int? inventoryCount = null)
     {
         Report(progress, counters, "正在将驱动盘列表拉到最上方。");
+        if (verifyAnchorStart && inventoryCount is > 0 && inventoryCount <= profile.VisibleRows * profile.VisibleColumns)
+        {
+            scanLog.WriteEvent("RESET_TOP_CONFIRMED", "reason=single_viewport_inventory, wheelTicks=0");
+            return;
+        }
         var scrollTop = window.ToScreenPoint(profile.Point("scrollBarTop"));
         var scrollBottom = window.ToScreenPoint(profile.Point("scrollBarBottom"));
         var wheelPoint = window.ToScreenPoint(profile.Point("listWheelArea"));
@@ -761,6 +784,7 @@ public sealed class ScanController
         var resetDelay = Math.Clamp(profile.ResetToTopWheelDelayMs, 20, 80);
         var fallbackResetAction = "not_run";
         var lastResetThumb = default(ScrollbarThumbProbe);
+        var resetAttempt = 1;
 
         void Trace(ScrollTopResetTrace trace)
         {
@@ -797,61 +821,72 @@ public sealed class ScanController
                     break;
                 case ScrollTopResetTraceKind.Confirmed:
                     scanLog.WriteEvent(
-                        "RESET_TOP_CONFIRMED",
+                        verifyAnchorStart ? "RESET_TOP_COARSE_CONFIRMED" : "RESET_TOP_CONFIRMED",
                         $"phase={trace.Phase}, batch={trace.Batch}, tick={trace.WheelTicks}/{maximumWheelTicks}, clicks={trace.TopClicks}, actual={ColorText(trace.ActualColor)}, expected={ColorText(trace.ExpectedColor)}, stableMatches={trace.StableMatches}/{ScrollTopResetCoordinator.RequiredStableMatches}, elapsedMs={trace.ElapsedMilliseconds}");
                     break;
                 case ScrollTopResetTraceKind.Failed:
                     scanLog.WriteEvent(
-                        "RESET_TOP_FAILED",
+                        verifyAnchorStart && resetAttempt == 1 ? "RESET_TOP_ATTEMPT_FAILED" : "RESET_TOP_FAILED",
                         $"reason=scroll_top_color_unconfirmed, phase={trace.Phase}, batch={trace.Batch}, tick={trace.WheelTicks}/{maximumWheelTicks}, clicks={trace.TopClicks}, actual={ColorText(trace.ActualColor)}, expected={ColorText(trace.ExpectedColor)}, tolerance={trace.Tolerance}, elapsedMs={trace.ElapsedMilliseconds}");
                     break;
             }
         }
 
-        var result = await ScrollTopResetCoordinator.RunAsync(
-            maximumWheelTicks,
-            resetDelay,
-            profile.ClickDelayMs,
-            expectedColor,
-            profile.ColorTolerance,
-            () =>
-            {
-                lastResetThumb = CaptureScrollbarThumbProbe(window, profile);
-                return window.GetPixel(scrollTop);
-            },
-            () => window.MouseWheel(120),
-            () =>
-            {
-                var thumb = CaptureScrollbarThumbProbe(window, profile);
-                if (thumb.Found)
+        ScrollTopResetResult result = default;
+        for (; resetAttempt <= (verifyAnchorStart ? 2 : 1); resetAttempt++)
+        {
+            window.MoveCursor(wheelPoint);
+            var attemptDelay = resetAttempt > 1 ? Math.Max(resetDelay, 300) : resetDelay;
+            if (resetAttempt > 1) scanLog.WriteEvent("RESET_TOP_BOUNDED_RETRY", $"attempt={resetAttempt}/2, previousTicks={result.WheelTicks}, totalTickLimit={maximumWheelTicks * 2}, wheelDelayMs={attemptDelay}");
+            result = await ScrollTopResetCoordinator.RunAsync(
+                maximumWheelTicks,
+                attemptDelay,
+                profile.ClickDelayMs,
+                expectedColor,
+                profile.ColorTolerance,
+                () =>
                 {
-                    var targetCenterY = ScrollbarTopResetPlanner.GetTopCenterY(
+                    lastResetThumb = CaptureScrollbarThumbProbe(window, profile);
+                    return window.GetPixel(scrollTop);
+                },
+                () => window.MouseWheel(120),
+                () =>
+                {
+                    var thumb = CaptureScrollbarThumbProbe(window, profile);
+                    if (thumb.Found)
+                    {
+                        var targetCenterY = ScrollbarTopResetPlanner.GetTopCenterY(
+                            scrollTop.Y,
+                            scrollBottom.Y,
+                            thumb.StartY,
+                            thumb.EndY);
+                        var start = new Point(thumb.CenterX, thumb.CenterY);
+                        var end = new Point(thumb.CenterX, targetCenterY);
+                        fallbackResetAction = $"thumb_drag, start={start}, end={end}, thumb={thumb.StartY}-{thumb.EndY}";
+                        window.LeftDrag(start, end, durationMs: 160);
+                    }
+                    else
+                    {
+                        fallbackResetAction = "track_click_no_thumb";
+                        window.LeftClick(scrollTop, durationMs: 30);
+                    }
+
+                    window.MoveCursor(wheelPoint);
+                },
+                Trace,
+                token,
+                captureTopPosition: () =>
+                    lastResetThumb.Found
+                    && (!verifyAnchorStart || Math.Abs(lastResetThumb.StartY - scrollTop.Y) <= 1)
+                    && ScrollbarTopResetPlanner.IsAtTop(
                         scrollTop.Y,
                         scrollBottom.Y,
-                        thumb.StartY,
-                        thumb.EndY);
-                    var start = new Point(thumb.CenterX, thumb.CenterY);
-                    var end = new Point(thumb.CenterX, targetCenterY);
-                    fallbackResetAction = $"thumb_drag, start={start}, end={end}, thumb={thumb.StartY}-{thumb.EndY}";
-                    window.LeftDrag(start, end, durationMs: 160);
-                }
-                else
-                {
-                    fallbackResetAction = "track_click_no_thumb";
-                    window.LeftClick(scrollTop, durationMs: 30);
-                }
-
-                window.MoveCursor(wheelPoint);
-            },
-            Trace,
-            token,
-            captureTopPosition: () =>
-                lastResetThumb.Found
-                && ScrollbarTopResetPlanner.IsAtTop(
-                    scrollTop.Y,
-                    scrollBottom.Y,
-                    lastResetThumb.StartY,
-                    lastResetThumb.EndY));
+                        lastResetThumb.StartY,
+                        lastResetThumb.EndY));
+            if (result.Confirmed && verifyAnchorStart && !await ConfirmTopWithSelectionAnchorAsync(window, profile, scanLog, token))
+                result = result with { Confirmed = false };
+            if (result.Confirmed) break;
+        }
         if (!result.Confirmed)
         {
             throw NavigationFailure(
@@ -960,6 +995,16 @@ public sealed class ScanController
         var deferredRowCounts = new Dictionary<int, int>();
         var nativeEdgeClick = options.RowAdvanceMode == RowAdvanceMode.NativeEdgeClick;
         string? lastNativeMiddleRowHash = null;
+
+        Task<RowScanResult> ScanObservedBottomRowAsync(int top)
+        {
+            var logicalRow = top + 3;
+            return ScanVisualRowAsync(window, profile, queue, options, runtimeState, counters, progress, scanLog,
+                offset, step, panelRect, rois, statOffset, statRowBackground, pass: logicalRow, row: 4,
+                isBottom: true, maxColumns: columns, logicalRow: logicalRow, treatBlankAsEnd: true,
+                panelChangeProbeRect, token, enforceSafeBand: false, visibleTopLogicalRow: top,
+                maxVisibleTop: top, afterScroll: false, postScrollFirstCell: false);
+        }
 
         scanLog.Write($"Traversal: overlap-signature-page. inventoryCount={inventoryCount}, totalRows={totalRows}, visibleRows={visibleRows}, columns={columns}, lastRowColumns={lastRowColumns}, maxVisibleTop={maxVisibleTop}, listGrid={listGridRect}, panelProbe={panelChangeProbeRect}, scrollTickDelta={profile.ScrollTickDelta}.");
         await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
@@ -1221,38 +1266,10 @@ public sealed class ScanController
                 }
 
                 scanLog.WriteEvent("EDGE_CLICK_BOTTOM_DETECTED", $"iteration={iteration}, visibleTopLogicalRow={visibleTopLogicalRow}, targetPoint={edgeClick.TargetPoint}, movementDistance={edgeClick.MovementDistance}, stableFrames={edgeClick.StableFrames}, beforeListHash={edgeClick.BeforeListHash}, afterListHash={edgeClick.AfterListHash}, previousRowHash={previousMiddleRowHash}, currentRowHash={fallbackHash}, inventoryCount={inventoryCount}, visited={counters.Visited}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
-                var observedBottomLogicalRow = visibleTopLogicalRow + 3;
                 RowScanResult bottomResult;
                 try
                 {
-                    bottomResult = await ScanVisualRowAsync(
-                        window,
-                        profile,
-                        queue,
-                        options,
-                        runtimeState,
-                        counters,
-                        progress,
-                        scanLog,
-                        offset,
-                        step,
-                        panelRect,
-                        rois,
-                        statOffset,
-                        statRowBackground,
-                        pass: observedBottomLogicalRow,
-                        row: 4,
-                        isBottom: true,
-                        maxColumns: columns,
-                        logicalRow: observedBottomLogicalRow,
-                        treatBlankAsEnd: true,
-                        panelChangeProbeRect,
-                        token,
-                        enforceSafeBand: false,
-                        visibleTopLogicalRow: visibleTopLogicalRow,
-                        maxVisibleTop: visibleTopLogicalRow,
-                        afterScroll: false,
-                        postScrollFirstCell: false);
+                    bottomResult = await ScanObservedBottomRowAsync(visibleTopLogicalRow);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -1286,9 +1303,18 @@ public sealed class ScanController
                 allowTwoRows: false,
                 scanLog,
                 options.ScrollTickDelayOverrideMs,
-                token);
+                token,
+                runtimeState.Anchor);
+            if (!scroll.Success && scroll.DiagnosticDetails?.ContainsKey("observedBottom") == true)
+            {
+                await ScanObservedBottomRowAsync(visibleTopLogicalRow);
+                if (counters.Visited != inventoryCount)
+                    Interlocked.CompareExchange(ref counters.StopReason, "inventory_count_mismatch_at_observed_bottom", null);
+                return;
+            }
             if (!scroll.Success)
             {
+                scanLog.SaveNavigationFailure(window, listGridRect, visibleTopLogicalRow);
                 throw NavigationFailure($"重叠签名扫描滚动失败：{scroll.Message}", scroll.DiagnosticDetails);
             }
 
@@ -1301,6 +1327,7 @@ public sealed class ScanController
                     scroll.DiagnosticDetails);
             }
 
+            runtimeState.Positions?.Advance(visibleTopLogicalRow, rowsAdvanced, signatureEvidence.Reason == "anchor_1_row_confirmed");
             visibleTopLogicalRow = Math.Min(maxVisibleTop, visibleTopLogicalRow + rowsAdvanced);
             lastScrollChangedViewport = true;
             scanLog.WriteEvent("OVERLAP_SCROLL_ACCEPTED", $"iteration={iteration}, fromTop={beforeTop}, toTop={visibleTopLogicalRow}, rowsAdvanced={rowsAdvanced}, decision={signatureEvidence.Decision}, signatureBestRows={signatureEvidence.BestRows}, signatureBestScore={signatureEvidence.BestScore}, signatureSecondScore={signatureEvidence.SecondScore}, signatureMargin={signatureEvidence.Margin}, reason={signatureEvidence.Reason}, scannedThisViewport={scannedThisViewport}, scannedRows={scannedLogicalRows.Count}/{totalRows}");
@@ -1363,7 +1390,7 @@ public sealed class ScanController
                 logicalRow,
                 scanLog,
                 options.ScrollTickDelayOverrideMs,
-                token);
+                token, runtimeState.Anchor);
             visibleTopLogicalRow = moveResult.VisibleTopLogicalRow;
 
             var visualRow = logicalRow - visibleTopLogicalRow + 1;
@@ -1827,7 +1854,8 @@ public sealed class ScanController
                                 commit.Rarity,
                                 pairPanelImage,
                                 pairCaptureRois,
-                                commit.Capture.TargetVerificationKind), token);
+                                commit.Capture.TargetVerificationKind,
+                                runtimeState.Positions?.Capture(logicalRow, row, commit.Column)), token);
                             pairEnqueued = true;
                         }
                         finally
@@ -2001,7 +2029,8 @@ public sealed class ScanController
                     rarity,
                     panelImage,
                     captureRois,
-                    panelCapture.TargetVerificationKind), token);
+                    panelCapture.TargetVerificationKind,
+                    runtimeState.Positions?.Capture(logicalRow, row, col)), token);
                 enqueued = true;
             }
             finally
@@ -2313,7 +2342,8 @@ public sealed class ScanController
         int logicalRow,
         ScanLog scanLog,
         int scrollTickDelayOverrideMs,
-        CancellationToken token)
+        CancellationToken token,
+        SelectionAnchorSettings? anchor = null)
     {
         var desiredTop = ChooseSafeVisibleTop(logicalRow, totalRows, maxVisibleTop);
         var scrolled = false;
@@ -2330,7 +2360,7 @@ public sealed class ScanController
                 allowTwoRows: false,
                 scanLog,
                 scrollTickDelayOverrideMs,
-                token);
+                token, anchor);
             if (!result.Success)
             {
                 throw NavigationFailure($"安全带逐行滚动失败：{result.Message}", result.DiagnosticDetails);
@@ -2525,13 +2555,14 @@ public sealed class ScanController
         bool allowTwoRows,
         ScanLog scanLog,
         int scrollTickDelayOverrideMs,
-        CancellationToken token)
+        CancellationToken token,
+        SelectionAnchorSettings? anchor = null)
     {
         var delay = Math.Max(120, EffectiveScrollTickDelay(profile, scrollTickDelayOverrideMs) * 2);
         ScrollRowsResult last = default;
         for (var attempt = 1; attempt <= 3; attempt++)
         {
-            last = await ScrollSafeBandOneRowAsync(window, profile, scrollAcceptMode, listGridRect, rowSignatureRects, visibleTopLogicalRow, maxVisibleTop, allowTwoRows, scanLog, scrollTickDelayOverrideMs, token);
+            last = await ScrollSafeBandOneRowAsync(window, profile, scrollAcceptMode, listGridRect, rowSignatureRects, visibleTopLogicalRow, maxVisibleTop, allowTwoRows, scanLog, scrollTickDelayOverrideMs, token, anchor);
             if (last.Success)
             {
                 return last;
@@ -2566,7 +2597,8 @@ public sealed class ScanController
         bool allowTwoRows,
         ScanLog scanLog,
         int scrollTickDelayOverrideMs,
-        CancellationToken token)
+        CancellationToken token,
+        SelectionAnchorSettings? anchor = null)
     {
         if (visibleTopLogicalRow >= maxVisibleTop)
         {
@@ -2585,7 +2617,8 @@ public sealed class ScanController
             allowTwoRows,
             scanLog,
             scrollTickDelayOverrideMs,
-            token);
+            token,
+            anchor);
     }
 
     private static async Task<ScrollRowsResult> ScrollSafeBandOneRowUpAsync(
@@ -2630,7 +2663,8 @@ public sealed class ScanController
         bool allowTwoRows,
         ScanLog scanLog,
         int scrollTickDelayOverrideMs,
-        CancellationToken token)
+        CancellationToken token,
+        SelectionAnchorSettings? anchor = null)
     {
         // The game consumes standard wheel detents reliably. Fractional -30 pulses can be
         // animated without being committed by the list after the 2026-07 game update.
@@ -2647,7 +2681,40 @@ public sealed class ScanController
         var effectiveScrollTickDelayMs = EffectiveScrollTickDelay(profile, scrollTickDelayOverrideMs);
         var pollMilliseconds = Math.Max(10, profile.LoadPollMs);
         window.MoveCursor(neutralPoint);
-        var beforeViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
+        anchor ??= ResolveSelectionAnchor(new ScanOptions(), profile, scanLog);
+        var anchorTracking = !upward && anchor.Enabled;
+        var beforeViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects, anchorTracking ? profile : null);
+        if (anchorTracking && (anchor.ForceActive || beforeViewport.Anchor is not { Unique: true, Row: >= 2 and <= 3 }))
+        {
+            var originalGrid = beforeViewport.Grid;
+            var offset = profile.Point("driveDiscOffset");
+            var step = profile.Point("driveDiscStep");
+            window.LeftClick(window.ToScreenPoint(new PointF(offset.X + step.X * profile.VisibleColumns, offset.Y + step.Y * 3)));
+            await Task.Delay(Math.Max(80, profile.ClickDelayMs), token);
+            window.MoveCursor(neutralPoint);
+            await WaitForListStableAsync(window, profile, listGridRect, scanLog, token);
+            beforeViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects, profile);
+            scanLog.WriteEvent("WHEEL_ANCHOR_ARM", $"fromTop={visibleTopLogicalRow}, cell=3:{profile.VisibleColumns}, {beforeViewport.Anchor?.Describe()}");
+            scanLog.WriteEvent("WHEEL_ANCHOR_ARM_GRID", $"distance={SignatureDistance(originalGrid, beforeViewport.Grid)}");
+            if (beforeViewport.Anchor is { Unique: true } armed
+                && (armed.Row != 3 || armed.Column != profile.VisibleColumns))
+            {
+                scanLog.WriteEvent("WHEEL_ANCHOR_CONFLICT", $"fromTop={visibleTopLogicalRow}, reason=active_anchor_target_mismatch, {armed.Describe()}");
+                return ScrollRowsResult.Fail("active anchor click did not select the expected cell; viewport may have moved", retryable: false);
+            }
+        }
+        var baselineAnchor = beforeViewport.Anchor;
+        var anchorUsable = anchorTracking && baselineAnchor is { Unique: true, Row: >= 2 and <= 3 };
+        var anchorActive = anchorUsable && anchor.Verify;
+        if (anchorTracking)
+        {
+            scanLog.WriteEvent("WHEEL_ANCHOR_BASELINE", $"fromTop={visibleTopLogicalRow}, usable={anchorUsable}, {baselineAnchor?.Describe()}");
+            if (!anchorUsable)
+            {
+                scanLog.WriteEvent("WHEEL_ANCHOR_FALLBACK", $"fromTop={visibleTopLogicalRow}, reason=baseline_unavailable, mode={anchor.Mode}");
+                if (anchor.Mode == SelectionAnchorMode.Strict) return ScrollRowsResult.Fail("selection anchor unavailable before wheel input", retryable: false);
+            }
+        }
         var beforeGrid = beforeViewport.Grid;
         var beforeRows = beforeViewport.Rows;
         var beforeScrollbar = CaptureScrollbarThumbProbe(window, profile);
@@ -2696,7 +2763,7 @@ public sealed class ScanController
                 }
 
                 var signatureWatch = Stopwatch.StartNew();
-                latestViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
+                latestViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects, anchorTracking ? profile : null, anchorUsable ? baselineAnchor!.Column : null);
                 signatureWatch.Stop();
                 signatureMilliseconds += signatureWatch.Elapsed.TotalMilliseconds;
                 var movedDistance = SignatureDistance(beforeGrid, latestViewport.Grid);
@@ -2711,7 +2778,7 @@ public sealed class ScanController
                     verification.TwoRowScore,
                     movedDistance);
                 var structuralObservation = new RowScrollObservation(structuralEvidence, frameDistance);
-                var scrollbar = structuralObservation.Stable || sample == 1
+                var scrollbar = !anchorActive && (structuralObservation.Stable || sample == 1)
                     ? CaptureScrollbarThumbProbe(window, profile)
                     : default;
                 var directionalScrollbarDelta = DirectionalScrollbarDelta(beforeScrollbar, scrollbar, upward);
@@ -2732,7 +2799,13 @@ public sealed class ScanController
                     };
                 }
 
-                var observation = new RowScrollObservation(evidence, frameDistance, directionalScrollbarDelta);
+                var anchorStructuralEvidence = anchorUsable ? EvaluateAnchorStructure(beforeViewport, latestViewport) : structuralEvidence;
+                if (anchorActive) evidence = SelectionAnchorAdvancePolicy.Reconcile(
+                    anchorStructuralEvidence, latestViewport.Anchor!, baselineAnchor!.Row!.Value);
+
+                var observation = new RowScrollObservation(evidence, frameDistance, anchorActive ? null : directionalScrollbarDelta,
+                    anchorActive && latestViewport.Anchor!.Unique ? baselineAnchor!.Row - latestViewport.Anchor.Row : null);
+                if (anchorTracking) scanLog.WriteEvent("WHEEL_ANCHOR_SAMPLE", $"fromTop={visibleTopLogicalRow}, phase={phase}, {latestViewport.Anchor?.Describe()}, structuralDecision={anchorStructuralEvidence.Decision}, structuralStrong={anchorStructuralEvidence.Strong}, legacyStructuralDecision={structuralEvidence.Decision}");
                 var sampleLimit = phase == RowScrollPhase.FastProbe
                     ? RowScrollCoordinator.MaximumSamplesPerTick.ToString()
                     : "settle";
@@ -2770,7 +2843,11 @@ public sealed class ScanController
         var settleTimeoutProvisional = RowScrollReleasePolicy.TryCreateSettleTimeoutProvisional(
             result,
             out var provisionalEvidence);
-        var provisionalAccepted = result.Accepted || settleTimeoutProvisional;
+        var anchorRescue = anchorActive && latestViewport.Anchor is { Unique: true }
+            && baselineAnchor!.Row - latestViewport.Anchor.Row == 1;
+        var provisionalAccepted = result.Accepted || settleTimeoutProvisional || anchorRescue;
+        if (anchorRescue && !result.Accepted && !settleTimeoutProvisional)
+            scanLog.WriteEvent("WHEEL_ANCHOR_RESCUE", $"fromTop={visibleTopLogicalRow}, reason={result.Evidence.Reason}");
         if (settleTimeoutProvisional)
         {
             scanLog.WriteEvent("ROW_SCROLL_SETTLE_RELEASE_VERIFY", $"direction={direction}, fromTop={visibleTopLogicalRow}, requestedToTop={targetTop}, tick={result.Tick}/{maxTicks}, sample={result.Sample}, provisionalDecision={provisionalEvidence.Decision}, bestRows={provisionalEvidence.BestRows}, bestScore={provisionalEvidence.BestScore}, secondScore={provisionalEvidence.SecondScore}, margin={provisionalEvidence.Margin}, movedDistance={provisionalEvidence.MovedDistance}, frameDistance={result.Observation.FrameDistance}, reason={provisionalEvidence.Reason}");
@@ -2778,17 +2855,27 @@ public sealed class ScanController
 
         var finalObservation = result.Observation;
         var releaseConfirmed = false;
+        var releaseLegacyEvidence = result.Evidence;
+        var legacyReleaseStable = 0;
+        var anchorReleaseStable = 0;
+        var anchorReleaseTracker = new SelectionAnchorReleaseTracker();
+        int? releasedAnchorRows = null;
+        RowAdvanceDecision? legacyReleaseDecision = null;
+        var releaseAnchorConflict = false;
+        var releaseFallback = false;
+        var bottomStableFrames = 0;
         window.MoveCursor(neutralPoint);
-        if (provisionalAccepted)
+        if (provisionalAccepted || anchorTracking)
         {
             RowAdvanceDecision? releaseDecision = null;
             var releaseStableFrames = 0;
             var previousReleaseGrid = latestViewport.Grid;
-            for (var releaseSample = 1; releaseSample <= VerifiedScrollReleaseSamples; releaseSample++)
+            var releaseLimit = anchorTracking ? anchor.Policy.ReleaseMaxSamples : VerifiedScrollReleaseSamples;
+            for (var releaseSample = 1; releaseSample <= releaseLimit; releaseSample++)
             {
                 await Task.Delay(pollMilliseconds, token);
                 var signatureWatch = Stopwatch.StartNew();
-                var releasedViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects);
+                var releasedViewport = CaptureViewportSignatures(window, listGridRect, rowSignatureRects, anchorTracking ? profile : null, anchorUsable ? baselineAnchor!.Column : null);
                 signatureWatch.Stop();
                 signatureMilliseconds += signatureWatch.Elapsed.TotalMilliseconds;
                 var movedDistance = SignatureDistance(beforeGrid, releasedViewport.Grid);
@@ -2804,11 +2891,31 @@ public sealed class ScanController
                     verification.TwoRowScore,
                     movedDistance);
                 var releaseScrollbar = CaptureScrollbarThumbProbe(window, profile);
+                var trackBottom = window.ToScreenPoint(profile.Point("scrollBarBottom")).Y;
+                bottomStableFrames = releaseScrollbar.Found && releaseScrollbar.EndY >= trackBottom - Math.Max(2, window.ClientScreenRect.Height / 270)
+                    ? bottomStableFrames + 1 : 0;
                 var releaseScrollbarDelta = DirectionalScrollbarDelta(beforeScrollbar, releaseScrollbar, upward);
                 var releaseEvidence = releaseScrollbarDelta is int releasePixelDelta
                     ? RowAdvanceEvaluator.ReconcileScrollbarPosition(releaseStructuralEvidence, releasePixelDelta, scrollbarPixelsPerRow)
                     : releaseStructuralEvidence;
-                finalObservation = new RowScrollObservation(releaseEvidence, frameDistance, releaseScrollbarDelta);
+                releaseLegacyEvidence = releaseEvidence;
+                var stableFrame = frameDistance <= RowScrollCoordinator.StableFrameTolerance;
+                if (stableFrame && releaseEvidence.Decision is RowAdvanceDecision.OneRow or RowAdvanceDecision.TwoRows)
+                    legacyReleaseStable = legacyReleaseDecision == releaseEvidence.Decision ? legacyReleaseStable + 1 : 1;
+                else legacyReleaseStable = 0;
+                legacyReleaseDecision = releaseEvidence.Decision;
+                if (anchorUsable)
+                {
+                    var observed = releasedViewport.Anchor!;
+                    var anchored = SelectionAnchorAdvancePolicy.Reconcile(EvaluateAnchorStructure(beforeViewport, releasedViewport), observed, baselineAnchor!.Row!.Value);
+                    anchorReleaseTracker.Observe(observed, anchored, stableFrame);
+                    anchorReleaseStable = anchorReleaseTracker.StableFrames;
+                    releasedAnchorRows = observed.Unique ? baselineAnchor.Row - observed.Row : null;
+                    releaseAnchorConflict = anchored.Reason is "anchor_structure_conflict" or "anchor_grid_movement_conflict" or "anchor_impossible_shift";
+                    scanLog.WriteEvent("WHEEL_ANCHOR_RELEASE", $"fromTop={visibleTopLogicalRow}, sample={releaseSample}, {observed.Describe()}, anchorRowsAdvanced={releasedAnchorRows?.ToString() ?? "unknown"}, stableFrames={anchorReleaseStable}, decision={anchored.Decision}, reason={anchored.Reason}");
+                    if (anchorActive) releaseEvidence = anchored;
+                }
+                finalObservation = new RowScrollObservation(releaseEvidence, frameDistance, anchorActive ? null : releaseScrollbarDelta, releasedAnchorRows);
 
                 if (finalObservation.Stable
                     && releaseEvidence.Decision is RowAdvanceDecision.OneRow or RowAdvanceDecision.TwoRows)
@@ -2829,18 +2936,47 @@ public sealed class ScanController
                     releaseStableFrames = 0;
                 }
 
-                scanLog.WriteEvent("ROW_SCROLL_RELEASE_EVIDENCE", $"direction={direction}, fromTop={visibleTopLogicalRow}, requestedToTop={targetTop}, sample={releaseSample}/{VerifiedScrollReleaseSamples}, provisionalDecision={provisionalEvidence.Decision}, decision={releaseEvidence.Decision}, bestRows={releaseEvidence.BestRows}, bestScore={releaseEvidence.BestScore}, secondScore={releaseEvidence.SecondScore}, margin={releaseEvidence.Margin}, movedDistance={releaseEvidence.MovedDistance}, frameDistance={frameDistance}, stable={finalObservation.Stable}, stableMatches={releaseStableFrames}/{VerifiedScrollReleaseStableFrames}, scrollbarFound={releaseScrollbar.Found}, scrollbarCenter={releaseScrollbar.CenterY}, directionalScrollbarDelta={releaseScrollbarDelta}, scrollbarPixelsPerRow={scrollbarPixelsPerRow:F3}, scores=0:{releaseEvidence.NoMoveScore}|1:{releaseEvidence.OneRowScore}|2:{releaseEvidence.TwoRowScore}, reason={releaseEvidence.Reason}");
-                if (releaseStableFrames >= VerifiedScrollReleaseStableFrames)
+                scanLog.WriteEvent("ROW_SCROLL_RELEASE_EVIDENCE", $"direction={direction}, fromTop={visibleTopLogicalRow}, requestedToTop={targetTop}, sample={releaseSample}/{releaseLimit}, provisionalDecision={provisionalEvidence.Decision}, decision={releaseEvidence.Decision}, bestRows={releaseEvidence.BestRows}, bestScore={releaseEvidence.BestScore}, secondScore={releaseEvidence.SecondScore}, margin={releaseEvidence.Margin}, movedDistance={releaseEvidence.MovedDistance}, frameDistance={frameDistance}, stable={finalObservation.Stable}, stableMatches={releaseStableFrames}/{VerifiedScrollReleaseStableFrames}, scrollbarFound={releaseScrollbar.Found}, scrollbarCenter={releaseScrollbar.CenterY}, directionalScrollbarDelta={releaseScrollbarDelta}, scrollbarPixelsPerRow={scrollbarPixelsPerRow:F3}, scores=0:{releaseEvidence.NoMoveScore}|1:{releaseEvidence.OneRowScore}|2:{releaseEvidence.TwoRowScore}, reason={releaseEvidence.Reason}");
+                if (releaseStableFrames >= VerifiedScrollReleaseStableFrames
+                    && (!anchorActive || anchorReleaseStable >= anchor.Policy.RequiredStableFrames))
                 {
                     releaseConfirmed = true;
                     break;
                 }
             }
+            if (anchorActive && !releaseConfirmed && !releaseAnchorConflict
+                && latestViewport.Anchor is { Unique: false } && anchor.Mode == SelectionAnchorMode.Verify
+                && legacyReleaseStable >= VerifiedScrollReleaseStableFrames)
+            {
+                // Re-evaluate the same release frames. No new gesture or baseline is permitted here.
+                releaseFallback = true;
+                releaseConfirmed = true;
+                provisionalAccepted = true;
+                finalObservation = finalObservation with { Evidence = releaseLegacyEvidence };
+                scanLog.WriteEvent("WHEEL_ANCHOR_FALLBACK", $"fromTop={visibleTopLogicalRow}, reason=release_anchor_unavailable, legacyDecision={releaseLegacyEvidence.Decision}");
+            }
+        }
+
+        if (anchor.Mode == SelectionAnchorMode.Shadow && anchorUsable)
+        {
+            var anchorReady = anchorReleaseStable >= anchor.Policy.RequiredStableFrames;
+            var legacyRows = provisionalAccepted && releaseConfirmed ? finalObservation.Evidence.AcceptedRows : null;
+            var agreement = anchorReady && legacyRows.HasValue ? (legacyRows == releasedAnchorRows ? "true" : "false") : "na";
+            scanLog.WriteEvent("WHEEL_ANCHOR_SHADOW", $"fromTop={visibleTopLogicalRow}, agreement={agreement}, anchorRows={releasedAnchorRows?.ToString() ?? "unknown"}, legacyRows={legacyRows?.ToString() ?? "unknown"}, wouldRescue={anchorReady && releasedAnchorRows == 1 && !legacyRows.HasValue}");
+        }
+        if (anchorActive && releaseAnchorConflict)
+            scanLog.WriteEvent("WHEEL_ANCHOR_CONFLICT", $"fromTop={visibleTopLogicalRow}, reason={finalObservation.Evidence.Reason}");
+        if (anchorActive && result.Outcome == RowScrollCoordinatorOutcome.NoMovementStop
+            && SelectionAnchorAdvancePolicy.IsObservedBottom(result.Tick, anchorReleaseStable, releasedAnchorRows, bottomStableFrames, anchor.Policy.RequiredStableFrames))
+        {
+            scanLog.WriteEvent("WHEEL_ANCHOR_BOTTOM_CONFIRMED", $"fromTop={visibleTopLogicalRow}, ticks={result.Tick}, anchorRows=0, bottomStableFrames={bottomStableFrames}, evidence=anchor_zero_and_thumb_at_track_end");
+            return ScrollRowsResult.Fail("observed bottom confirmed by zero anchor movement and track end", retryable: false,
+                evidence: finalObservation.Evidence, diagnosticDetails: new Dictionary<string, object?> { ["observedBottom"] = true });
         }
 
         totalWatch.Stop();
 
-        var evidence = result.Outcome == RowScrollCoordinatorOutcome.NoMovementStop
+        var evidence = result.Outcome == RowScrollCoordinatorOutcome.NoMovementStop && !releaseConfirmed
             ? result.Evidence with { Reason = "scroll_no_movement_after_max_ticks" }
             : finalObservation.Evidence;
         if (provisionalAccepted && !releaseConfirmed)
@@ -2926,6 +3062,8 @@ public sealed class ScanController
         var estimatedTop = upward
             ? Math.Max(1, visibleTopLogicalRow - rowsAdvanced)
             : Math.Min(maxVisibleTop, visibleTopLogicalRow + rowsAdvanced);
+        if (anchorTracking && anchor.Verify)
+            scanLog.WriteEvent("WHEEL_ANCHOR_DECISION", $"fromTop={visibleTopLogicalRow}, mode={anchor.Mode}, rowsAdvanced={rowsAdvanced}, source={(anchorActive && !releaseFallback ? "anchor" : "fallback")}, reason={evidence.Reason}");
         scanLog.WriteEvent(doneEvent, $"direction={direction}, phase={observationPhase}, fromTop={visibleTopLogicalRow}, estimatedToTop={estimatedTop}, requestedToTop={targetTop}, rowsAdvanced={rowsAdvanced}, tick={result.Tick}/{maxTicks}, sample={result.Sample}, settleSamples={result.SettleSamples}, settleElapsedMs={result.SettleElapsedMilliseconds:F1}, decision={evidence.Decision}, bestScore={evidence.BestScore}, margin={evidence.Margin}, movedDistance={evidence.MovedDistance}, frameDistance={finalObservation.FrameDistance}, reason={evidence.Reason}");
         return ScrollRowsResult.Ok(
             $"confirmed {direction} movement of {rowsAdvanced} row(s) from {visibleTopLogicalRow}",
@@ -2997,19 +3135,26 @@ public sealed class ScanController
         return signatures;
     }
 
-    private static ViewportSignatures CaptureViewportSignatures(GameWindow window, Rectangle listGridRect, IReadOnlyList<Rectangle> rowSignatureRects)
+    private static ViewportSignatures CaptureViewportSignatures(GameWindow window, Rectangle listGridRect, IReadOnlyList<Rectangle> rowSignatureRects,
+        ScanProfile? anchorProfile = null, int? anchorColumn = null)
     {
-        using var image = window.CaptureFrame(listGridRect);
+        var bounds = anchorProfile is null ? listGridRect : Rectangle.Intersect(Rectangle.Inflate(listGridRect,
+            Math.Max(1, (int)Math.Ceiling(anchorProfile.VisualProbes.SelectionAnchor.CaptureInflatePixels * window.ClientScreenRect.Width / 1920.0)), 0), window.ClientScreenRect);
+        using var image = window.CaptureFrame(bounds);
         var rows = new RowVisualSignature[rowSignatureRects.Count];
         for (var i = 0; i < rows.Length; i++)
         {
             var rect = rowSignatureRects[i];
-            rows[i] = RowVisualSignatureExtractor.Create(image, new Rectangle(rect.Left - listGridRect.Left, rect.Top - listGridRect.Top, rect.Width, rect.Height));
+            rows[i] = RowVisualSignatureExtractor.Create(image, new Rectangle(rect.Left - bounds.Left, rect.Top - bounds.Top, rect.Width, rect.Height));
         }
 
         return new ViewportSignatures(
-            CreateSignature(image, new Rectangle(System.Drawing.Point.Empty, image.Size)),
-            rows);
+            CreateSignature(image, new Rectangle(listGridRect.X - bounds.X, listGridRect.Y - bounds.Y, listGridRect.Width, listGridRect.Height)),
+            rows,
+            anchorProfile is null ? null : SelectionAnchorDetector.FindUnique(image,
+                SelectionAnchorGeometry.FromProfile(anchorProfile, window.ClientScreenRect, bounds), anchorProfile.VisualProbes.SelectionAnchor, anchorColumn),
+            anchorProfile is null ? null : CaptureAnchorRowSignatures(image,
+                SelectionAnchorGeometry.FromProfile(anchorProfile, window.ClientScreenRect, bounds), listGridRect.X - bounds.X, listGridRect.Width));
     }
 
     private static RowScrollVerification VerifyOneRowDown(IReadOnlyList<RowVisualSignature> beforeRows, IReadOnlyList<RowVisualSignature> afterRows)
@@ -5019,7 +5164,7 @@ public sealed class ScanController
                             capture.Index,
                             export,
                             capture.TargetVerificationKind,
-                            BuildOcrDetail(capture, ocr)));
+                            BuildOcrDetail(capture, ocr), capture.Position));
                     }
                     catch (Exception ex)
                     {
@@ -5037,7 +5182,7 @@ public sealed class ScanController
                                     capture.Index,
                                     retryExport,
                                     capture.TargetVerificationKind,
-                                    BuildOcrDetail(capture, retryOcr)));
+                                    BuildOcrDetail(capture, retryOcr), capture.Position));
                                 continue;
                             }
                             catch (Exception retryException)
@@ -5171,7 +5316,7 @@ public sealed class ScanController
                     return nextIndex;
                 }
 
-                if (!duplicateGuard.Observe(result.Export, result.TargetVerificationKind, out var duplicateReason))
+                if (!duplicateGuard.Observe(result.Export, result.TargetVerificationKind, out var duplicateReason, result.Position))
                 {
                     Interlocked.CompareExchange(ref counters.StopAfterIndex, result.Index, 0);
                     Interlocked.CompareExchange(ref counters.StopReason, "duplicate_guard", null);
@@ -5184,6 +5329,8 @@ public sealed class ScanController
                 scanLog.WriteEvent(
                     "ITEM_TARGET_VERIFICATION",
                     $"index={result.Index}, kind={result.TargetVerificationKind}");
+                if (result.Position is { } position)
+                    scanLog.WriteEvent("ITEM_POSITION_VERIFIED", $"index={result.Index}, logicalRow={position.Row}, column={position.Column}, kind={result.TargetVerificationKind}");
 
                 results.Add(result.Export);
                 Interlocked.Increment(ref counters.Completed);
@@ -5420,19 +5567,22 @@ public sealed class ScanController
         public Bitmap Image { get; }
         public CvRect[] Rois { get; }
         public TargetVerificationKind TargetVerificationKind { get; }
+        public VerifiedInventoryPosition? Position { get; }
 
         public DiscCapture(
             int index,
             string rarity,
             Bitmap image,
             CvRect[] rois,
-            TargetVerificationKind targetVerificationKind)
+            TargetVerificationKind targetVerificationKind,
+            VerifiedInventoryPosition? position = null)
         {
             Index = index;
             Rarity = rarity;
             Image = image;
             Rois = rois;
             TargetVerificationKind = targetVerificationKind;
+            Position = position;
         }
 
         public void Dispose()
@@ -5458,6 +5608,8 @@ public sealed class ScanController
         int EffectiveScrollTickDelayMs)
     {
         public string VisualProfileId { get; set; } = "";
+        public SelectionAnchorSettings Anchor { get; set; } = new(SelectionAnchorMode.Off, "default", new(), false);
+        public VerifiedInventoryTraversal? Positions { get; set; }
     }
 
     private static bool NeedsNormalizedOcrRetry(IReadOnlyList<OcrResult> ocr)
@@ -6019,15 +6171,17 @@ public sealed class ScanController
         DriveDiscExport? Export,
         TargetVerificationKind TargetVerificationKind,
         string? ErrorDetail,
-        string? ErrorMessage)
+        string? ErrorMessage,
+        VerifiedInventoryPosition? Position = null)
     {
         public static OcrWorkResult Success(
             int index,
             DriveDiscExport export,
             TargetVerificationKind targetVerificationKind,
-            string? detail = null)
+            string? detail = null,
+            VerifiedInventoryPosition? position = null)
         {
-            return new OcrWorkResult(index, export, targetVerificationKind, detail, null);
+            return new OcrWorkResult(index, export, targetVerificationKind, detail, null, position);
         }
 
         public static OcrWorkResult Failure(
@@ -6071,11 +6225,25 @@ public sealed class ScanController
     {
         private readonly object _sync = new();
         private readonly StreamWriter _writer;
+        private readonly string _directory;
         private int _eventId;
 
         public ScanLog(string path)
         {
+            _directory = Path.GetDirectoryName(Path.GetFullPath(path))!;
             _writer = new StreamWriter(path, append: false) { AutoFlush = false };
+        }
+
+        public void SaveNavigationFailure(GameWindow window, Rectangle grid, int top)
+        {
+            try
+            {
+                var name = $"navigation-failure-top-{top}.png";
+                using var image = window.Capture(grid);
+                image.Save(Path.Combine(_directory, name), System.Drawing.Imaging.ImageFormat.Png);
+                WriteEvent("NAVIGATION_FAILURE_FRAME", $"file={name}, visibleTopLogicalRow={top}");
+            }
+            catch (Exception ex) { WriteEvent("NAVIGATION_FAILURE_FRAME_UNAVAILABLE", $"reason={ex.GetType().Name}"); }
         }
 
         public void Write(string message)
@@ -6107,10 +6275,11 @@ public sealed class ScanController
         }
     }
 
-    private sealed class DuplicateGuard
+    internal sealed class DuplicateGuard
     {
         private readonly int _threshold;
         private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
+        private readonly HashSet<VerifiedInventoryPosition> _seenPositions = new();
         private string? _previousFingerprint;
         private int _consecutiveIdenticalCount;
         private int _consecutiveSeenDuplicateCount;
@@ -6123,10 +6292,29 @@ public sealed class ScanController
         public bool Observe(
             DriveDiscExport item,
             TargetVerificationKind targetVerificationKind,
-            out string? reason)
+            out string? reason,
+            VerifiedInventoryPosition? position = null)
         {
             reason = null;
             var fingerprint = Fingerprint(item);
+            if (position is { } verified)
+            {
+                if (!Enum.IsDefined(targetVerificationKind) || verified.Row < 1 || verified.Column < 1)
+                {
+                    reason = "目标切换或格子位置证据无效。";
+                    return false;
+                }
+                if (!_seenPositions.Add(verified))
+                {
+                    reason = $"同一已验证格子被重复读取：逻辑行 {verified.Row}，列 {verified.Column}。";
+                    return false;
+                }
+                _previousFingerprint = fingerprint;
+                _seen.Add(fingerprint);
+                _consecutiveIdenticalCount = 0;
+                _consecutiveSeenDuplicateCount = 0;
+                return true;
+            }
             var adjacentIdentical = _previousFingerprint is not null
                 && string.Equals(_previousFingerprint, fingerprint, StringComparison.Ordinal);
             if (adjacentIdentical)
@@ -6427,7 +6615,8 @@ public sealed class ScanController
         int[] Samples,
         bool EmphasizeLocalizedChanges = false);
 
-    private readonly record struct ViewportSignatures(ImageSignature Grid, RowVisualSignature[] Rows);
+    private readonly record struct ViewportSignatures(ImageSignature Grid, RowVisualSignature[] Rows, SelectionAnchorObservation? Anchor = null,
+        RowVisualSignature[]? AnchorRows = null);
 
     private readonly record struct SafeBandMoveResult(int VisibleTopLogicalRow, bool Scrolled);
 

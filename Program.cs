@@ -9,7 +9,7 @@ using ZZZScannerNext.Scanning;
 using ZZZScannerNext.Ui;
 using ZZZScannerNext.WebSocket;
 
-static class Program
+static partial class Program
 {
     [STAThread]
     static int Main(string[] args)
@@ -39,6 +39,11 @@ static class Program
         if (args.Length == 0)
         {
             return false;
+        }
+
+        if (TryRunSelectionAnchorCommand(args, out exitCode))
+        {
+            return true;
         }
 
         if (string.Equals(args[0], "--scan-benchmark", StringComparison.OrdinalIgnoreCase))
@@ -625,6 +630,10 @@ static class Program
         }
 
         var rowAdvanceMode = ReadOption(args, "--row-advance-mode");
+        var selectionAnchorMode = ReadOption(args, "--selection-anchor");
+        if (!string.IsNullOrWhiteSpace(selectionAnchorMode)) command.SelectionAnchorMode = SelectionAnchorModeResolver.Parse(selectionAnchorMode);
+        command.AnchorForceActive |= args.Contains("--anchor-force-active");
+        if (TryReadIntOption(args, "--debug-inventory-count-delta", out var inventoryDelta)) command.DebugInventoryCountDelta = Math.Clamp(inventoryDelta, 0, 999);
         if (!string.IsNullOrWhiteSpace(rowAdvanceMode))
         {
             if (TryParseRowAdvanceMode(rowAdvanceMode, out var parsedRowAdvanceMode))
@@ -910,6 +919,9 @@ static class Program
             ProfileName = command.ProfileName,
             TraversalMode = command.TraversalMode,
             RowAdvanceMode = command.RowAdvanceMode,
+            SelectionAnchorMode = command.SelectionAnchorMode,
+            AnchorForceActive = command.AnchorForceActive,
+            DebugInventoryCountDelta = command.DebugInventoryCountDelta,
             MaxItems = Math.Max(0, command.MaxItems),
             BringToFront = command.BringToFront,
             StopAtNonLevel15 = command.StopAtNonLevel15,
