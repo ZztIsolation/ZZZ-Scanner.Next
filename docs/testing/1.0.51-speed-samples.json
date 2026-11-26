@@ -1,0 +1,28 @@
+{
+  "metric": "ScanBenchmark current.duration_sec",
+  "unit": "seconds",
+  "items_per_run": 200,
+  "current_date": "2026-11-26",
+  "current_environment": {"client": "1920x1080", "dpi": 96, "inventory_count": 990, "fixed_top_start": true},
+  "controlled_current": {
+    "legacy_wheel_off_dxgi_fast": [60.181, 59.913],
+    "selection_anchor_verify_dxgi_fast": [61.029, 60.501, 60.143, 60.351],
+    "legacy_wheel_off_dxgi_request_with_gdi_fallback": [60.721],
+    "selection_anchor_verify_dxgi_request_with_gdi_fallback": [68.983, 62.437],
+    "selection_anchor_verify_gdi_normal": [83.864, 82.218],
+    "force_active_anchor_dxgi_fast_diagnostic_only": [63.226]
+  },
+  "historical_1_0_50": {
+    "date": "2026-11-05",
+    "stage": "phase experiment before the November 7 hardening",
+    "dxgi_fast": [55.479, 54.763, 54.947],
+    "gdi_normal": [88.016, 90.746, 89.587],
+    "sources": ["Experiments/res-test-20261105/bench-phase-dxgi-fast-{1,2,3}.log", "Experiments/res-test-20261105/bench-phase-gdi-nonfast-{1,2,3}.log"]
+  },
+  "exclusions": [
+    "baseline-dxgi-2 and candidate-dxgi-4: failed; user reported possible mouse or wheel input, retained and separately rerun as controlled cases",
+    "GDI fallback runs excluded from pure DXGI comparison; fallback time within each run differs",
+    "Forced active anchor run excluded from the ordinary performance target"
+  ],
+  "scope": "Historical samples are not a same-day A/B against 1.0.51. Values do not measure OCR inference alone. Raw inventory exports and personal runtime logs are not included."
+}

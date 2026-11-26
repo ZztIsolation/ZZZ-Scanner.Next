@@ -4,6 +4,8 @@
 
 基于 `scanner-1.0.49` / `ff90891`，工作分支 `test/1.0.51`；没有合并或 cherry-pick 1.0.50。Scanner 1.0.51、Helper 1.3.1、协议 v4。以下为本机真机及本地构建结果，不代表 GitHub CI 或正式发布。
 
+跨版本速度结论、同日对照与历史样本边界见 [速度对比](PERFORMANCE.md)。
+
 - 回归 **75/75**；Scanner、Helper Release 构建均 0 warning / 0 error。
 - 实测库存 **990 件**、DPI 96。三档分辨率的全量导出内容及顺序逐项一致，missing=extra=0。
 - 受控的最终 200 件矩阵：DXGI 请求 6 轮、GDI 2 轮，**8/8** 扫描与 benchmark correctness 通过，全部与全量基准的前 200 件一致；强制主动锚点另外 1/1 通过、20 次推进均主动建立锚点。
