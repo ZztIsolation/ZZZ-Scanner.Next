@@ -160,6 +160,12 @@ public static class ScanBenchmark
         Write("suite", "scan_count", reports.Count);
         Write("suite", "correctness_pass_count", reports.Count(IsCorrectnessPass));
         Write("suite", "correctness_fail_count", correctnessFailCount);
+        Write("suite", "wheel_anchor_baseline_sum", reports.Sum(report => report.WheelAnchorBaselineCount));
+        Write("suite", "wheel_anchor_one_row_sum", reports.Sum(report => report.WheelAnchorOneRowCount));
+        Write("suite", "wheel_anchor_fallback_sum", reports.Sum(report => report.WheelAnchorFallbackCount));
+        Write("suite", "wheel_anchor_conflict_sum", reports.Sum(report => report.WheelAnchorConflictCount));
+        Write("suite", "wheel_anchor_arm_sum", reports.Sum(report => report.WheelAnchorArmCount));
+        Write("suite", "wheel_anchor_rescue_sum", reports.Sum(report => report.WheelAnchorRescueCount));
         WriteSuiteStats("completed_per_sec", completedPerSecondValues);
         WriteSuiteStats("panel_wait_ms_avg", reports.Select(report => report.PanelWait.Average));
         WriteSuiteStats("post_scroll_first_panel_wait_ms_avg", reports.Select(report => report.PostScrollFirstPanelWait.Average));
@@ -260,7 +266,7 @@ public static class ScanBenchmark
                 return index;
             })
             .ToHashSet();
-        var exportStats = ReadExportStats(exportFile, verifiedIdenticalNeighborIndices);
+        var exportStats = ReadExportStats(exportFile, verifiedIdenticalNeighborIndices, ReadAnchorVerifiedPositions(lines, events));
         var invalidRoiTimeoutCount = events.Count(item => item.Kind == "PANEL_CAPTURE_TIMEOUT"
             && (item.Detail.Contains("acceptGateReason=required_core_missing", StringComparison.OrdinalIgnoreCase)
                 || item.Detail.Contains("acceptGateReason=incomplete_substat_pair", StringComparison.OrdinalIgnoreCase)
@@ -307,10 +313,29 @@ public static class ScanBenchmark
             CanonicalCropDecisionCount = CountRowsWithColumn(fastAssistRows, "canonical_crop_fallback"),
             Traversal = traversal,
             RowAdvanceMode = ParseRowAdvanceMode(lines),
+            SelectionAnchorMode = lines.Select(line => Regex.Match(line, @"SelectionAnchorMode=(\w+)")).FirstOrDefault(match => match.Success)?.Groups[1].Value ?? "Off",
+            WheelAnchorConflictCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_CONFLICT"),
+            WheelAnchorFallbackCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_FALLBACK"),
+            WheelAnchorDisagreementCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_SHADOW" && x.Detail.Contains("agreement=false", StringComparison.Ordinal)),
+            WheelAnchorAcceptedCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_DECISION" && x.Detail.Contains("rowsAdvanced=1", StringComparison.Ordinal)),
+            WheelAnchorOneRowCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_DECISION" && x.Detail.Contains("source=anchor", StringComparison.Ordinal)),
+            WheelAnchorArmCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_ARM"),
+            WheelAnchorRescueCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_RESCUE"),
+            WheelAnchorBaselineCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_BASELINE"),
+            WheelAnchorBottomCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_BOTTOM_CONFIRMED"),
+            WheelAnchorUnavailableCount = events.Count(x => x.Kind == "WHEEL_ANCHOR_BASELINE" && x.Detail.Contains("usable=False", StringComparison.Ordinal)),
+            SelectionAnchorPolicyInvalid = events.Any(x => x.Kind == "SELECTION_ANCHOR_IGNORED" && x.Detail.Contains("invalid_selection_anchor_policy", StringComparison.Ordinal)),
+            WheelAnchorDetect = Stats.From(events.Where(x => x.Kind is "WHEEL_ANCHOR_BASELINE" or "WHEEL_ANCHOR_SAMPLE" or "WHEEL_ANCHOR_RELEASE")
+                .Select(x => ReadEventDouble(x, "detectMs")).Where(x => x.HasValue).Select(x => x!.Value)),
+            WheelAnchorReleaseSamples = Stats.From(events.Where(x => x.Kind == "WHEEL_ANCHOR_RELEASE")
+                .GroupBy(x => TryReadEventInt(x, "fromTop", out var top) ? top : -1)
+                .Select(group => group.Max(x => ReadEventDouble(x, "sample") ?? 0))),
+            RowScrollDoneCount = events.Count(x => x.Kind == "ROW_SCROLL_DONE"),
             ExportItemCount = exportStats.ItemCount,
             ExportDuplicateGroupCount = exportStats.DuplicateGroupCount,
             ExportDuplicateItemCount = exportStats.DuplicateItemCount,
             ExportVerifiedAdjacentDuplicateCount = exportStats.VerifiedAdjacentDuplicateCount,
+            ExportVerifiedPositionDuplicateCount = exportStats.VerifiedPositionDuplicateCount,
             ExportUnverifiedDuplicateCount = exportStats.UnverifiedDuplicateCount,
             SlotOutOfRangeCount = exportStats.SlotOutOfRangeCount,
             SlotMainStatViolationCount = exportStats.SlotMainStatViolationCount,
@@ -549,6 +574,13 @@ public static class ScanBenchmark
             RegexOptions.IgnoreCase);
         value = match.Success ? ParseInt(match.Groups["value"].Value) : 0;
         return match.Success;
+    }
+
+    private static double? ReadEventDouble(ScanEvent item, string key)
+    {
+        var match = Regex.Match(item.Detail, $@"(?:^|,\s*){Regex.Escape(key)}=(-?[\d.]+)(?:,|$)");
+        return match.Success && double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+            ? value : null;
     }
 
     private static List<CellTiming> ParseCellTimings(IEnumerable<string> lines)
@@ -953,11 +985,74 @@ public static class ScanBenchmark
         return null;
     }
 
-    private static ExportStats ReadExportStats(string exportFile, IReadOnlySet<int> verifiedIdenticalNeighborIndices)
+    private static IReadOnlyDictionary<int, (int Row, int Column)> ReadAnchorVerifiedPositions(string[] lines, IReadOnlyList<ScanEvent> events)
+    {
+        var empty = new Dictionary<int, (int Row, int Column)>();
+        if (!lines.Any(line => Regex.IsMatch(line, @"SelectionAnchorMode=(Verify|Strict)\b"))
+            || events.Any(e => e.Kind is "WHEEL_ANCHOR_FALLBACK" or "WHEEL_ANCHOR_CONFLICT" or "ROW_SCROLL_OVERSHOT_BLOCKED")) return empty;
+        var verifiedTargets = events.Where(e => e.Kind == "ITEM_TARGET_VERIFICATION"
+                && (e.Detail.Contains("kind=ChangedText", StringComparison.Ordinal)
+                    || e.Detail.Contains("kind=IdenticalNeighborRoundTrip", StringComparison.Ordinal)))
+            .Select(e => TryReadEventInt(e, "index", out var i) ? i : 0).ToHashSet();
+        var positions = new Dictionary<int, (int Row, int Column)>();
+        var used = new HashSet<(int Row, int Column)>();
+        var currentTop = 1;
+        var anchorTop = 0;
+        var wheelTop = 0;
+        foreach (var e in events)
+        {
+            if (e.Kind == "WHEEL_ANCHOR_DECISION")
+            {
+                if (!e.Detail.Contains("source=anchor", StringComparison.Ordinal)
+                    || !TryReadEventInt(e, "rowsAdvanced", out var rows) || rows != 1
+                    || !TryReadEventInt(e, "fromTop", out anchorTop) || anchorTop != currentTop) return empty;
+            }
+            else if (e.Kind == "ROW_SCROLL_DONE")
+            {
+                if (!TryReadEventInt(e, "fromTop", out wheelTop) || wheelTop != currentTop || anchorTop != currentTop) return empty;
+            }
+            else if (e.Kind == "OVERLAP_SCROLL_ACCEPTED")
+            {
+                if (!TryReadEventInt(e, "fromTop", out var from) || !TryReadEventInt(e, "toTop", out var to)
+                    || from != currentTop || to != currentTop + 1 || anchorTop != currentTop || wheelTop != currentTop) return empty;
+                currentTop = to;
+            }
+            else if (e.Kind == "CELL_TIMING" && TryReadEventInt(e, "index", out var index)
+                && TryReadEventInt(e, "logicalRow", out var row) && TryReadEventInt(e, "visualRow", out var visual))
+            {
+                var column = Regex.Match(e.Detail, @"\bcol=(\d+)/(\d+)");
+                if (!column.Success) return empty;
+                var col = int.Parse(column.Groups[1].Value, CultureInfo.InvariantCulture);
+                var columns = int.Parse(column.Groups[2].Value, CultureInfo.InvariantCulture);
+                if (row - visual + 1 != currentTop || visual is < 1 or > 4 || col < 1 || col > columns
+                    || positions.ContainsKey(index) || !used.Add((row, col))) return empty;
+                if (verifiedTargets.Contains(index)) positions[index] = (row, col);
+            }
+        }
+        // First-pair transactions do not emit CELL_TIMING for their two captures. New scanners
+        // also carry immutable, producer-verified positions through OCR and emit them here.
+        var explicitIndices = new HashSet<int>();
+        foreach (var e in events.Where(e => e.Kind == "ITEM_POSITION_VERIFIED"))
+        {
+            if (!TryReadEventInt(e, "index", out var index) || index < 1 || !explicitIndices.Add(index)
+                || !verifiedTargets.Contains(index) || !TryReadEventInt(e, "logicalRow", out var row)
+                || !TryReadEventInt(e, "column", out var col) || row < 1 || row > currentTop + 3 || col is < 1 or > 9) return empty;
+            if (positions.TryGetValue(index, out var prior))
+            {
+                if (prior != (row, col)) return empty;
+            }
+            else if (!used.Add((row, col))) return empty;
+            positions[index] = (row, col);
+        }
+        return positions;
+    }
+
+    private static ExportStats ReadExportStats(string exportFile, IReadOnlySet<int> verifiedIdenticalNeighborIndices,
+        IReadOnlyDictionary<int, (int Row, int Column)> verifiedPositions)
     {
         if (!File.Exists(exportFile))
         {
-            return new ExportStats(null, 0, 0, 0, 0, 0, 0, 0);
+            return new ExportStats(null, 0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         try
@@ -966,13 +1061,15 @@ public static class ScanBenchmark
             using var document = JsonDocument.Parse(File.ReadAllText(exportFile));
             if (document.RootElement.ValueKind != JsonValueKind.Array)
             {
-                return new ExportStats(null, 0, 0, 0, 0, 0, 0, 0);
+                return new ExportStats(null, 0, 0, 0, 0, 0, 0, 0, 0);
             }
 
             var itemCount = 0;
             var fingerprints = new Dictionary<string, int>(StringComparer.Ordinal);
+            var firstIndices = new Dictionary<string, int>(StringComparer.Ordinal);
             string? previousFingerprint = null;
             var verifiedAdjacentDuplicates = 0;
+            var verifiedPositionDuplicates = 0;
             var unverifiedDuplicates = 0;
             var slotOutOfRange = 0;
             var slotMainStatViolation = 0;
@@ -984,11 +1081,19 @@ public static class ScanBenchmark
                 var alreadySeen = fingerprints.ContainsKey(fingerprint);
                 if (alreadySeen)
                 {
-                    var verifiedAdjacent = string.Equals(previousFingerprint, fingerprint, StringComparison.Ordinal)
-                        && verifiedIdenticalNeighborIndices.Contains(itemCount);
+                    var adjacent = string.Equals(previousFingerprint, fingerprint, StringComparison.Ordinal);
+                    var verifiedAdjacent = adjacent && verifiedIdenticalNeighborIndices.Contains(itemCount);
                     if (verifiedAdjacent)
                     {
                         verifiedAdjacentDuplicates++;
+                    }
+                    // Adjacent identical items need neighbor round-trip evidence even with a verified position.
+                    else if (!adjacent
+                        && verifiedPositions.TryGetValue(itemCount, out var position)
+                        && verifiedPositions.TryGetValue(firstIndices[fingerprint], out var firstPosition)
+                        && position != firstPosition)
+                    {
+                        verifiedPositionDuplicates++;
                     }
                     else
                     {
@@ -997,6 +1102,7 @@ public static class ScanBenchmark
                 }
 
                 fingerprints[fingerprint] = fingerprints.TryGetValue(fingerprint, out var count) ? count + 1 : 1;
+                firstIndices.TryAdd(fingerprint, itemCount);
                 previousFingerprint = fingerprint;
                 var export = item.Deserialize<DriveDiscExport>(JsonDefaults.Read);
                 if (export is not null)
@@ -1027,6 +1133,7 @@ public static class ScanBenchmark
                 duplicateGroups,
                 duplicateItems,
                 verifiedAdjacentDuplicates,
+                verifiedPositionDuplicates,
                 unverifiedDuplicates,
                 slotOutOfRange,
                 slotMainStatViolation,
@@ -1034,7 +1141,7 @@ public static class ScanBenchmark
         }
         catch
         {
-            return new ExportStats(null, 0, 0, 0, 0, 0, 0, 0);
+            return new ExportStats(null, 0, 0, 0, 0, 0, 0, 0, 0);
         }
     }
 
@@ -1265,6 +1372,7 @@ public static class ScanBenchmark
         Write(prefix, "export_duplicate_groups", report.ExportDuplicateGroupCount);
         Write(prefix, "export_duplicate_items", report.ExportDuplicateItemCount);
         Write(prefix, "export_verified_adjacent_duplicates", report.ExportVerifiedAdjacentDuplicateCount);
+        Write(prefix, "export_verified_position_duplicates", report.ExportVerifiedPositionDuplicateCount);
         Write(prefix, "export_unverified_duplicates", report.ExportUnverifiedDuplicateCount);
         Write(prefix, "slot_out_of_range_count", report.SlotOutOfRangeCount);
         Write(prefix, "slot_mainstat_violation_count", report.SlotMainStatViolationCount);
@@ -1455,6 +1563,25 @@ public static class ScanBenchmark
 
     private static void WriteDiagnosis(ScanReport report)
     {
+        Write("current", "selection_anchor_mode", report.SelectionAnchorMode);
+        Write("current", "wheel_anchor_one_row_count", report.WheelAnchorOneRowCount);
+        Write("current", "wheel_anchor_fallback_count", report.WheelAnchorFallbackCount);
+        Write("current", "wheel_anchor_conflict_count", report.WheelAnchorConflictCount);
+        Write("current", "wheel_anchor_arm_count", report.WheelAnchorArmCount);
+        Write("current", "wheel_anchor_rescue_count", report.WheelAnchorRescueCount);
+        Write("current", "wheel_anchor_bottom_confirmed_count", report.WheelAnchorBottomCount);
+        Write("current", "wheel_anchor_baseline_count", report.WheelAnchorBaselineCount);
+        Write("current", "wheel_anchor_unavailable_count", report.WheelAnchorUnavailableCount);
+        WriteStats("current", "wheel_anchor_detect_ms", report.WheelAnchorDetect);
+        WriteStats("current", "wheel_anchor_release_samples", report.WheelAnchorReleaseSamples);
+        Write("acceptance", "wheel_anchor_detect_budget", !report.WheelAnchorDetect.HasData ? "skip" : report.WheelAnchorDetect.P90 <= 2 ? "pass" : "risk");
+        Write("acceptance", "wheel_anchor_arm_rate", report.WheelAnchorBaselineCount == 0 ? "skip"
+            : report.WheelAnchorArmCount * 10 <= report.WheelAnchorBaselineCount ? "pass" : "risk");
+        Write("acceptance", "selection_anchor_policy_valid", report.SelectionAnchorPolicyInvalid ? "risk" : "pass");
+        Write("acceptance", "wheel_anchor_accepts_explained", !report.AnchorVerify ? "skip" : report.AnchorAcceptsExplained ? "pass" : "fail");
+        Write("acceptance", "wheel_anchor_no_conflict", report.WheelAnchorConflictCount == 0 ? "pass" : "fail");
+        Write("acceptance", "wheel_anchor_shadow_agreement", !report.AnchorShadow ? "skip" : report.WheelAnchorDisagreementCount == 0 ? "pass" : "fail");
+        Write("acceptance", "wheel_anchor_no_fallback", !report.AnchorVerify ? "skip" : report.WheelAnchorFallbackCount == 0 ? "pass" : report.AnchorStrict ? "fail" : "risk");
         var panelHigh = report.PanelWait.HasData && report.PanelWait.Average >= 180;
         var scrollHigh = report.ClickAfterScroll.HasData
             && report.ClickSameRow.HasData
@@ -1675,6 +1802,10 @@ public static class ScanBenchmark
         var validNonLevel15Stop = report.EffectiveFullScanComplete
             && string.Equals(report.TerminationCode, "non_level_15_stop", StringComparison.OrdinalIgnoreCase);
         return report.LastFailed == 0
+            && report.WheelAnchorConflictCount == 0
+            && (!report.AnchorShadow || report.WheelAnchorDisagreementCount == 0)
+            && (!report.AnchorStrict || report.WheelAnchorFallbackCount == 0)
+            && (!report.AnchorVerify || report.AnchorAcceptsExplained)
             && report.ErrorFileCount == 0
             && report.ExportUnverifiedDuplicateCount == 0
             && report.SlotSafetyPass
@@ -1723,6 +1854,26 @@ public static class ScanBenchmark
 
     private sealed class ScanReport
     {
+        public string SelectionAnchorMode { get; set; } = "Off";
+        public int WheelAnchorConflictCount { get; set; }
+        public int WheelAnchorFallbackCount { get; set; }
+        public int WheelAnchorDisagreementCount { get; set; }
+        public int WheelAnchorAcceptedCount { get; set; }
+        public int WheelAnchorOneRowCount { get; set; }
+        public int WheelAnchorArmCount { get; set; }
+        public int WheelAnchorRescueCount { get; set; }
+        public int WheelAnchorBaselineCount { get; set; }
+        public int WheelAnchorBottomCount { get; set; }
+        public int WheelAnchorUnavailableCount { get; set; }
+        public bool SelectionAnchorPolicyInvalid { get; set; }
+        public Stats WheelAnchorDetect { get; set; }
+        public Stats WheelAnchorReleaseSamples { get; set; }
+        public int RowScrollDoneCount { get; set; }
+        public bool AnchorStrict => string.Equals(SelectionAnchorMode, "Strict", StringComparison.OrdinalIgnoreCase);
+        public bool AnchorShadow => string.Equals(SelectionAnchorMode, "Shadow", StringComparison.OrdinalIgnoreCase);
+        public bool AnchorVerify => AnchorStrict || string.Equals(SelectionAnchorMode, "Verify", StringComparison.OrdinalIgnoreCase);
+        public bool AnchorAcceptsExplained => WheelAnchorAcceptedCount == RowScrollDoneCount
+            && (!string.Equals(Traversal, "overlap-signature-page", StringComparison.OrdinalIgnoreCase) || RowScrollDoneCount == OverlapScrollAcceptedCount);
         public ScanReport(string scanDirectory)
         {
             ScanDirectory = scanDirectory;
@@ -1771,6 +1922,7 @@ public static class ScanBenchmark
         public int ExportDuplicateGroupCount { get; set; }
         public int ExportDuplicateItemCount { get; set; }
         public int ExportVerifiedAdjacentDuplicateCount { get; set; }
+        public int ExportVerifiedPositionDuplicateCount { get; set; }
         public int ExportUnverifiedDuplicateCount { get; set; }
         public int SlotOutOfRangeCount { get; set; }
         public int SlotMainStatViolationCount { get; set; }
@@ -1959,6 +2111,7 @@ public static class ScanBenchmark
         int DuplicateGroupCount,
         int DuplicateItemCount,
         int VerifiedAdjacentDuplicateCount,
+        int VerifiedPositionDuplicateCount,
         int UnverifiedDuplicateCount,
         int SlotOutOfRangeCount,
         int SlotMainStatViolationCount,

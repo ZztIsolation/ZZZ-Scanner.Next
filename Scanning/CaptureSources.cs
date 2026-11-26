@@ -612,6 +612,7 @@ internal sealed class DxgiDesktopCaptureSource : IWindowCaptureSource
 
 internal sealed class BitmapCapturedFrame : CapturedFrame
 {
+    internal Bitmap BorrowBitmap => _bitmap ?? throw new ObjectDisposedException(nameof(BitmapCapturedFrame));
     private readonly string _backendName;
     private Bitmap? _bitmap;
     private bool _bitmapTaken;

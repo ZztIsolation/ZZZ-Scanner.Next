@@ -1,5 +1,90 @@
 # Testing
 
+## 2026-11-26 1.0.51 最终重复保护修订复验
+
+恢复相邻同属性盘的邻格往返要求后，完成 1920×1080、96 DPI、本地 SDR 的最新代码真机复验：
+
+| 样本 | 导出数 | benchmark | 与已有全量基准的内容及顺序 | 耗时 |
+| --- | --- | --- | --- | --- |
+| `release-1.0.51/scan-200-1` | 200 | 0 | 前 200 件完全一致，missing=extra=0 | 79.446s |
+| `release-1.0.51/scan-200-2` | 200 | 0 | 前 200 件完全一致，missing=extra=0 | 74.614s |
+| `release-1.0.51/scan-full` | 990 | 0 | 990 件逐项一致，missing=extra=0 | 366.417s |
+
+三轮均请求 DXGI fast、使用 verify，实际均出现 DXGI→GDI 回退；扫描计时包含从当前列表位置回顶，因此不纳入固定起点、纯 DXGI 性能对照。每轮 `wheel_anchor_accepts_explained=pass`、未验证重复为 0；全量 `export_verified_position_duplicates=2`，原有两组同属性盘保留。对应原始日志、导出、benchmark 与逐项对账摘要位于本机 `Experiments/release-1.0.51/`，不上传个人库存。
+
+本地独立代码复核通过；Scanner 与 Helper Release 构建均零警告、零错误。回归首轮 74/75（既有 `relative row probe overhead` 为 5.87%，超过 5% 门槛），独立复跑 75/75（该值为 -4.53%）；未放宽性能断言。相邻同属性的正反例由回归覆盖，本次未改变游戏排序来构造相邻实物场景。
+
+本节为源码真机复验记录；正式 Actions 产物、Helper 安装启动链路与公开 manifest 的验收另行记录，不以本地扫描代替发布交付。
+
+## 2026-11-25–26 1.0.51 selection anchor（本地候选验收）
+
+基于 `scanner-1.0.49` / `ff90891`，工作分支 `test/1.0.51`；没有合并或 cherry-pick 1.0.50。Scanner 1.0.51、Helper 1.3.1、协议 v4。以下为本机真机及本地构建结果，不代表 GitHub CI 或正式发布。
+
+跨版本速度结论、同日对照与历史样本边界见 [速度对比](PERFORMANCE.md)。
+
+- 回归 **75/75**；Scanner、Helper Release 构建均 0 warning / 0 error。
+- 实测库存 **990 件**、DPI 96。三档分辨率的全量导出内容及顺序逐项一致，missing=extra=0。
+- 受控的最终 200 件矩阵：DXGI 请求 6 轮、GDI 2 轮，**8/8** 扫描与 benchmark correctness 通过，全部与全量基准的前 200 件一致；强制主动锚点另外 1/1 通过、20 次推进均主动建立锚点。
+
+| 客户区 | GDI / DXGI verify 探针 | 全量 | 最新回顶确认补测 |
+| --- | --- | --- | --- |
+| 1920×1080 | 各 30/30；各 80 次连续推进通过 | DXGI 请求 3 轮、GDI 1 轮均 990/990 | 3/3 初始探针及最终受控矩阵的回顶均通过 |
+| 1600×900 | 各 30/30；修正后 DXGI 连续 80/80 | DXGI 990/990 | GDI / DXGI 各 3/3，strict |
+| 1280×720 | 各 30/30 | DXGI 990/990 | GDI / DXGI 各 3/3，strict |
+
+这里的“DXGI 请求”不等于整轮一直使用 DXGI：部分运行出现既有的 DXGI→GDI 回退，日志明确保留，性能单独统计。最新回顶确认是在全量矩阵后增加，因此额外补了三档短探针与 200 件回归；没有将早期全量记录冒充为这一后续改动的全量复跑。
+
+固定起点性能对照（每轮先独立回到已验证顶部，再启动计时扫描；对照是 `off` 下保留的 1.0.49 wheel 判定）：
+
+| 实际截图路径 | 对照 / 候选有效样本 | 对照中位数 | 候选中位数 | 差异 |
+| --- | --- | --- | --- | --- |
+| 全程 DXGI | 2 / 4 | 60.047s | 60.426s | +0.63%，符合 +2% 目标 |
+| 中途回退 GDI | 1 / 2 | 60.721s | 65.710s | +8.22%；回退时点不同，仅列实测，不作为同后端提速结论 |
+
+另外两轮 GDI 普通模式为 83.864s、82.218s。强制主动锚点为 63.226s（只验证异常路径，不纳入常规性能目标）。指标以 `evidence-summary.json` / `bench-*.log` 的原始精度为准。
+
+### 正确性与异常路径
+
+- **同属性盘**：真实库存中 609/621 和 832/834 两组盘属性完全相同。通过锚点重新定位到不同格子并拍下详情，确认属于不同物品。保留同属性组计数；只有完整推进链、不同格子和目标切换证据共同成立，才归为 `export_verified_position_duplicates`。实时重复保护使用随截图传入 OCR 的不可变位置；同一格子重复读取即使 OCR 字段不同也拒绝。连续四行、36 张完全同属性盘的实时保护回归通过，首对事务的同属性 benchmark 用例也通过。
+- **相邻同属性仍需往返证据（2026-11-26 复核修订）**：已验证位置只证明点击了哪一格，不证明详情面板已刷新到该格。因此相邻两件完全相同时，即使有位置证据，也必须是 `IdenticalNeighborRoundTrip`（邻格往返）才接受，否则仍按 1.0.49 规则停止；不相邻的同属性盘只要位置不同即可保留。运行时重复保护与 benchmark 统计同步修订，回归 75/75 通过；后续最新代码的三轮真机复验见本文首节，相邻实物路径仍仅回归覆盖。
+- **回顶**：滑块顶部颜色/位置只完成粗判，第二行选中框在至少两次向上输入后未下移、内容及帧稳定、顶部标记成立才确认。若框下移则继续纠正；此时尚未入队 OCR，也未建立绝对位置。粗恢复最多两轮、总计 240 刻度，第二轮以 300ms 间隔减少吞输入；每次精确确认另限 6 次输入。单屏库存不滚动。
+- **观察到底**：`--debug-inventory-count-delta 9` 将 990 人为改报为 999，最终保留 990/990，返回 `partial=True, inventory_count_mismatch_at_observed_bottom`。`wheel_anchor_bottom_confirmed_count=1`；普通全量门禁按预期失败、benchmark 退出码 1，没有豁免或伪装成完整扫描。零位移必须另有轨道末端双帧证据。
+- **网页请求**：真实 WebSocket `scan_req`，携带旧 `native-edge-click`，正确记录覆盖为 wheel，使用 profile 默认 verify，流式输出 200 条，`partial=False`，benchmark 退出码 0。验证了 Scanner 的网页请求入口，未替换已安装的冻结 Helper。
+- **环境变量回退**：`ZZZ_SCANNER_SELECTION_ANCHOR=off` 覆盖 profile verify，`SelectionAnchorSource=env`，200 件通过，无 `WHEEL_ANCHOR_*` 事件。
+- **门禁落实**：缺失/重复推进证据、冲突、strict 回退、shadow 分歧均有退出码回归。相同属性的不同位置只有证据完整才通过，遗漏目标验证、重复格子、跳行或回退均不能借此放行。
+
+### 实测驱动的修订与保留失败
+
+- 旧 NativeEdgeClick 对照在 visited=38 时触发重复保护，只导出 35 件 partial；实际终止路径与最初设计的第一屏 Bottom 推断不同，以日志为准。
+- 旧四等分行签名的约 171px 采样间距与实际 175px 行距不一致，会把真实一行位移判为强 NoMove。锚点事务改用真实行距和卡片内部区域，off/回退保留原签名。
+- 900p 的分数行距又暴露 1px 栅格误差，增加 3×3 局部像素均值并纳入真实失败夹具回归。没有取消结构冲突保护。锚点路径的零位移也使用同一组行内容证据，避免旧稀疏网格的悬停差异使到底路径丢失末行。
+- 检测初值 70 分在合成四分之一行位移时仍可能给出 Unique，校准为 85；真实稳定夹具仍为 100 分。14 种颜色变换、遮挡、邻框、品质条、动画帧和缩放回归通过。
+- 1600×900 两组 shadow 对照各只有 15/30 次旧判定成功；另外各 15 次均有稳定锚点一行证据（wouldRescue=15），有效对照无分歧。verify 两组均 30/30。
+- 深列表曾耗尽旧回顶输入预算且拖动无效，保留失败记录后引入有界慢速重试。导航失败现在额外保存列表截图。
+- 11:29–11:30 的 `baseline-dxgi-2` / `candidate-dxgi-4` 标记为可能受外部输入干扰。用户确认可能操作了鼠标或滚轮；候选前 16 件与基准一致，第 17 件起发生未经程序滚轮触发的视口偏移。保留日志、partial 及截图，不纳入受控性能样本；`*-controlled` 复测均通过。
+
+### 证据与复跑
+
+原始证据在本机 `Experiments/selection-anchor/20261125/`（不入库）；代表性、仅含列表的裁剪图在 `Tests/Fixtures/SelectionAnchor/`。
+
+- 全量：`verify-full-dxgi-1`、`verify-full-gdi`、`verify-full-1600-fixed`、`verify-full-1280`、`final-full-dxgi-1`、`final-full-dxgi-2`。
+- 同属性定点复核：`duplicate-inspection/2026-11-25-23-54-13-502-p7b88-602a`；四张 `inventory-*.png` 同时包含选中格和详情。
+- 最终矩阵：`final-matrix-results.json`、`evidence-summary.json`、`bench-*.log`；所有失败样本仍在各自目录。
+- 到底异常：`debug-bottom-plus9-fixed/2026-11-26-10-28-50-016-p1c30-aec7`。
+- 网页入口：`web-entry/2026-11-26-11-19-10-725-p305c-da0d`、`web-scan-result.json`、`web-stream-items.json`。
+- 最新回顶：`top-anchor-initial`、`top-final-{1600,1280}-{gdi,dxgi}`。
+
+```powershell
+dotnet run --project Tests/ZZZ-Scanner.Next.RegressionTests.csproj -c Release -p:NuGetAudit=false
+dotnet build ZZZ-Scanner.Next.csproj -c Release --no-restore -p:NuGetAudit=false
+dotnet build Launcher/ZZZ-Scanner.Helper.csproj -c Release --no-restore -p:NuGetAudit=false
+dotnet bin/Release/net8.0-windows/ZZZ-Scanner.Next.dll --wheel-anchor-probe --runs 30 --selection-anchor verify --capture-mode dxgi
+dotnet bin/Release/net8.0-windows/ZZZ-Scanner.Next.dll --scan-once --max-items 0 --include-non15 --fast-mode --capture-mode dxgi
+```
+
+现场 HDR、云绝区零、非 96 DPI、1440p/4K 未专项验收。未触发发布流水线、未上传安装包、未更新生产 manifest。测试结束已恢复 1920×1080，关闭仅本次使用的 WebSocket 测试服务。
+
+
 ## 2026-08-01 1.0.49 NativeEdgeClick
 
 实现门禁：

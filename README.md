@@ -8,6 +8,12 @@ forward, clicking cells, scrolling the list, taking screenshots, and running
 PP-OCRv5 locally. It does not read game memory, inject code, install a game
 plug-in, or hook the game process.
 
+Version 1.0.51 uses wheel scrolling by default and verifies one-row advances by tracking the selected item's screen row. Bottom-row clicks no longer scroll in the current game. Use `--selection-anchor off` for the legacy wheel evaluator or `--selection-anchor strict` to require anchor evidence. See the [design](docs/design/1.0.51-selection-anchor.md) and [validation records](docs/TESTING.md).
+
+With verified anchor navigation, items with identical attributes remain separate when their inventory positions are verified. Two adjacent identical items additionally require the neighbor round-trip check, because a verified position does not prove the detail panel has refreshed. Re-reading the same cell, an unverified target change, or uncertain scrolling still stops the scan.
+
+Live validation covers local SDR clients at 1280×720, 1600×900, and 1920×1080 with 96 DPI. HDR, cloud streaming, other DPI settings, and 1440p/4K have not received dedicated live validation. In `verify` mode, unavailable anchors fall back to the legacy wheel evaluator. Overall speed is approximately unchanged from the same-day legacy wheel baseline; see the [performance comparison](docs/PERFORMANCE.md).
+
 The project contains:
 
 - the WinForms scanner;
@@ -299,9 +305,9 @@ Leave these at defaults for the first scan.
   safe fallback.
 - **GDI** is conservative. **DXGI** can be faster and falls back to GDI if
   initialization, frame acquisition, or monitor matching fails.
-- Scanner 1.0.49 advances rows by clicking the fourth visible row and accepting
-  a stable list change as one native game row. Use `--row-advance-mode wheel`
-  only when explicitly diagnosing the retained legacy fallback.
+- Scanner 1.0.51 uses wheel scrolling with selection-anchor verification.
+  `--selection-anchor off` selects the legacy wheel evaluator for diagnosis.
+  The old bottom-row click mode remains a CLI diagnostic option.
 - Debug screenshots and OCR shadow datasets can create many local files and are
   intended for diagnosis or model work.
 - Worker, batch, queue, and IntraOp values affect OCR throughput. Aggressive
